@@ -40,7 +40,7 @@ export class TwilioService {
       return {
         accountSid: sAccountSid,
         authToken: sAuthToken,
-        whatsappNumber: this.formatWhatsAppNumber(sWhatsAppNumber || envWhatsAppNumber || 'whatsapp:+14155238886'),
+        whatsappNumber: this.formatWhatsAppNumber(sWhatsAppNumber || envWhatsAppNumber),
         userPhoneNumber: this.normalizePhoneNumber(sUserPhone || envUserPhone),
         enforceSignature: settings.enforceTwilioSignature !== false,
         source: 'settings',
@@ -53,7 +53,7 @@ export class TwilioService {
       return {
         accountSid: envAccountSid,
         authToken: envAuthToken,
-        whatsappNumber: this.formatWhatsAppNumber(envWhatsAppNumber || sWhatsAppNumber || 'whatsapp:+14155238886'),
+        whatsappNumber: this.formatWhatsAppNumber(envWhatsAppNumber || sWhatsAppNumber),
         userPhoneNumber: this.normalizePhoneNumber(envUserPhone || sUserPhone),
         enforceSignature: settings.enforceTwilioSignature !== false,
         source: 'env',

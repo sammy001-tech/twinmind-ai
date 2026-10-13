@@ -1691,6 +1691,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             Connect TwinMind to WhatsApp via Twilio. Enter your Account SID, Auth Token, and WhatsApp Number. Chat naturally, trigger debates, and confirm decision outcomes from your phone.
           </p>
 
+          {/* Dynamic Webhook URL Card */}
+          <div className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
+            <div className="flex items-center justify-between text-[11px] font-medium text-slate-700 dark:text-slate-300">
+              <span>Dynamic Twilio Webhook URL:</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const dynamicUrl = `${window.location.origin}/api/twilio/whatsapp`;
+                  navigator.clipboard.writeText(dynamicUrl);
+                  setFeedbackToast('Dynamic Webhook URL copied to clipboard!');
+                  setTimeout(() => setFeedbackToast(null), 2500);
+                }}
+                className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline font-semibold"
+              >
+                Copy URL
+              </button>
+            </div>
+            <div className="font-mono text-[11px] text-slate-800 dark:text-slate-200 break-all bg-white dark:bg-slate-950 p-1.5 rounded border border-slate-200 dark:border-slate-800">
+              {typeof window !== 'undefined' ? `${window.location.origin}/api/twilio/whatsapp` : '/api/twilio/whatsapp'}
+            </div>
+          </div>
+
           {/* 3-Stage Diagnostic Results Card */}
           {twilioDiagnostic && (
             <div className="p-2.5 rounded-lg bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-800/40 text-xs space-y-2">
