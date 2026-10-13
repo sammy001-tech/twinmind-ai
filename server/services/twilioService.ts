@@ -167,20 +167,9 @@ export class TwilioService {
   }
 
   /**
-   * Helper to instantiate Twilio client supporting both Auth Token (AC...) and API Key (SK... + Secret)
+   * Helper to instantiate standard Twilio client
    */
   private getClient(config: ResolvedTwilioConfig) {
-    if (config.authToken.includes(':')) {
-      const [apiKey, apiSecret] = config.authToken.split(':');
-      return twilio(apiKey.trim(), apiSecret.trim(), { accountSid: config.accountSid });
-    }
-    if (config.authToken.startsWith('SK')) {
-      // AuthToken is API Key SID, check if there's an accountSid or secondary token
-      return twilio(config.authToken, config.accountSid, { accountSid: config.accountSid });
-    }
-    if (config.accountSid.startsWith('SK')) {
-      return twilio(config.accountSid, config.authToken);
-    }
     return twilio(config.accountSid, config.authToken);
   }
 
@@ -209,35 +198,6 @@ export class TwilioService {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[TwilioService] Failed to send WhatsApp message:', errorMsg);
       return { success: false, error: errorMsg };
-    }
-  }
-
-  /**
-   * Fetch recent incoming WhatsApp messages directly via Twilio REST API (Webhook alternative/fallback)
-   */
-  public async fetchRecentIncomingMessages(limit = 10): Promise<Array<{ sid: string; from: string; to: string; body: string; dateCreated: Date }>> {
-    const config = this.getResolvedConfig();
-    if (!config) return [];
-
-    try {
-      const client = this.getClient(config);
-      const messages = await client.messages.list({
-        to: config.whatsappNumber,
-        limit,
-      });
-
-      return messages
-        .filter((m) => m.from !== config.whatsappNumber && Boolean(m.body))
-        .map((m) => ({
-          sid: m.sid,
-          from: m.from,
-          to: m.to,
-          body: m.body || '',
-          dateCreated: m.dateCreated,
-        }));
-    } catch (err) {
-      console.error('[TwilioService] Failed to fetch recent incoming messages via REST API:', err);
-      return [];
     }
   }
 
@@ -275,20 +235,9 @@ export class TwilioService {
     // Stage 2: Validate API Auth against Twilio API
     try {
       const client = this.getClient(config);
-      if (config.accountSid.startsWith('SK') || config.authToken.startsWith('SK')) {
-        const accounts = await client.api.v2010.accounts.list({ limit: 1 });
-        if (accounts.length > 0) {
-          stage2AuthSuccess = true;
-          accountName = accounts[0].friendlyName || accounts[0].sid;
-        } else {
-          stage2AuthSuccess = true;
-          accountName = 'Twilio API Key Authorized';
-        }
-      } else {
-        const account = await client.api.v2010.accounts(config.accountSid).fetch();
-        stage2AuthSuccess = true;
-        accountName = account.friendlyName || account.sid;
-      }
+      const account = await client.api.v2010.accounts(config.accountSid).fetch();
+      stage2AuthSuccess = true;
+      accountName = account.friendlyName || account.sid;
     } catch (err: unknown) {
       lastError = err instanceof Error ? err.message : String(err);
       console.warn('[TwilioService] Diagnostic Stage 2 Auth Failed:', lastError);

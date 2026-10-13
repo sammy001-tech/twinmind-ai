@@ -160,58 +160,6 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
   }
 });
 
-// Twilio Manual REST API Polling Endpoint (Fallback for users without webhook configured)
-app.all('/api/twilio/poll', async (_req: Request, res: Response): Promise<void> => {
-  try {
-    const config = twilioService.getResolvedConfig();
-    if (!config) {
-      res.status(400).json({ success: false, error: 'Twilio is not configured.' });
-      return;
-    }
-
-    const recentMessages = await twilioService.fetchRecentIncomingMessages(15);
-    let newJobsEnqueued = 0;
-
-    for (const msg of recentMessages) {
-      if (!twilioService.isAuthorizedSender(msg.from)) {
-        continue;
-      }
-
-      const senderPhone = twilioService.normalizePhoneNumber(msg.from);
-      const payload = {
-        messageSid: msg.sid,
-        from: msg.from,
-        to: msg.to,
-        body: msg.body,
-        MessageSid: msg.sid,
-        From: msg.from,
-        To: msg.to,
-        Body: msg.body,
-      };
-
-      const { isDuplicate } = await jobQueueService.enqueueInboundJob(msg.sid, senderPhone, payload);
-      if (!isDuplicate) {
-        newJobsEnqueued++;
-      }
-    }
-
-    if (newJobsEnqueued > 0) {
-      whatsAppWorker.triggerImmediateProcessing();
-    }
-
-    res.json({
-      success: true,
-      fetchedCount: recentMessages.length,
-      newJobsEnqueued,
-      message: newJobsEnqueued > 0 
-        ? `Fetched and processed ${newJobsEnqueued} new WhatsApp message(s).`
-        : 'Checked Twilio REST API: No new incoming messages found.',
-    });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Twilio polling failed' });
-  }
-});
-
 // Live Multi-Model Status & Capabilities probe (Strict Zero-Fallback Policy)
 app.get('/api/models/status', (req: Request, res: Response) => {
   const groqKey = process.env.GROQ_API_KEY;

@@ -95,9 +95,11 @@ class SpecialistSwarmService {
   }
 
   private initAi() {
-    if (process.env.GEMINI_API_KEY) {
+    const rawKey = process.env.GEMINI_API_KEY || '';
+    const cleanKey = rawKey && !rawKey.trim().startsWith('AQ.') ? rawKey.trim() : '';
+    if (cleanKey) {
       this.ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
+        apiKey: cleanKey,
         httpOptions: {
           headers: {
             'User-Agent': 'aistudio-build-specialist-swarm',

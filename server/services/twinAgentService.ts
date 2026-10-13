@@ -315,7 +315,8 @@ class TwinAgentService {
     }
 
     // Provider 3: Google Gemini (Default / Fallback)
-    const geminiKey = options.customGeminiKey || s.customGeminiKey || process.env.GEMINI_API_KEY;
+    const sanitizeKey = (k?: string) => (k && !k.trim().startsWith('AQ.') ? k.trim() : '');
+    const geminiKey = sanitizeKey(options.customGeminiKey) || sanitizeKey(s.customGeminiKey) || sanitizeKey(process.env.GEMINI_API_KEY);
     if (!geminiKey) {
       throw new Error(`No valid API key found for provider "${effectiveProvider}". Please configure your API key in Settings.`);
     }

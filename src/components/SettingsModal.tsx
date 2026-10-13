@@ -183,7 +183,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [twilioTokenConfigured, setTwilioTokenConfigured] = useState(false);
 
   const [isTestingTwilio, setIsTestingTwilio] = useState(false);
-  const [isPollingTwilio, setIsPollingTwilio] = useState(false);
   const [twilioDiagnostic, setTwilioDiagnostic] = useState<{
     stage1Configured: boolean;
     stage2AuthSuccess: boolean;
@@ -198,27 +197,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   } | null>(null);
   const [twilioFeedback, setTwilioFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSavingTwilio, setIsSavingTwilio] = useState(false);
-
-  const handlePollTwilioMessages = async () => {
-    setIsPollingTwilio(true);
-    setTwilioFeedback(null);
-    try {
-      const res = await fetch('/api/twilio/poll');
-      const data = await res.json();
-      if (data.success) {
-        setTwilioFeedback({
-          type: 'success',
-          text: data.message || `Checked Twilio REST API: ${data.newJobsEnqueued} new message(s) processed.`,
-        });
-      } else {
-        setTwilioFeedback({ type: 'error', text: data.error || 'Failed to poll Twilio messages.' });
-      }
-    } catch (err: unknown) {
-      setTwilioFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Network error polling Twilio' });
-    } finally {
-      setIsPollingTwilio(false);
-    }
-  };
 
   const loadTwilioSettings = async () => {
     try {
@@ -1829,16 +1807,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </label>
             </div>
 
-            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handlePollTwilioMessages}
-                disabled={isPollingTwilio}
-                className="px-3 py-1 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-xs font-medium border border-indigo-500/20 transition disabled:opacity-50"
-                title="Fetch recent incoming WhatsApp messages directly from Twilio REST API without webhooks"
-              >
-                {isPollingTwilio ? 'Checking REST API...' : 'Check Unread Messages'}
-              </button>
+            <div className="flex items-center justify-end gap-2 pt-1">
               <button
                 type="button"
                 onClick={handleRunTwilioDiagnostic}
