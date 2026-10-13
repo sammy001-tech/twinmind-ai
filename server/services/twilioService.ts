@@ -35,12 +35,12 @@ export class TwilioService {
     const envUserPhone = (process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '').trim();
 
     // 1. Check Settings first
-    const hasSettingsConfig = Boolean(sAccountSid && sAuthToken && sWhatsAppNumber);
+    const hasSettingsConfig = Boolean(sAccountSid && sAuthToken);
     if (hasSettingsConfig) {
       return {
         accountSid: sAccountSid,
         authToken: sAuthToken,
-        whatsappNumber: this.formatWhatsAppNumber(sWhatsAppNumber),
+        whatsappNumber: this.formatWhatsAppNumber(sWhatsAppNumber || envWhatsAppNumber || 'whatsapp:+14155238886'),
         userPhoneNumber: this.normalizePhoneNumber(sUserPhone || envUserPhone),
         enforceSignature: settings.enforceTwilioSignature !== false,
         source: 'settings',
@@ -48,12 +48,12 @@ export class TwilioService {
     }
 
     // 2. Check Environment Variables second
-    const hasEnvConfig = Boolean(envAccountSid && envAuthToken && envWhatsAppNumber);
+    const hasEnvConfig = Boolean(envAccountSid && envAuthToken);
     if (hasEnvConfig) {
       return {
         accountSid: envAccountSid,
         authToken: envAuthToken,
-        whatsappNumber: this.formatWhatsAppNumber(envWhatsAppNumber),
+        whatsappNumber: this.formatWhatsAppNumber(envWhatsAppNumber || sWhatsAppNumber || 'whatsapp:+14155238886'),
         userPhoneNumber: this.normalizePhoneNumber(envUserPhone || sUserPhone),
         enforceSignature: settings.enforceTwilioSignature !== false,
         source: 'env',
@@ -167,6 +167,24 @@ export class TwilioService {
   }
 
   /**
+   * Helper to instantiate Twilio client supporting both Auth Token (AC...) and API Key (SK... + Secret)
+   */
+  private getClient(config: ResolvedTwilioConfig) {
+    if (config.authToken.includes(':')) {
+      const [apiKey, apiSecret] = config.authToken.split(':');
+      return twilio(apiKey.trim(), apiSecret.trim(), { accountSid: config.accountSid });
+    }
+    if (config.authToken.startsWith('SK')) {
+      // AuthToken is API Key SID, check if there's an accountSid or secondary token
+      return twilio(config.authToken, config.accountSid, { accountSid: config.accountSid });
+    }
+    if (config.accountSid.startsWith('SK')) {
+      return twilio(config.accountSid, config.authToken);
+    }
+    return twilio(config.accountSid, config.authToken);
+  }
+
+  /**
    * Send outbound WhatsApp message via Twilio REST API
    */
   public async sendWhatsAppMessage(to: string, body: string): Promise<{ success: boolean; messageSid?: string; error?: string }> {
@@ -176,7 +194,7 @@ export class TwilioService {
     }
 
     try {
-      const client = twilio(config.accountSid, config.authToken);
+      const client = this.getClient(config);
       const formattedTo = this.formatWhatsAppNumber(to);
 
       const message = await client.messages.create({
@@ -191,6 +209,35 @@ export class TwilioService {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[TwilioService] Failed to send WhatsApp message:', errorMsg);
       return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
+   * Fetch recent incoming WhatsApp messages directly via Twilio REST API (Webhook alternative/fallback)
+   */
+  public async fetchRecentIncomingMessages(limit = 10): Promise<Array<{ sid: string; from: string; to: string; body: string; dateCreated: Date }>> {
+    const config = this.getResolvedConfig();
+    if (!config) return [];
+
+    try {
+      const client = this.getClient(config);
+      const messages = await client.messages.list({
+        to: config.whatsappNumber,
+        limit,
+      });
+
+      return messages
+        .filter((m) => m.from !== config.whatsappNumber && Boolean(m.body))
+        .map((m) => ({
+          sid: m.sid,
+          from: m.from,
+          to: m.to,
+          body: m.body || '',
+          dateCreated: m.dateCreated,
+        }));
+    } catch (err) {
+      console.error('[TwilioService] Failed to fetch recent incoming messages via REST API:', err);
+      return [];
     }
   }
 
@@ -227,10 +274,21 @@ export class TwilioService {
 
     // Stage 2: Validate API Auth against Twilio API
     try {
-      const client = twilio(config.accountSid, config.authToken);
-      const account = await client.api.v2010.accounts(config.accountSid).fetch();
-      stage2AuthSuccess = true;
-      accountName = account.friendlyName;
+      const client = this.getClient(config);
+      if (config.accountSid.startsWith('SK') || config.authToken.startsWith('SK')) {
+        const accounts = await client.api.v2010.accounts.list({ limit: 1 });
+        if (accounts.length > 0) {
+          stage2AuthSuccess = true;
+          accountName = accounts[0].friendlyName || accounts[0].sid;
+        } else {
+          stage2AuthSuccess = true;
+          accountName = 'Twilio API Key Authorized';
+        }
+      } else {
+        const account = await client.api.v2010.accounts(config.accountSid).fetch();
+        stage2AuthSuccess = true;
+        accountName = account.friendlyName || account.sid;
+      }
     } catch (err: unknown) {
       lastError = err instanceof Error ? err.message : String(err);
       console.warn('[TwilioService] Diagnostic Stage 2 Auth Failed:', lastError);

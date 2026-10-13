@@ -10,7 +10,18 @@
   "voice": "Zephyr",
   "userName": "Olalekan",
   "nickname": "꧁𖣘𝕆𝕃𝔸𝕃𝔼𝕂𝔸ℕ",
+  "customGeminiKey": "AQ.Ab8RN6IUzQfBg1IZB0f0D9_ZehBDDueX4rbVlI6PelAC-oIVuw",
   "customGroqKey": "",
   "customMistralKey": "",
-  "customTavilyKey": ""
+  "customTavilyKey": "",
+  "autoPlayVoice": false,
+  "voiceSpeed": 1,
+  "customPrompts": [],
+  "activeThreadId": "thread-1791915425731",
+  "twilioAccountSid": "",
+  "twilioAuthToken": "",
+  "twilioWhatsAppNumber": "",
+  "userPhoneNumber": "",
+  "enableWhatsAppAlerts": false,
+  "enforceTwilioSignature": true
 }
