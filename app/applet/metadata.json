@@ -1,0 +1,6 @@
+{
+  "name": "TWINMIND — AI DIGITAL TWIN & SECOND BRAIN",
+  "description": "TWINMIND: Live personal digital twin and second brain, faithfully representing communication style, values, and practical reasoning.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

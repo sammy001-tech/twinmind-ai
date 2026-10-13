@@ -1,0 +1,16 @@
+{
+  "brandName": "TwinMind AI",
+  "activeProvider": "gemini",
+  "activeModel": "gemini-3.5-flash-lite",
+  "providerModels": {
+    "gemini": "gemini-3.5-flash-lite",
+    "groq": "openai/gpt-oss-120b",
+    "mistral": "ministral-14b-latest"
+  },
+  "voice": "Zephyr",
+  "userName": "Olalekan",
+  "nickname": "꧁𖣘𝕆𝕃𝔸𝕃𝔼𝕂𝔸ℕ",
+  "customGroqKey": "",
+  "customMistralKey": "",
+  "customTavilyKey": ""
+}
