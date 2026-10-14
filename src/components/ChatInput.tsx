@@ -24,7 +24,8 @@ interface ChatInputProps {
     requestAudio?: boolean,
     audioData?: { mimeType: string; data: string },
     baseMessages?: any,
-    useSwarm?: boolean
+    useSwarm?: boolean,
+    imageData?: { mimeType: string; data: string; name?: string }
   ) => void;
   isLoading: boolean;
   channel: ChannelType;
@@ -51,6 +52,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [isToolMenuOpen, setIsToolMenuOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [selectedImage, setSelectedImage] = useState<{
+    mimeType: string;
+    data: string;
+    name: string;
+    previewUrl: string;
+  } | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -140,9 +147,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!text.trim() || isLoading) return;
-    onSendMessage(text.trim(), requestVoiceNote, undefined, undefined, swarmMode);
+    if ((!text.trim() && !selectedImage) || isLoading) return;
+    
+    const sendContent = text.trim() || (selectedImage ? `Please analyze this uploaded photo/image (${selectedImage.name}):` : '');
+    const imagePayload = selectedImage ? { mimeType: selectedImage.mimeType, data: selectedImage.data, name: selectedImage.name } : undefined;
+
+    onSendMessage(sendContent, requestVoiceNote, undefined, undefined, swarmMode, imagePayload);
     setText('');
+    setSelectedImage(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -165,24 +177,40 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const file = files[0];
-    const reader = new FileReader();
-    reader.onload = () => {
-      const content = reader.result as string;
-      setText((prev) => (prev ? `${prev}\n\n[Attached File: ${file.name}]\n${content.slice(0, 500)}` : `Analyze this file content:\n\nFilename: ${file.name}\n${content.slice(0, 1000)}`));
-    };
-    reader.readAsText(file);
+
+    if (file.type.startsWith('image/')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const resultStr = reader.result as string;
+        const base64Data = resultStr.split(',')[1];
+        setSelectedImage({
+          mimeType: file.type,
+          data: base64Data,
+          name: file.name,
+          previewUrl: resultStr,
+        });
+      };
+      reader.readAsDataURL(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const content = reader.result as string;
+        setText((prev) => (prev ? `${prev}\n\n[Attached File: ${file.name}]\n${content.slice(0, 500)}` : `Analyze this file content:\n\nFilename: ${file.name}\n${content.slice(0, 1000)}`));
+      };
+      reader.readAsText(file);
+    }
     setIsToolMenuOpen(false);
   };
 
   return (
     <div className="w-full max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 sticky bottom-0 z-20">
-      {/* Hidden File Input */}
+      {/* Hidden File Input supporting photos, images, and text documents */}
       <input
         type="file"
         ref={fileInputRef}
         onChange={handleFileUpload}
         className="hidden"
-        accept=".txt,.md,.json,.csv,.js,.ts,.tsx,.py"
+        accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.json,.csv,.js,.ts,.tsx,.py"
       />
 
       {/* Recording Overlay Bar */}
@@ -214,6 +242,27 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       {/* Floating Composer Container */}
       <div className="relative bg-white/95 dark:bg-slate-900/95 border border-slate-200/90 dark:border-slate-800/90 rounded-2xl shadow-xl dark:shadow-2xl backdrop-blur-xl transition-all focus-within:border-amber-500/50 focus-within:ring-1 focus-within:ring-amber-500/30">
         
+        {/* Attached Image/Photo Preview Chip */}
+        {selectedImage && (
+          <div className="pt-2.5 px-3.5 flex items-center justify-between">
+            <div className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs">
+              <img src={selectedImage.previewUrl} alt="Preview" className="w-8 h-8 rounded-lg object-cover border border-amber-500/50" />
+              <div className="flex flex-col">
+                <span className="font-semibold truncate max-w-[160px] text-xs">{selectedImage.name}</span>
+                <span className="text-[10px] text-amber-500 font-medium">Photo Attached (Gemini Vision Ready)</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedImage(null)}
+              className="text-slate-400 hover:text-red-500 p-1 rounded-lg transition"
+              title="Remove attached photo"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         {/* Active Mode Badge Chip above text input */}
         {swarmMode && (
           <div className="pt-2.5 px-3.5 flex items-center justify-between">
@@ -281,8 +330,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     }}
                     className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
                   >
+                    <Camera className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+                    <span className="font-medium">Upload Photo or Image</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      fileInputRef.current?.click();
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
+                  >
                     <Paperclip className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
-                    <span>Upload File or Document</span>
+                    <span>Upload Document File</span>
                   </button>
 
                   {onOpenKnowledgeVault && (

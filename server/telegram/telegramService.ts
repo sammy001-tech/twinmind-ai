@@ -1059,9 +1059,141 @@ class TelegramBotManager {
           // Fallback if raw text contains unmatched markdown formatting
           await ctx.reply(responseText, { reply_markup: keyboard });
         }
+
+        // Deliver generated files (PDFs, Excel .xlsx, CSV, Markdown) directly to Telegram chat
+        await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
       } catch (err: unknown) {
         this.log('error', `Chat generation error: ${err instanceof Error ? err.message : String(err)}`);
         await ctx.reply(`⚠️ ${err instanceof Error ? err.message : 'Error generating response.'}`);
+      }
+    });
+
+    // Handle photo / image uploads sent by the user on Telegram (Multimodal support)
+    bot.on('message:photo', async (ctx) => {
+      try {
+        const from = ctx.from;
+        if (!from || (this.config.ownerId !== null && this.config.ownerId !== from.id)) {
+          await ctx.reply('🔒 Unauthorized. Pair your account with /start first.');
+          return;
+        }
+
+        await ctx.replyWithChatAction('typing');
+
+        const photos = ctx.message.photo;
+        if (!photos || photos.length === 0) return;
+        const highestResPhoto = photos[photos.length - 1];
+
+        const file = await ctx.api.getFile(highestResPhoto.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${this.config.token}/${file.file_path}`;
+
+        const imgRes = await fetch(fileUrl);
+        const arrayBuffer = await imgRes.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const base64Data = buffer.toString('base64');
+        const caption = (ctx.message.caption || '').trim();
+
+        const turnResult = await twinAgentService.executeTurn({
+          userPrompt: caption,
+          imageData: {
+            mimeType: 'image/jpeg',
+            data: base64Data,
+            name: 'telegram_uploaded_photo.jpg',
+          },
+          channel: 'telegram',
+          conversationHistory: this.conversationHistory,
+          userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+          providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
+          modelOverride: this.config.activeModel || undefined,
+        });
+
+        const responseText = turnResult.reply;
+        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]' });
+        this.conversationHistory.push({ role: 'assistant', content: responseText });
+        this.recordSyncedMessage('assistant', responseText);
+
+        try {
+          await ctx.reply(responseText, { parse_mode: 'Markdown' });
+        } catch {
+          await ctx.reply(responseText);
+        }
+
+        await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
+      } catch (err: unknown) {
+        this.log('error', `Photo message handling error: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`⚠️ Failed to analyze photo: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+
+    // Handle document / file uploads sent by the user on Telegram
+    bot.on('message:document', async (ctx) => {
+      try {
+        const from = ctx.from;
+        if (!from || (this.config.ownerId !== null && this.config.ownerId !== from.id)) {
+          await ctx.reply('🔒 Unauthorized. Pair your account with /start first.');
+          return;
+        }
+
+        await ctx.replyWithChatAction('typing');
+
+        const doc = ctx.message.document;
+        if (!doc) return;
+
+        const file = await ctx.api.getFile(doc.file_id);
+        const fileUrl = `https://api.telegram.org/file/bot${this.config.token}/${file.file_path}`;
+
+        const docRes = await fetch(fileUrl);
+        const arrayBuffer = await docRes.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const mimeType = doc.mime_type || 'application/octet-stream';
+        const caption = (ctx.message.caption || '').trim();
+
+        let turnResult: any;
+
+        if (mimeType.startsWith('image/')) {
+          turnResult = await twinAgentService.executeTurn({
+            userPrompt: caption,
+            imageData: {
+              mimeType,
+              data: buffer.toString('base64'),
+              name: doc.file_name || 'uploaded_image',
+            },
+            channel: 'telegram',
+            conversationHistory: this.conversationHistory,
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
+            modelOverride: this.config.activeModel || undefined,
+          });
+        } else {
+          const fileText = buffer.toString('utf-8').slice(0, 15000);
+          const prompt = caption
+            ? `File content (${doc.file_name}):\n\n${fileText}\n\nUser request: ${caption}`
+            : `Analyze this uploaded document (${doc.file_name}):\n\n${fileText}`;
+
+          turnResult = await twinAgentService.executeTurn({
+            userPrompt: prompt,
+            channel: 'telegram',
+            conversationHistory: this.conversationHistory,
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
+            modelOverride: this.config.activeModel || undefined,
+          });
+        }
+
+        const responseText = turnResult.reply;
+        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Document ${doc.file_name}]: ${caption}` : `[Uploaded Document ${doc.file_name}]` });
+        this.conversationHistory.push({ role: 'assistant', content: responseText });
+        this.recordSyncedMessage('assistant', responseText);
+
+        try {
+          await ctx.reply(responseText, { parse_mode: 'Markdown' });
+        } catch {
+          await ctx.reply(responseText);
+        }
+
+        await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
+      } catch (err: unknown) {
+        this.log('error', `Document handling error: ${err instanceof Error ? err.message : String(err)}`);
+        await ctx.reply(`⚠️ Failed to process document: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
 
@@ -1159,6 +1291,39 @@ class TelegramBotManager {
     });
   }
 
+  /**
+   * Helper method to send generated artifact documents (PDFs, Excel .xlsx, CSV, Markdown) to Telegram chat
+   */
+  private async sendGeneratedArtifactsToTelegram(ctx: any, toolsExecuted?: any[]) {
+    if (!toolsExecuted || !Array.isArray(toolsExecuted)) return;
+
+    for (const tool of toolsExecuted) {
+      if (tool.toolName === 'generateArtifact' && tool.result && (tool.result.fileName || tool.result.filePath)) {
+        try {
+          const fileName = tool.result.fileName || path.basename(tool.result.filePath || '');
+          const cleanName = path.basename(fileName);
+          const fullPath = tool.result.filePath && fs.existsSync(tool.result.filePath)
+            ? tool.result.filePath
+            : path.join(process.cwd(), 'public', 'artifacts', cleanName);
+
+          if (fs.existsSync(fullPath)) {
+            const isExcel = cleanName.endsWith('.xlsx') || cleanName.endsWith('.xls');
+            const isPdf = cleanName.endsWith('.pdf');
+            const label = isExcel ? 'Excel Workbook' : isPdf ? 'PDF Document' : 'Document';
+
+            await ctx.replyWithDocument(new InputFile(fullPath, cleanName), {
+              caption: `📄 *Generated ${label}*: \`${cleanName}\``,
+              parse_mode: 'Markdown',
+            });
+            this.log('info', `Sent generated artifact "${cleanName}" to Telegram.`);
+          }
+        } catch (docErr) {
+          console.warn('[TelegramBot] Failed sending generated document:', docErr);
+        }
+      }
+    }
+  }
+
   private recordSyncedMessage(sender: 'user' | 'assistant', text: string, isVoice = false) {
     this.syncedMessages.unshift({
       id: `tg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -1229,6 +1394,25 @@ class TelegramBotManager {
       console.warn('Voice synthesis buffer error:', err);
     }
     return null;
+  }
+
+  /**
+   * Send a proactive alert message to the paired owner.
+   */
+  public async sendProactiveMessage(text: string): Promise<boolean> {
+    if (!this.bot || !this.isRunning || !this.config.ownerId) {
+      console.warn('[TelegramBot] Cannot send proactive message: bot not running or owner not paired.');
+      return false;
+    }
+
+    try {
+      await this.bot.api.sendMessage(this.config.ownerId, text, { parse_mode: 'Markdown' });
+      this.log('info', `Proactive message sent to owner ID ${this.config.ownerId}`);
+      return true;
+    } catch (err) {
+      console.error('[TelegramBot] Failed to send proactive message:', err);
+      return false;
+    }
   }
 }
 

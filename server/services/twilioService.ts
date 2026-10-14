@@ -175,8 +175,20 @@ export class TwilioService {
 
   /**
    * Send outbound WhatsApp message via Twilio REST API
+   * Ensures non-empty body or media attachment to prevent Twilio errors.
    */
-  public async sendWhatsAppMessage(to: string, body: string): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+  public async sendWhatsAppMessage(
+    to: string,
+    bodyText?: string,
+    mediaUrl?: string | string[]
+  ): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+    const safeBody = (bodyText || '').trim();
+
+    if (!safeBody && !mediaUrl) {
+      console.warn(`[TwilioService] Skipping WhatsApp send to ${to}: message body and mediaUrl are empty.`);
+      return { success: false, error: 'Message body or mediaUrl must be provided.' };
+    }
+
     const config = this.getResolvedConfig();
     if (!config) {
       return { success: false, error: 'Twilio is not configured.' };
@@ -186,10 +198,13 @@ export class TwilioService {
       const client = this.getClient(config);
       const formattedTo = this.formatWhatsAppNumber(to);
 
+      const mediaArray = mediaUrl ? (Array.isArray(mediaUrl) ? mediaUrl : [mediaUrl]) : undefined;
+
       const message = await client.messages.create({
         from: config.whatsappNumber,
         to: formattedTo,
-        body,
+        body: safeBody || ' ',
+        ...(mediaArray && mediaArray.length > 0 ? { mediaUrl: mediaArray } : {}),
       });
 
       console.log(`[TwilioService] Outbound WhatsApp message sent to ${formattedTo}. SID: ${message.sid}`);

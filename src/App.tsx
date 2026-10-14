@@ -90,9 +90,9 @@ export default function App() {
     mistral: string;
   }>(
     initialCached.providerModels || {
-      gemini: 'gemini-3.5-flash-lite',
-      groq: 'openai/gpt-oss-120b',
-      mistral: 'ministral-14b-latest',
+      gemini: 'gemini-1.5-flash',
+      groq: 'llama-3.3-70b-versatile',
+      mistral: 'mistral-large-latest',
     }
   );
 
@@ -264,6 +264,7 @@ export default function App() {
             createdAt: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
             channel: m.channel,
             modelInfo: m.provider || m.model ? { provider: m.provider || 'gemini', model: m.model || '' } : undefined,
+            artifacts: m.metadata?.artifacts || [],
           }));
           setMessages(loaded);
           setActiveThreadId(threadId);
@@ -493,9 +494,10 @@ export default function App() {
     requestAudio: boolean = false,
     audioData?: { mimeType: string; data: string },
     baseMessages: ChatMessage[] = messages,
-    useSwarm?: boolean
+    useSwarm?: boolean,
+    imageData?: { mimeType: string; data: string; name?: string }
   ) => {
-    if ((!text.trim() && !audioData) || isLoading) return;
+    if ((!text.trim() && !audioData && !imageData) || isLoading) return;
 
     setActiveTab('chat');
     setErrorMessage(null);
@@ -507,11 +509,12 @@ export default function App() {
       syncSettingsToServer({ activeThreadId: currentThreadId });
     }
 
-    const userMsg: ChatMessage & { audioData?: { mimeType: string; data: string } } = {
+    const userMsg: ChatMessage = {
       id: `user-${now}`,
       role: 'user',
       content: text,
       audioData,
+      imageData,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       createdAt: now,
       channel,
@@ -547,7 +550,12 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: newMessages.map((m: any) => ({ role: m.role, content: m.content, audioData: m.audioData })),
+          messages: newMessages.map((m: any) => ({
+            role: m.role,
+            content: m.content,
+            audioData: m.audioData,
+            imageData: m.imageData,
+          })),
           channel,
           userName,
           nickname,
@@ -606,10 +614,18 @@ export default function App() {
               }
               // Model info metadata
               if (parsed.meta) {
-                ensureAssistantMessage({ modelInfo: parsed.meta });
+                const { artifacts, ...modelInfo } = parsed.meta;
+                ensureAssistantMessage({ 
+                  ...(modelInfo.provider ? { modelInfo } : {}),
+                  ...(artifacts ? { artifacts } : {})
+                });
                 setMessages((prev) =>
                   prev.map((msg) =>
-                    msg.id === assistantId ? { ...msg, modelInfo: parsed.meta } : msg
+                    msg.id === assistantId ? { 
+                      ...msg, 
+                      ...(modelInfo.provider ? { modelInfo } : {}),
+                      ...(artifacts ? { artifacts } : {})
+                    } : msg
                   )
                 );
               }

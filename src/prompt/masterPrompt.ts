@@ -129,6 +129,8 @@ export interface BuildPromptOptions {
   selectedVoice?: string;
   recalledKnowledge?: Array<{ title: string; content: string; category?: string; similarity?: number }>;
   activeThreadTitle?: string;
+  learnedContext?: string;
+  calibrationContext?: string;
 }
 
 export function buildSystemPrompt(
@@ -144,6 +146,8 @@ export function buildSystemPrompt(
   let selectedVoice = 'Fenrir';
   let recalledKnowledge: Array<{ title: string; content: string; category?: string; similarity?: number }> = [];
   let activeThreadTitle = '';
+  let learnedContext = '';
+  let calibrationContext = '';
 
   if (typeof channelOrOptions === 'object' && channelOrOptions !== null) {
     channel = channelOrOptions.channel || 'web';
@@ -154,6 +158,8 @@ export function buildSystemPrompt(
     selectedVoice = channelOrOptions.selectedVoice || 'Fenrir';
     recalledKnowledge = channelOrOptions.recalledKnowledge || [];
     activeThreadTitle = channelOrOptions.activeThreadTitle || '';
+    learnedContext = channelOrOptions.learnedContext || '';
+    calibrationContext = channelOrOptions.calibrationContext || '';
   } else if (typeof channelOrOptions === 'string') {
     channel = channelOrOptions;
   }
@@ -226,5 +232,5 @@ ${INTELLECTUAL_PARTNERSHIP_PROTOCOL}`;
 - When working through deep strategic or practical questions with ${preferredName}, provide clear reasoning, trade-offs, and practical next steps while maintaining a grounded, human voice.`;
   }
 
-  return `${MASTER_SYSTEM_PROMPT}${userContextDirective}${threadDirective}${knowledgeDirective}${twinDirective}${channelDirective}`;
+  return `${MASTER_SYSTEM_PROMPT}${userContextDirective}${threadDirective}${knowledgeDirective}${twinDirective}${channelDirective}${learnedContext}${calibrationContext}`;
 }

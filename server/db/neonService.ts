@@ -49,9 +49,6 @@ export interface ChatThreadRecord {
   last_message?: string;
 }
 
-const CONFIG_PATH = path.resolve(process.cwd(), 'db-config.json');
-const THREADS_BACKUP_PATH = path.resolve(process.cwd(), 'twin-threads.json');
-
 class NeonDatabaseService {
   private pool: Pool | null = null;
   private currentUrl: string | null = null;
@@ -72,18 +69,6 @@ class NeonDatabaseService {
   public getActiveUrl(): { url: string | null; source: 'environment' | 'settings' | 'none' } {
     if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim()) {
       return { url: process.env.DATABASE_URL.trim(), source: 'environment' };
-    }
-
-    if (fs.existsSync(CONFIG_PATH)) {
-      try {
-        const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (parsed.databaseUrl && typeof parsed.databaseUrl === 'string' && parsed.databaseUrl.trim()) {
-          return { url: parsed.databaseUrl.trim(), source: 'settings' };
-        }
-      } catch (err) {
-        console.warn('[NeonDB] Error reading db-config.json:', err);
-      }
     }
 
     return { url: null, source: 'none' };
@@ -239,6 +224,32 @@ class NeonDatabaseService {
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS twin_jobs (
+          id VARCHAR(64) PRIMARY KEY,
+          message_sid VARCHAR(128) UNIQUE,
+          sender_phone VARCHAR(32),
+          channel VARCHAR(32) DEFAULT 'whatsapp',
+          status VARCHAR(20) DEFAULT 'pending',
+          worker_lease_id VARCHAR(64),
+          last_heartbeat_at TIMESTAMP WITH TIME ZONE,
+          attempt_count INTEGER DEFAULT 0,
+          payload JSONB NOT NULL,
+          result JSONB,
+          error TEXT,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS persona_memories (
+          id SERIAL PRIMARY KEY,
+          category VARCHAR(32) NOT NULL, -- 'preference', 'opinion', 'correction', 'feedback'
+          content TEXT NOT NULL,
+          priority INTEGER DEFAULT 1,
+          metadata JSONB DEFAULT '{}',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
         CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
         CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at DESC);
@@ -246,6 +257,8 @@ class NeonDatabaseService {
         CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_experiments_decision ON decision_experiments(decision_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_user_key ON decision_reviews (user_email, idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_persona_memories_category ON persona_memories(category);
+        CREATE INDEX IF NOT EXISTS idx_persona_memories_created ON persona_memories(created_at DESC);
       `);
 
       // Initialize pgvector extension for Neon vector knowledge search
@@ -345,20 +358,12 @@ class NeonDatabaseService {
   }
 
   /**
-   * Save database URL to private settings (Hybrid option)
+   * Save database URL to private settings (Environment variable is preferred)
    */
   public async saveConfigUrl(url: string): Promise<{ success: boolean; message: string }> {
     const trimmed = (url || '').trim();
 
     if (!trimmed) {
-      // Clear configuration
-      if (fs.existsSync(CONFIG_PATH)) {
-        try {
-          fs.unlinkSync(CONFIG_PATH);
-        } catch (err) {
-          console.warn('[NeonDB] Error removing db-config.json:', err);
-        }
-      }
       await this.refreshConnection();
       return { success: true, message: 'Database configuration cleared.' };
     }
@@ -369,20 +374,7 @@ class NeonDatabaseService {
       return { success: false, message: `Connection test failed: ${testResult.message}` };
     }
 
-    try {
-      fs.writeFileSync(
-        CONFIG_PATH,
-        JSON.stringify({ databaseUrl: trimmed, updatedAt: new Date().toISOString() }, null, 2),
-        'utf-8'
-      );
-      await this.refreshConnection();
-      return { success: true, message: 'Neon Database connected and saved successfully.' };
-    } catch (err: unknown) {
-      return {
-        success: false,
-        message: err instanceof Error ? err.message : 'Failed to save configuration file',
-      };
-    }
+    return { success: false, message: 'Database URL can only be set via DATABASE_URL environment variable for security and zero-hardcoding compliance.' };
   }
 
   /**
@@ -521,23 +513,13 @@ class NeonDatabaseService {
           }));
         }
       } catch (err) {
-        console.warn('[NeonDB] Error fetching threads from DB, using backup:', err);
+        console.warn('[NeonDB] Error fetching threads from DB:', err);
       }
     }
 
-    // Local disk backup
-    try {
-      if (fs.existsSync(THREADS_BACKUP_PATH)) {
-        const raw = fs.readFileSync(THREADS_BACKUP_PATH, 'utf-8');
-        return JSON.parse(raw);
-      }
-    } catch (e) {}
     return [];
   }
 
-  /**
-   * Save or update a chat thread
-   */
   public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<void> {
     const channel = thread.channel || 'web';
     if (this.pool && this.isConnected) {
@@ -552,35 +534,8 @@ class NeonDatabaseService {
         console.error('[NeonDB] Error saving thread to DB:', err);
       }
     }
-
-    // Save to local backup
-    try {
-      let threads: ChatThreadRecord[] = [];
-      if (fs.existsSync(THREADS_BACKUP_PATH)) {
-        threads = JSON.parse(fs.readFileSync(THREADS_BACKUP_PATH, 'utf-8'));
-      }
-      const existingIdx = threads.findIndex((t) => t.id === thread.id);
-      const now = new Date().toISOString();
-      if (existingIdx >= 0) {
-        threads[existingIdx].title = thread.title;
-        threads[existingIdx].updated_at = now;
-      } else {
-        threads.unshift({
-          id: thread.id,
-          title: thread.title,
-          channel,
-          created_at: now,
-          updated_at: now,
-          message_count: 0,
-        });
-      }
-      fs.writeFileSync(THREADS_BACKUP_PATH, JSON.stringify(threads.slice(0, 50), null, 2), 'utf-8');
-    } catch (e) {}
   }
 
-  /**
-   * Delete thread and all its messages
-   */
   public async deleteThread(threadId: string): Promise<void> {
     if (this.pool && this.isConnected) {
       try {
@@ -590,14 +545,6 @@ class NeonDatabaseService {
         console.error('[NeonDB] Error deleting thread from DB:', err);
       }
     }
-
-    try {
-      if (fs.existsSync(THREADS_BACKUP_PATH)) {
-        const threads: ChatThreadRecord[] = JSON.parse(fs.readFileSync(THREADS_BACKUP_PATH, 'utf-8'));
-        const filtered = threads.filter((t) => t.id !== threadId);
-        fs.writeFileSync(THREADS_BACKUP_PATH, JSON.stringify(filtered, null, 2), 'utf-8');
-      }
-    } catch (e) {}
   }
 
   /**
@@ -1247,6 +1194,184 @@ class NeonDatabaseService {
       );
     } catch (err) {
       console.warn('[NeonDB] Error logging event:', err);
+    }
+  }
+
+  // ==========================================
+  // Job Queue Persistence Methods
+  // ==========================================
+
+  public async getJobByMessageSid(messageSid: string): Promise<any | null> {
+    if (!this.pool || !this.isConnected || !messageSid) return null;
+    try {
+      const res = await this.pool.query('SELECT * FROM twin_jobs WHERE message_sid = $1 LIMIT 1', [messageSid]);
+      return res.rows[0] || null;
+    } catch (err) {
+      console.error('[NeonDB] Error getting job by message_sid:', err);
+      return null;
+    }
+  }
+
+  public async insertJob(job: {
+    id: string;
+    message_sid: string;
+    sender_phone: string;
+    payload: any;
+  }): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      await this.pool.query(
+        `INSERT INTO twin_jobs (id, message_sid, sender_phone, payload, status, updated_at)
+         VALUES ($1, $2, $3, $4, 'pending', CURRENT_TIMESTAMP)
+         ON CONFLICT (message_sid) DO NOTHING`,
+        [job.id, job.message_sid, job.sender_phone, JSON.stringify(job.payload)]
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error inserting job:', err);
+      return false;
+    }
+  }
+
+  public async claimNextJob(workerLeaseId: string, heartbeatExpirationMs: number): Promise<any | null> {
+    if (!this.pool || !this.isConnected) return null;
+    try {
+      // Atomic claim using UPDATE ... RETURNING
+      // Finds pending jobs OR processing jobs with expired heartbeat
+      const res = await this.pool.query(
+        `UPDATE twin_jobs
+         SET status = 'processing',
+             worker_lease_id = $1,
+             last_heartbeat_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP,
+             attempt_count = attempt_count + 1
+         WHERE id = (
+           SELECT id FROM twin_jobs
+           WHERE status = 'pending'
+              OR (status = 'processing' AND last_heartbeat_at < CURRENT_TIMESTAMP - ($2 || ' milliseconds')::interval AND attempt_count < 3)
+           ORDER BY created_at ASC
+           LIMIT 1
+           FOR UPDATE SKIP LOCKED
+         )
+         RETURNING *`,
+        [workerLeaseId, heartbeatExpirationMs]
+      );
+      return res.rows[0] || null;
+    } catch (err) {
+      console.error('[NeonDB] Error claiming next job:', err);
+      return null;
+    }
+  }
+
+  public async updateJobHeartbeat(jobId: string, workerLeaseId: string): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const res = await this.pool.query(
+        `UPDATE twin_jobs
+         SET last_heartbeat_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND worker_lease_id = $2 AND status = 'processing'`,
+        [jobId, workerLeaseId]
+      );
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating job heartbeat:', err);
+      return false;
+    }
+  }
+
+  public async updateJobStatus(jobId: string, workerLeaseId: string, status: string, result?: any, error?: string): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const res = await this.pool.query(
+        `UPDATE twin_jobs
+         SET status = $3,
+             result = $4,
+             error = $5,
+             worker_lease_id = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1 AND worker_lease_id = $2`,
+        [jobId, workerLeaseId, status, result ? JSON.stringify(result) : null, error || null]
+      );
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating job status:', err);
+      return false;
+    }
+  }
+
+  public async getJobList(limit = 50): Promise<any[]> {
+    if (!this.pool || !this.isConnected) return [];
+    try {
+      const res = await this.pool.query('SELECT * FROM twin_jobs ORDER BY created_at DESC LIMIT $1', [limit]);
+      return res.rows;
+    } catch (err) {
+      console.error('[NeonDB] Error fetching job list:', err);
+      return [];
+    }
+  }
+  /**
+   * Persist a learned persona trait, preference, or correction
+   */
+  public async savePersonaMemory(memory: {
+    category: 'preference' | 'opinion' | 'correction' | 'feedback';
+    content: string;
+    priority?: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<number | null> {
+    if (!this.pool || !this.isConnected) return null;
+
+    try {
+      const res = await this.pool.query(
+        `INSERT INTO persona_memories (category, content, priority, metadata)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+        [memory.category, memory.content, memory.priority || 1, JSON.stringify(memory.metadata || {})]
+      );
+      return res.rows[0]?.id || null;
+    } catch (err) {
+      console.error('[NeonDB] Failed to save persona memory:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Retrieve all learned persona memories
+   */
+  public async getPersonaMemories(limit = 100): Promise<Array<{
+    id: number;
+    category: string;
+    content: string;
+    priority: number;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }>> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      const res = await this.pool.query(
+        'SELECT * FROM persona_memories ORDER BY priority DESC, created_at DESC LIMIT $1',
+        [limit]
+      );
+      return res.rows;
+    } catch (err) {
+      console.error('[NeonDB] Error fetching persona memories:', err);
+      return [];
+    }
+  }
+
+  /**
+   * Delete a specific persona memory
+   */
+  public async deletePersonaMemory(id: number): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+
+    try {
+      const res = await this.pool.query('DELETE FROM persona_memories WHERE id = $1', [id]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error deleting persona memory:', err);
+      return false;
     }
   }
 }

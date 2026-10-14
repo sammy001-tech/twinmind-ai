@@ -16,6 +16,8 @@ import { swarmSessionRegistry } from './server/utils/swarmResourceManager.ts';
 import { twilioService } from './server/services/twilioService.ts';
 import { jobQueueService } from './server/services/jobQueueService.ts';
 import { whatsAppWorker } from './server/services/whatsappWorker.ts';
+import { calibrationService } from './server/services/calibrationService.ts';
+import { sentinelService } from './server/services/sentinelService.ts';
 
 dotenv.config();
 
@@ -28,18 +30,30 @@ const isProduction = process.env.NODE_ENV === 'production';
 // In development, the dev server must always listen on port 3000; in production, use PORT provided by host (e.g. Render)
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
 
+// Ensure local artifact storage directory exists
+const artifactsDir = path.join(process.cwd(), 'public', 'artifacts');
+if (!fs.existsSync(artifactsDir)) {
+  fs.mkdirSync(artifactsDir, { recursive: true });
+}
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/artifacts', express.static(path.join(process.cwd(), 'public', 'artifacts')));
 
 // Shared server-side dynamic Gemini client supporting customGeminiKey override
 function getAiClient(req?: Request): GoogleGenAI {
-  const customKey = req
+  const customKey = (req
     ? ((req.headers['x-gemini-key'] as string) ||
        (req.headers['x-api-key'] as string) ||
        (req.query?.apiKey as string) ||
        (req.body?.customGeminiKey as string))
-    : '';
-  const apiKey = customKey || settingsManager.getSettings().customGeminiKey || process.env.GEMINI_API_KEY;
+    : '')?.trim().replace(/^["']|["']$/g, '');
+
+  const settingsKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
+  const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+
+  const apiKey = customKey || settingsKey || envKey;
+
   return new GoogleGenAI({
     apiKey: apiKey || '',
     httpOptions: {
@@ -142,7 +156,7 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
     const messageSid = (req.body?.MessageSid || `msg-${Date.now()}`).trim();
     const senderPhone = twilioService.normalizePhoneNumber(fromHeader);
 
-    // 3. Atomic Persist: Record MessageSid & Job in twin-jobs.json BEFORE returning ACK
+    // 3. Atomic Persist: Record MessageSid & Job in Neon DB BEFORE returning ACK
     const { isDuplicate } = await jobQueueService.enqueueInboundJob(messageSid, senderPhone, req.body || {});
 
     // 4. Return TwiML ACK (HTTP 200) immediately
@@ -207,31 +221,47 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
 
   try {
     if (provider === 'gemini') {
-      const hasGeminiKey = process.env.GEMINI_API_KEY || settingsManager.getSettings().customGeminiKey || customKey;
+      const settings = settingsManager.getSettings();
+      const sKey = (settings.customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
+      const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+      const cKey = ((req.headers['x-api-key'] as string) || (req.query.apiKey as string) || '').trim().replace(/^["']|["']$/g, '');
+      
+      const hasGeminiKey = Boolean(sKey || eKey || cKey);
+      
       if (hasGeminiKey) {
         try {
-          const pager = await getAiClient(req).models.list();
-          const models: { id: string; displayName: string; description?: string }[] = [];
-          for await (const m of pager) {
-            const id = m.name?.replace(/^models\//, '') || '';
-            if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
-              models.push({
-                id,
-                displayName: m.displayName || id,
-                description: m.description,
-              });
+          const client = getAiClient(req);
+          // Only attempt live fetch if key looks valid (standard AI Studio keys start with AIza)
+          const currentKey = sKey || eKey || cKey;
+          if (currentKey.startsWith('AIza') || currentKey.length > 30) {
+            const pager = await client.models.list();
+            const models: { id: string; displayName: string; description?: string }[] = [];
+            for await (const m of pager) {
+              const id = m.name?.replace(/^models\//, '') || '';
+              if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
+                models.push({
+                  id,
+                  displayName: m.displayName || id,
+                  description: m.description,
+                });
+              }
             }
-          }
-          if (models.length > 0) {
-            res.json({ provider: 'gemini', models, isLiveApi: true });
-            return;
+            if (models.length > 0) {
+              res.json({ provider: 'gemini', models, isLiveApi: true });
+              return;
+            }
+          } else {
+            console.warn('[Gemini] Provided key does not appear to be a standard Gemini API key. Skipping live models list.');
           }
         } catch (err) {
-          console.warn('Gemini live models fetch error, falling back to catalog:', err);
+          console.warn('Gemini live models fetch error:', err);
+          res.status(502).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'Failed to fetch live Gemini model registry.' });
+          return;
         }
+      } else {
+        res.status(401).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'API key required for live Gemini model retrieval.' });
+        return;
       }
-      res.json({ provider: 'gemini', models: GEMINI_CATALOG_MODELS, isLiveApi: false });
-      return;
     }
 
     if (provider === 'groq') {
@@ -344,26 +374,36 @@ app.get('/api/models/all', async (req: Request, res: Response): Promise<void> =>
       settingsManager.getSettings().customMistralKey ||
       process.env.MISTRAL_API_KEY;
 
-    let geminiModels = GEMINI_CATALOG_MODELS;
+    let geminiModels: any[] = [];
     let isGeminiLive = false;
-    const hasGeminiKey = process.env.GEMINI_API_KEY || settingsManager.getSettings().customGeminiKey || req.headers['x-gemini-key'] || req.headers['x-api-key'];
+    const settings = settingsManager.getSettings();
+    const sKey = (settings.customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
+    const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const hKey = (req.headers['x-gemini-key'] || req.headers['x-api-key'] || '').toString().trim().replace(/^["']|["']$/g, '');
+    
+    const hasGeminiKey = Boolean(sKey || eKey || hKey);
+    
     if (hasGeminiKey) {
       try {
-        const pager = await getAiClient(req).models.list();
-        const liveModels: { id: string; displayName: string; description?: string }[] = [];
-        for await (const m of pager) {
-          const id = m.name?.replace(/^models\//, '') || '';
-          if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
-            liveModels.push({
-              id,
-              displayName: m.displayName || id,
-              description: m.description,
-            });
+        const currentKey = sKey || eKey || hKey;
+        // Only attempt live fetch if key looks valid
+        if (currentKey.startsWith('AIza') || currentKey.length > 30) {
+          const pager = await getAiClient(req).models.list();
+          const liveModels: { id: string; displayName: string; description?: string }[] = [];
+          for await (const m of pager) {
+            const id = m.name?.replace(/^models\//, '') || '';
+            if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
+              liveModels.push({
+                id,
+                displayName: m.displayName || id,
+                description: m.description,
+              });
+            }
           }
-        }
-        if (liveModels.length > 0) {
-          geminiModels = liveModels;
-          isGeminiLive = true;
+          if (liveModels.length > 0) {
+            geminiModels = liveModels;
+            isGeminiLive = true;
+          }
         }
       } catch (e) {
         console.warn('Error fetching Gemini models in all:', e);
@@ -563,16 +603,22 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       }
     }, 10000);
 
-    const lastUserQuery = (messages as Array<{ role: string; content: string }>).filter((m) => m.role === 'user').pop()?.content || '';
-    const conversationHistory = (messages as Array<{ role: string; content: string }>).slice(0, -1).map((m) => ({
+    const lastUserMsg = (messages as Array<any>).filter((m) => m.role === 'user').pop();
+    const lastUserQuery = lastUserMsg?.content || '';
+    const lastImageData = lastUserMsg?.imageData;
+    const lastAudioData = lastUserMsg?.audioData;
+
+    const conversationHistory = (messages as Array<any>).slice(0, -1).map((m) => ({
       role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
       content: m.content || '',
+      imageData: m.imageData,
+      audioData: m.audioData,
     }));
 
     // Detect if Multi-Agent Specialist Swarm is requested
     const isSwarmRequested = Boolean(
       req.body.useSwarm ||
-      /(\/swarm|\b(swarm|specialist\s+swarm|specialist\s+agents|deep\s+research\s+and\s+calculate)\b)/i.test(lastUserQuery)
+      /(\/swarm|\b(swarm|specialist\s+swarm|specialist\s+agents|deep\s+research\s+and\s+calculate|generate\s+file|create\s+pdf|export\s+csv|make\s+markdown)\b)/i.test(lastUserQuery)
     );
 
     if (isSwarmRequested) {
@@ -617,15 +663,39 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       clearInterval(heartbeatTimer);
       fullReply = swarmSession.synthesis || fullReply;
+
+      // Extract artifacts from session traces for persistence and client UI
+      const artifacts: any[] = [];
+      swarmSession.traces.forEach((trace) => {
+        trace.tools.forEach((tool) => {
+          if (tool.toolName === 'generateArtifact' && tool.status === 'success') {
+            const res = tool.output as any;
+            if (res.url) {
+              artifacts.push({ name: res.fileName, url: res.url, type: res.type });
+            }
+          }
+        });
+      });
+
+      // Pass artifacts to client via SSE for immediate display
+      if (artifacts.length > 0) {
+        res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
+      }
+
       const chunkSize = 28;
       for (let i = 0; i < fullReply.length; i += chunkSize) {
         const slice = fullReply.slice(i, i + chunkSize);
         res.write(`data: ${JSON.stringify({ text: slice })}\n\n`);
       }
+
+      // Store artifacts for the save step
+      (req as any)._artifacts = artifacts;
     } else {
       // Autonomous execution via multi-provider TwinAgentService (Gemini, Groq, Mistral)
       const turnResult = await twinAgentService.executeTurn({
         userPrompt: lastUserQuery,
+        imageData: lastImageData,
+        audioData: lastAudioData,
         channel: (channel as any) || 'web',
         conversationHistory,
         userName: effectiveUserName,
@@ -647,25 +717,45 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       clearInterval(heartbeatTimer);
       fullReply = turnResult.reply;
+
+      // Extract artifacts from executed tools for single-agent mode
+      const artifacts: any[] = [];
+      turnResult.toolsExecuted.forEach((tool) => {
+        if (tool.toolName === 'generateArtifact' && (tool.result as any)?.status === 'success') {
+          const res = tool.result as any;
+          if (res.url) {
+            artifacts.push({ name: res.fileName, url: res.url, type: res.type });
+          }
+        }
+      });
+
+      // Pass artifacts to client via SSE
+      if (artifacts.length > 0) {
+        res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
+      }
+
       const chunkSize = 24;
       for (let i = 0; i < fullReply.length; i += chunkSize) {
         const slice = fullReply.slice(i, i + chunkSize);
         res.write(`data: ${JSON.stringify({ text: slice })}\n\n`);
       }
+
+      // Store artifacts for saving
+      (req as any)._artifacts = artifacts;
     }
 
     // Persist messages to Neon Postgres if configured
     let userDbId: number | undefined;
     let assistantDbId: number | undefined;
 
-    const lastUserMsg = messages[messages.length - 1];
-    if (lastUserMsg && lastUserMsg.content) {
+    const lastUserMsgToSave = messages[messages.length - 1];
+    if (lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData)) {
       try {
         userDbId = await neonDb.saveMessage({
           session_id: effectiveThreadId,
           channel: (channel as 'web' | 'telegram' | 'whatsapp') || 'web',
           role: 'user',
-          content: lastUserMsg.content,
+          content: lastUserMsgToSave.content || '[Attached Photo/Image]',
           provider: targetProvider,
           model: targetModel,
         });
@@ -682,6 +772,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           content: fullReply,
           provider: targetProvider,
           model: targetModel,
+          metadata: { artifacts: (req as any)._artifacts || [] },
         });
       } catch (dbErr) {
         console.warn('[NeonDB] Save assistant msg error:', dbErr);
@@ -2116,6 +2207,18 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`Olalekan Digital Twin server running on http://0.0.0.0:${PORT}`);
   // Start background WhatsApp job worker and lease recovery daemon
   whatsAppWorker.startWorker();
+
+  // Start proactive calibration monitor (Checks every 4 hours)
+  calibrationService.monitorOverdueExperiments().catch(err => console.error('Initial calibration check error:', err));
+  setInterval(() => {
+    calibrationService.monitorOverdueExperiments().catch(err => console.error('Periodic calibration check error:', err));
+  }, 1000 * 60 * 60 * 4);
+
+  // Start Adversarial Sentinel Red-Teaming (Checks every 6 hours)
+  sentinelService.runCognitiveRedTeamScan().catch(err => console.error('Initial sentinel scan error:', err));
+  setInterval(() => {
+    sentinelService.runCognitiveRedTeamScan().catch(err => console.error('Periodic sentinel scan error:', err));
+  }, 1000 * 60 * 60 * 6);
 
   // Hydrate settings from Neon DB if available
   settingsManager.syncFromDatabase().catch((dbErr) => {

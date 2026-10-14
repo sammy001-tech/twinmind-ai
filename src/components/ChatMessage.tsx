@@ -17,6 +17,7 @@ import {
   MoreVertical,
   FileText,
   Pencil,
+  FileDown,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 
@@ -318,6 +319,19 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           <SwarmTraceFeed trace={message.swarmTrace} />
         )}
 
+        {message.imageData && !isEditing && (
+          <div className="mb-2">
+            <img
+              src={message.imageData.data.startsWith('data:') ? message.imageData.data : `data:${message.imageData.mimeType || 'image/jpeg'};base64,${message.imageData.data}`}
+              alt={message.imageData.name || "Uploaded photo"}
+              className="max-w-xs sm:max-w-sm max-h-64 rounded-xl border border-slate-200 dark:border-slate-800 shadow-md object-cover"
+            />
+            {message.imageData.name && (
+              <span className="text-[10px] text-slate-500 mt-1 block font-medium">📷 Attached Photo: {message.imageData.name}</span>
+            )}
+          </div>
+        )}
+
         {isEditing ? (
           editBox
         ) : (
@@ -336,6 +350,27 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         {message.audioUrl && !isEditing && (
           <div className="mt-2">
             <VoicePlayer audioUrl={message.audioUrl} theme={channel} autoPlay={autoPlayVoice} />
+          </div>
+        )}
+        
+        {message.artifacts && message.artifacts.length > 0 && !isEditing && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {message.artifacts.map((art, idx) => (
+              <a
+                key={idx}
+                href={art.url}
+                download={art.name}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-amber-500 transition text-xs font-medium text-slate-700 dark:text-slate-200 group"
+              >
+                <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400">
+                  <FileDown className="w-4 h-4" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="truncate max-w-[140px] font-semibold">{art.name}</span>
+                  <span className="text-[10px] text-slate-500 uppercase font-bold">{art.type} Artifact</span>
+                </div>
+              </a>
+            ))}
           </div>
         )}
 

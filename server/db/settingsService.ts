@@ -3,16 +3,16 @@ import path from 'path';
 import type { AppSettings } from '../../src/types/index.ts';
 import { neonDb } from './neonService.ts';
 
-const SETTINGS_FILE = path.resolve(process.cwd(), 'twin-settings.json');
+const SETTINGS_FILE_PATH = path.join(process.cwd(), 'twin-settings.json');
 
 const DEFAULT_SETTINGS: AppSettings = {
   brandName: process.env.APP_BRAND_NAME || process.env.VITE_APP_BRAND_NAME || 'TwinMind AI',
   activeProvider: (process.env.ACTIVE_PROVIDER as 'gemini' | 'groq' | 'mistral') || 'gemini',
-  activeModel: process.env.ACTIVE_MODEL || '',
+  activeModel: process.env.ACTIVE_MODEL || process.env.GEMINI_MODEL || 'gemini-1.5-flash',
   providerModels: {
-    gemini: process.env.GEMINI_MODEL || '',
-    groq: process.env.GROQ_MODEL || '',
-    mistral: process.env.MISTRAL_MODEL || '',
+    gemini: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+    groq: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    mistral: process.env.MISTRAL_MODEL || 'mistral-large-latest',
   },
   voice: process.env.TTS_VOICE || 'Fenrir',
   userName: process.env.USER_NAME || '',
@@ -31,6 +31,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   userPhoneNumber: process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '',
   enableWhatsAppAlerts: false,
   enforceTwilioSignature: true,
+  proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'whatsapp',
 };
 
 class SettingsManager {
@@ -38,41 +39,48 @@ class SettingsManager {
   private isLoaded = false;
 
   constructor() {
-    this.currentSettings = this.loadInitialSettings();
-  }
-
-  private loadInitialSettings(): AppSettings {
-    let settings: AppSettings = { ...DEFAULT_SETTINGS };
-
-    // 1. Check if twin-settings.json exists
-    if (fs.existsSync(SETTINGS_FILE)) {
-      try {
-        const raw = fs.readFileSync(SETTINGS_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        settings = {
-          ...settings,
-          ...parsed,
-          providerModels: {
-            ...settings.providerModels,
-            ...(parsed.providerModels || {}),
-          },
-        };
-        this.isLoaded = true;
-        return settings;
-      } catch (err) {
-        console.warn('[SettingsManager] Failed reading twin-settings.json:', err);
-      }
-    }
-
+    this.currentSettings = { ...DEFAULT_SETTINGS };
+    this.loadFromDisk();
     this.isLoaded = true;
-    return settings;
   }
 
-  private persistToDisk(settings: AppSettings) {
+  /**
+   * Load settings synchronously from local disk file
+   */
+  private loadFromDisk() {
     try {
-      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
+      if (fs.existsSync(SETTINGS_FILE_PATH)) {
+        const raw = fs.readFileSync(SETTINGS_FILE_PATH, 'utf-8');
+        const diskSettings = JSON.parse(raw);
+        if (diskSettings && typeof diskSettings === 'object') {
+          this.currentSettings = {
+            ...this.currentSettings,
+            ...diskSettings,
+            providerModels: {
+              ...this.currentSettings.providerModels,
+              ...(diskSettings.providerModels || {}),
+            },
+          };
+          // Ensure activeModel matches current provider if not explicitly set
+          if (!this.currentSettings.activeModel) {
+            const prov = this.currentSettings.activeProvider || 'gemini';
+            this.currentSettings.activeModel = this.currentSettings.providerModels[prov as keyof typeof this.currentSettings.providerModels] || '';
+          }
+        }
+      }
     } catch (err) {
-      console.error('[SettingsManager] Failed writing twin-settings.json:', err);
+      console.warn('[SettingsManager] Failed to load settings from disk:', err);
+    }
+  }
+
+  /**
+   * Save current settings synchronously to local disk file
+   */
+  private saveToDisk() {
+    try {
+      fs.writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(this.currentSettings, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('[SettingsManager] Failed to save settings to disk:', err);
     }
   }
 
@@ -105,7 +113,7 @@ class SettingsManager {
         if (typedDb.activeModel) {
           this.currentSettings.activeModel = typedDb.activeModel;
         }
-        this.persistToDisk(this.currentSettings);
+        this.saveToDisk();
       }
     } catch (err) {
       console.warn('[SettingsManager] Could not sync settings from Neon DB:', err);
@@ -146,10 +154,10 @@ class SettingsManager {
       providerModels: updatedProviderModels,
     };
 
-    // 1. Save to local disk (zero chance of losing on restart)
-    this.persistToDisk(this.currentSettings);
+    // Save to Disk immediately
+    this.saveToDisk();
 
-    // 2. Save to Neon PostgreSQL if connected
+    // Save to Neon PostgreSQL if connected
     neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>).catch((err) => {
       console.warn('[SettingsManager] Background Neon DB save error:', err);
     });
@@ -159,3 +167,4 @@ class SettingsManager {
 }
 
 export const settingsManager = new SettingsManager();
+

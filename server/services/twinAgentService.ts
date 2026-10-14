@@ -4,6 +4,8 @@ import { settingsManager } from '../db/settingsService.ts';
 import { knowledgeService } from '../db/knowledgeService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
+import { memoryService } from './memoryService.ts';
+import { calibrationService } from './calibrationService.ts';
 
 const Type = {
   OBJECT: 'OBJECT',
@@ -74,6 +76,29 @@ export const GEMINI_TWIN_TOOLS: any[] = [
           description: "Summary timeframe or scope: 'week', 'month', 'decisions', or 'all'",
         },
       },
+    },
+  },
+  {
+    name: 'generateArtifact',
+    description:
+      'Generate a professional document or spreadsheet (PDF, Excel .xlsx, CSV, or Markdown) based on current conversation context or specific data provided.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        type: {
+          type: Type.STRING,
+          description: "The file format: 'pdf', 'xlsx', 'csv', or 'md'",
+        },
+        content: {
+          type: Type.STRING,
+          description: 'The body content or tabular data to include in the document',
+        },
+        fileName: {
+          type: Type.STRING,
+          description: "A descriptive filename (e.g., 'Market_Analysis_Report.pdf' or 'Financial_Data.xlsx')",
+        },
+      },
+      required: ['type', 'content', 'fileName'],
     },
   },
 ];
@@ -153,18 +178,52 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'generateArtifact',
+      description:
+        'Generate a professional document or spreadsheet (PDF, Excel .xlsx, CSV, or Markdown) based on current conversation context or specific data provided.',
+      parameters: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            description: "The file format: 'pdf', 'xlsx', 'csv', or 'md'",
+          },
+          content: {
+            type: 'string',
+            description: 'The body content or tabular data to include in the document',
+          },
+          fileName: {
+            type: 'string',
+            description: "A descriptive filename (e.g., 'Market_Analysis_Report.pdf' or 'Financial_Data.xlsx')",
+          },
+        },
+        required: ['type', 'content', 'fileName'],
+      },
+    },
+  },
 ];
 
 export interface TwinAgentTurnOptions {
   userPrompt: string;
+  imageData?: { mimeType: string; data: string; name?: string };
+  audioData?: { mimeType: string; data: string };
   channel: 'web' | 'telegram' | 'whatsapp';
-  conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  conversationHistory?: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    imageData?: { mimeType: string; data: string };
+    audioData?: { mimeType: string; data: string };
+  }>;
   userName?: string;
   nickname?: string;
   selectedVoice?: string;
   activeThreadTitle?: string;
   customGroqKey?: string;
   customMistralKey?: string;
+  customGeminiKey?: string;
   customTavilyKey?: string;
   provider?: 'gemini' | 'groq' | 'mistral' | string;
   model?: string;
@@ -193,20 +252,22 @@ class TwinAgentService {
   private ai: GoogleGenAI | null = null;
 
   constructor() {
-    this.initAi();
   }
 
-  private initAi() {
-    if (process.env.GEMINI_API_KEY) {
-      this.ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-twinagent',
-          },
-        },
-      });
+  public getGeminiClient(customKey?: string): GoogleGenAI {
+    const s = settingsManager.getSettings();
+    const apiKey = (customKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY is not configured on the server. Please check your credentials in Settings.');
     }
+    return new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build-twinagent',
+        },
+      },
+    });
   }
 
   /**
@@ -315,8 +376,7 @@ class TwinAgentService {
     }
 
     // Provider 3: Google Gemini (Default / Fallback)
-    const sanitizeKey = (k?: string) => (k && !k.trim().startsWith('AQ.') ? k.trim() : '');
-    const geminiKey = sanitizeKey(options.customGeminiKey) || sanitizeKey(s.customGeminiKey) || sanitizeKey(process.env.GEMINI_API_KEY);
+    const geminiKey = (options.customGeminiKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
     if (!geminiKey) {
       throw new Error(`No valid API key found for provider "${effectiveProvider}". Please configure your API key in Settings.`);
     }
@@ -817,16 +877,29 @@ Respond in valid JSON:
     const provider = providerOverride || s.activeProvider || 'gemini';
     const model =
       modelOverride ||
-      (provider === 'gemini' ? s.providerModels?.gemini || s.activeModel || 'gemini-2.5-flash' :
-       provider === 'groq' ? s.providerModels?.groq || s.activeModel || '' :
-       s.providerModels?.mistral || s.activeModel || '');
+      (provider === 'gemini' ? s.providerModels?.gemini || s.activeModel :
+       provider === 'groq' ? s.providerModels?.groq || s.activeModel :
+       s.providerModels?.mistral || s.activeModel) || '';
 
-    // 1. Explicit Concurrent Retrieval from Vector Knowledge Vault
+    if (!model) {
+      throw new Error(`No model configured for provider "${provider}". Please check Brain Settings.`);
+    }
+
+    // 1. Explicit Concurrent Retrieval: Vault + Learned Context + Calibration Metrics
     let recalledKnowledge: Array<{ id: string | number; title: string; content: string; category: string; similarity?: number }> = [];
+    let learnedContext = '';
+    let calibrationContext = '';
     try {
-      recalledKnowledge = await knowledgeService.search(userPrompt, 3, 0.45);
+      const [k, p, c] = await Promise.all([
+        knowledgeService.search(userPrompt, 3, 0.45).catch(() => []),
+        memoryService.getLearnedPersonaContext().catch(() => ''),
+        calibrationService.getCalibrationContext().catch(() => '')
+      ]);
+      recalledKnowledge = k;
+      learnedContext = p;
+      calibrationContext = c;
     } catch (kErr) {
-      console.warn('[TwinAgent] Knowledge recall warning:', kErr);
+      console.warn('[TwinAgent] Retrieval warning:', kErr);
     }
 
     // Build Master System Prompt with Recalled Context & Safety Directives
@@ -839,6 +912,8 @@ Respond in valid JSON:
       selectedVoice,
       recalledKnowledge: recalledKnowledge as any,
       activeThreadTitle,
+      learnedContext,
+      calibrationContext,
     });
 
     const toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
@@ -855,6 +930,31 @@ Respond in valid JSON:
         result = await this.executeDecisionAnalysis(String(args.dilemma || ''), channel, provider, model);
       } else if (name === 'generateExecutiveSummary') {
         result = await this.executeExecutiveSummary(args.timeframe ? String(args.timeframe) : undefined);
+      } else if (name === 'generateArtifact') {
+        const { specialistSwarmService } = await import('./specialistSwarmService.ts');
+        const userPromptLower = userPrompt.toLowerCase();
+        let targetType: 'pdf' | 'md' | 'csv' | 'xlsx' = (args.type as any) || 'md';
+
+        if (userPromptLower.includes('excel') || userPromptLower.includes('xlsx')) {
+          targetType = 'xlsx';
+        } else if (userPromptLower.includes('pdf')) {
+          targetType = 'pdf';
+        } else if (userPromptLower.includes('csv') || userPromptLower.includes('spreadsheet')) {
+          targetType = 'csv';
+        } else if (userPromptLower.includes('markdown') || userPromptLower.includes(' md ')) {
+          targetType = 'md';
+        }
+
+        let fileName = (args.fileName as string) || `Report_${Date.now()}`;
+        // Strip existing extension if any and append targetType
+        fileName = fileName.replace(/\.(pdf|csv|xlsx|xls|md|txt|doc|docx)$/i, '');
+        fileName = `${fileName}.${targetType}`;
+
+        result = await specialistSwarmService.executeGenerateArtifact(
+          targetType,
+          args.content,
+          fileName
+        );
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };
       }
@@ -867,22 +967,65 @@ Respond in valid JSON:
     // PROVIDER 1: GOOGLE GEMINI NATIVE TOOL CALLING LOOP (3-ROUND BUDGET)
     // =========================================================================
     if (provider === 'gemini') {
-      if (!this.ai) this.initAi();
-      if (!this.ai) {
-        throw new Error('GEMINI_API_KEY is not configured on the server. Please check your credentials in Settings.');
+      const geminiClient = this.getGeminiClient(options.customGeminiKey);
+
+      // Format initial contents with history and inline multimodal data (photos/images/audio)
+      const contents: Array<any> = [
+        ...conversationHistory.map((m) => {
+          const parts: any[] = [];
+          if (m.imageData?.data) {
+            parts.push({
+              inlineData: {
+                mimeType: m.imageData.mimeType || 'image/jpeg',
+                data: m.imageData.data,
+              },
+            });
+          }
+          if (m.audioData?.data) {
+            parts.push({
+              inlineData: {
+                mimeType: m.audioData.mimeType || 'audio/webm',
+                data: m.audioData.data,
+              },
+            });
+          }
+          if (m.content) {
+            parts.push({ text: m.content });
+          }
+          return {
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: parts.length > 0 ? parts : [{ text: '' }],
+          };
+        }),
+      ];
+
+      const lastUserParts: any[] = [];
+      if (options.imageData?.data) {
+        lastUserParts.push({
+          inlineData: {
+            mimeType: options.imageData.mimeType || 'image/jpeg',
+            data: options.imageData.data,
+          },
+        });
+      }
+      if (options.audioData?.data) {
+        lastUserParts.push({
+          inlineData: {
+            mimeType: options.audioData.mimeType || 'audio/webm',
+            data: options.audioData.data,
+          },
+        });
+      }
+      if (userPrompt) {
+        lastUserParts.push({ text: userPrompt });
+      } else if (lastUserParts.length === 0) {
+        lastUserParts.push({ text: '' });
       }
 
-      // Format initial contents with history
-      const contents: Array<any> = [
-        ...conversationHistory.map((m) => ({
-          role: m.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: m.content }],
-        })),
-        {
-          role: 'user',
-          parts: [{ text: userPrompt }],
-        },
-      ];
+      contents.push({
+        role: 'user',
+        parts: lastUserParts,
+      });
 
       let round = 0;
       const MAX_ROUNDS = 3;
@@ -892,7 +1035,7 @@ Respond in valid JSON:
 
         const response = await callWithBoundedRetry(
           () =>
-            this.ai!.models.generateContent({
+            geminiClient.models.generateContent({
               model,
               contents,
               config: {
@@ -910,6 +1053,10 @@ Respond in valid JSON:
         if (!functionCalls || functionCalls.length === 0) {
           const finalReply = response.text?.trim() || 'No response returned from model.';
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
+          
+          // Background Memory Extraction (Autonomous Learning)
+          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+          
           return {
             reply: finalReply,
             toolsExecuted,
@@ -954,7 +1101,7 @@ Respond in valid JSON:
       // If budget reached (3 rounds), perform final direct synthesis
       const finalSynthesis = await callWithBoundedRetry(
         () =>
-          this.ai!.models.generateContent({
+          geminiClient.models.generateContent({
             model,
             contents: [
               ...contents,
@@ -975,8 +1122,11 @@ Respond in valid JSON:
         { operationName: 'GeminiBudgetFinalSynthesis' }
       );
 
-      const finalReply = finalSynthesis.text?.trim() || 'Analysis complete with gathered tools.';
+      const finalReply = finalSynthesis.text?.trim() || '';
       const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
+
+      // Background Memory Extraction (Autonomous Learning)
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
 
       return {
         reply: finalReply,
@@ -1041,6 +1191,10 @@ Respond in valid JSON:
         if (!toolCalls || toolCalls.length === 0) {
           const finalReply = message?.content?.trim() || 'No response returned from Groq.';
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
+          
+          // Background Memory Extraction (Autonomous Learning)
+          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+          
           return {
             reply: finalReply,
             toolsExecuted,
@@ -1088,8 +1242,12 @@ Respond in valid JSON:
         }),
       });
       const finalData = await finalRes.json();
-      const finalReplyGroq = finalData.choices?.[0]?.message?.content?.trim() || 'Analysis complete with gathered tools.';
+      const finalReplyGroq = finalData.choices?.[0]?.message?.content?.trim() || '';
       const suggestedActionsGroq = this.extractSuggestedActions(finalReplyGroq, userPrompt, toolsExecuted);
+      
+      // Background Memory Extraction (Autonomous Learning)
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyGroq, model).catch(() => {});
+
       return {
         reply: finalReplyGroq,
         toolsExecuted,
@@ -1151,8 +1309,12 @@ Respond in valid JSON:
         const toolCalls = message?.tool_calls;
 
         if (!toolCalls || toolCalls.length === 0) {
-          const finalReply = message?.content?.trim() || 'No response returned from Mistral.';
+          const finalReply = message?.content?.trim() || '';
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
+          
+          // Background Memory Extraction (Autonomous Learning)
+          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+          
           return {
             reply: finalReply,
             toolsExecuted,
@@ -1200,8 +1362,12 @@ Respond in valid JSON:
         }),
       });
       const finalData = await finalRes.json();
-      const finalReplyMistral = finalData.choices?.[0]?.message?.content?.trim() || 'Analysis complete with gathered tools.';
+      const finalReplyMistral = finalData.choices?.[0]?.message?.content?.trim() || '';
       const suggestedActionsMistral = this.extractSuggestedActions(finalReplyMistral, userPrompt, toolsExecuted);
+      
+      // Background Memory Extraction (Autonomous Learning)
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyMistral, model).catch(() => {});
+
       return {
         reply: finalReplyMistral,
         toolsExecuted,

@@ -1,9 +1,5 @@
-import fs from 'fs';
-import path from 'path';
 import { GoogleGenAI } from '@google/genai';
 import { neonDb } from './neonService.ts';
-
-const KNOWLEDGE_FILE = path.resolve(process.cwd(), 'twin-knowledge.json');
 
 export interface KnowledgeDoc {
   id: string | number;
@@ -16,12 +12,7 @@ export interface KnowledgeDoc {
 }
 
 class KnowledgeService {
-  private localDocs: KnowledgeDoc[] = [];
   private aiClient: GoogleGenAI | null = null;
-
-  constructor() {
-    this.loadFromDisk();
-  }
 
   private getAiClient(): GoogleGenAI {
     if (!this.aiClient) {
@@ -39,33 +30,6 @@ class KnowledgeService {
       });
     }
     return this.aiClient;
-  }
-
-  private loadFromDisk() {
-    if (fs.existsSync(KNOWLEDGE_FILE)) {
-      try {
-        const raw = fs.readFileSync(KNOWLEDGE_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.localDocs = parsed;
-          return;
-        }
-      } catch (err) {
-        console.warn('[KnowledgeService] Failed loading twin-knowledge.json:', err);
-      }
-    }
-
-    // Zero-fallback: initialize with clean empty store without hardcoded docs
-    this.localDocs = [];
-    this.saveToDisk();
-  }
-
-  private saveToDisk() {
-    try {
-      fs.writeFileSync(KNOWLEDGE_FILE, JSON.stringify(this.localDocs, null, 2), 'utf-8');
-    } catch (err) {
-      console.error('[KnowledgeService] Failed saving twin-knowledge.json:', err);
-    }
   }
 
   /**
@@ -98,23 +62,6 @@ class KnowledgeService {
   }
 
   /**
-   * Cosine similarity between two vector arrays
-   */
-  private cosineSimilarity(a: number[], b: number[]): number {
-    if (!a || !b || a.length !== b.length || a.length === 0) return 0;
-    let dot = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-    if (normA === 0 || normB === 0) return 0;
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-  }
-
-  /**
    * Save a new note or document with automatic vector embedding
    */
   public async addDocument(params: {
@@ -129,11 +76,9 @@ class KnowledgeService {
     const textToEmbed = `${title}\n\n${content}`;
     const embedding = await this.generateEmbedding(textToEmbed);
 
-    let docId: string | number = `doc-${Date.now()}`;
-
-    // Try storing in Neon PostgreSQL if connected
-    const status = await neonDb.getStatus();
-    if (status.connected) {
+    // Store in Neon PostgreSQL if connected
+    const status = await neonDb.refreshConnection();
+    if (status) {
       const neonRes = await neonDb.saveKnowledge({
         title,
         content,
@@ -141,28 +86,17 @@ class KnowledgeService {
         tags,
         embedding: embedding.length > 0 ? embedding : undefined,
       });
-      if (neonRes.success) {
-        docId = neonRes.id;
-      }
+      return {
+        id: neonRes.id,
+        success: neonRes.success,
+        hasEmbedding: embedding.length > 0,
+      };
     }
 
-    // Always maintain local cache for resilience
-    const newDoc: KnowledgeDoc = {
-      id: docId,
-      title,
-      content,
-      category,
-      tags,
-      embedding: embedding.length > 0 ? embedding : undefined,
-      createdAt: new Date().toISOString(),
-    };
-    this.localDocs.unshift(newDoc);
-    this.saveToDisk();
-
     return {
-      id: docId,
-      success: true,
-      hasEmbedding: embedding.length > 0,
+      id: 0,
+      success: false,
+      hasEmbedding: false,
     };
   }
 
@@ -179,84 +113,25 @@ class KnowledgeService {
     const queryEmbedding = await this.generateEmbedding(queryText);
 
     // If Neon pgvector is connected and embedding generated, query database
-    const status = await neonDb.getStatus();
-    if (status.connected && queryEmbedding.length > 0) {
+    if (queryEmbedding.length > 0) {
       try {
         const neonResults = await neonDb.searchKnowledgeVector(queryEmbedding, limit, threshold);
         if (neonResults.length > 0) {
           return neonResults;
         }
       } catch (err) {
-        console.warn('[KnowledgeService] Neon vector search error, falling back to local search:', err);
+        console.warn('[KnowledgeService] Neon vector search error:', err);
       }
     }
 
-    // Fallback: Local vector cosine similarity search
-    if (queryEmbedding.length > 0) {
-      const scored = this.localDocs
-        .filter((d) => d.embedding && d.embedding.length > 0)
-        .map((d) => ({
-          id: d.id,
-          title: d.title,
-          content: d.content,
-          category: d.category,
-          tags: d.tags,
-          createdAt: d.createdAt,
-          similarity: this.cosineSimilarity(queryEmbedding, d.embedding!),
-        }))
-        .filter((d) => d.similarity >= threshold)
-        .sort((a, b) => b.similarity - a.similarity)
-        .slice(0, limit);
-
-      if (scored.length > 0) return scored;
-    }
-
-    // Text keyword fallback if embeddings not available
-    const lowerQuery = queryText.toLowerCase();
-    return this.localDocs
-      .filter((d) => d.title.toLowerCase().includes(lowerQuery) || d.content.toLowerCase().includes(lowerQuery))
-      .slice(0, limit)
-      .map((d) => ({
-        id: d.id,
-        title: d.title,
-        content: d.content,
-        category: d.category,
-        tags: d.tags,
-        createdAt: d.createdAt,
-        similarity: 0.6,
-      }));
+    return [];
   }
 
   /**
    * List all documents
    */
   public async listDocuments(category?: string, query?: string) {
-    const status = await neonDb.getStatus();
-    if (status.connected) {
-      const dbList = await neonDb.getKnowledgeList(category, query);
-      if (dbList.length > 0) {
-        return dbList;
-      }
-    }
-
-    // Return local list
-    let list = [...this.localDocs];
-    if (category && category !== 'all') {
-      list = list.filter((d) => d.category.toLowerCase() === category.toLowerCase());
-    }
-    if (query && query.trim()) {
-      const q = query.toLowerCase().trim();
-      list = list.filter((d) => d.title.toLowerCase().includes(q) || d.content.toLowerCase().includes(q));
-    }
-    return list.map((d) => ({
-      id: d.id,
-      title: d.title,
-      content: d.content,
-      category: d.category,
-      tags: d.tags,
-      hasEmbedding: Boolean(d.embedding && d.embedding.length > 0),
-      createdAt: d.createdAt,
-    }));
+    return await neonDb.getKnowledgeList(category, query);
   }
 
   /**
@@ -284,39 +159,29 @@ class KnowledgeService {
   }
 
   /**
-   * Rename a category across all matching local and Neon documents
+   * Rename a category across Neon documents
    */
   public async renameCategory(oldCategory: string, newCategory: string): Promise<number> {
     if (!oldCategory || !newCategory || oldCategory === newCategory) return 0;
-    let modified = 0;
-
-    for (const doc of this.localDocs) {
-      if (doc.category.toLowerCase() === oldCategory.toLowerCase()) {
-        doc.category = newCategory;
-        modified++;
-      }
-    }
-    if (modified > 0) {
-      this.saveToDisk();
-    }
 
     // Neon database update if connected
-    const status = await neonDb.getStatus();
-    if (status.connected) {
+    const status = await neonDb.refreshConnection();
+    if (status) {
       try {
         const pool = (neonDb as any).pool;
         if (pool) {
-          await pool.query('UPDATE twin_knowledge SET category = $1 WHERE LOWER(category) = LOWER($2)', [
+          const res = await pool.query('UPDATE twin_knowledge SET category = $1 WHERE LOWER(category) = LOWER($2)', [
             newCategory,
             oldCategory,
           ]);
+          return res.rowCount || 0;
         }
       } catch (err) {
         console.warn('[KnowledgeService] Neon category rename error:', err);
       }
     }
 
-    return modified;
+    return 0;
   }
 
   /**
@@ -330,14 +195,7 @@ class KnowledgeService {
    * Delete document by ID
    */
   public async deleteDocument(id: string | number): Promise<boolean> {
-    const status = await neonDb.getStatus();
-    if (status.connected) {
-      await neonDb.deleteKnowledge(id);
-    }
-
-    this.localDocs = this.localDocs.filter((d) => String(d.id) !== String(id));
-    this.saveToDisk();
-    return true;
+    return await neonDb.deleteKnowledge(id);
   }
 
   /**
@@ -348,8 +206,8 @@ class KnowledgeService {
     const dbStats = await neonDb.getKnowledgeStats();
 
     return {
-      totalDocuments: dbStatus.connected && dbStats.count > 0 ? dbStats.count : this.localDocs.length,
-      embeddedDocuments: dbStatus.connected && dbStats.vectorCount > 0 ? dbStats.vectorCount : this.localDocs.filter((d) => d.embedding).length,
+      totalDocuments: dbStats.count,
+      embeddedDocuments: dbStats.vectorCount,
       neonConnected: dbStatus.connected,
       pgvectorActive: dbStats.pgvectorActive,
       dimension: 768,

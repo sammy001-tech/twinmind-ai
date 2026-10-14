@@ -27,6 +27,8 @@ export interface ChatMessage {
   createdAt?: number;
   channel?: ChannelType;
   audioUrl?: string;
+  audioData?: { mimeType: string; data: string };
+  imageData?: { mimeType: string; data: string; name?: string };
   isGeneratingAudio?: boolean;
   status?: 'pending' | 'sent' | 'delivered' | 'read' | 'error';
   modelInfo?: {
@@ -35,6 +37,7 @@ export interface ChatMessage {
   };
   reactions?: string[];
   swarmTrace?: SwarmSessionState;
+  artifacts?: { name: string; url: string; type: string }[];
 }
 
 export interface SwarmToolCall {
@@ -151,4 +154,5 @@ export interface AppSettings {
   userPhoneNumber?: string;
   enableWhatsAppAlerts?: boolean;
   enforceTwilioSignature?: boolean;
+  proactiveAlertChannel?: 'whatsapp' | 'telegram' | 'none';
 }
