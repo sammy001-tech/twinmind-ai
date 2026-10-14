@@ -63,8 +63,9 @@ export class WhatsAppWorker {
     const userMessage = (job.payload.body || job.payload.Body || '').trim();
     const senderPhone = job.senderPhone;
 
-    // Check for incoming WhatsApp photo or media attachment (Multimodal photo support)
+    // Check for incoming WhatsApp photo or media attachment (Multimodal photo & audio support)
     let incomingImageData: { mimeType: string; data: string; name?: string } | undefined;
+    let incomingAudioData: { mimeType: string; data: string; name?: string } | undefined;
     const mediaUrl0 = job.payload.MediaUrl0 || job.payload.mediaUrl0;
     const mediaContentType0 = job.payload.MediaContentType0 || job.payload.mediaContentType0 || 'image/jpeg';
 
@@ -80,12 +81,21 @@ export class WhatsAppWorker {
         if (mediaRes.ok) {
           const arrayBuf = await mediaRes.arrayBuffer();
           const base64Data = Buffer.from(arrayBuf).toString('base64');
-          incomingImageData = {
-            mimeType: mediaContentType0,
-            data: base64Data,
-            name: 'whatsapp_photo.jpg',
-          };
-          console.log(`[WhatsAppWorker] Fetched incoming WhatsApp photo attachment (${mediaContentType0})`);
+          if (mediaContentType0.startsWith('audio/')) {
+            incomingAudioData = {
+              mimeType: mediaContentType0,
+              data: base64Data,
+              name: 'whatsapp_audio.ogg',
+            };
+            console.log(`[WhatsAppWorker] Fetched incoming WhatsApp audio attachment (${mediaContentType0})`);
+          } else {
+            incomingImageData = {
+              mimeType: mediaContentType0,
+              data: base64Data,
+              name: 'whatsapp_photo.jpg',
+            };
+            console.log(`[WhatsAppWorker] Fetched incoming WhatsApp photo attachment (${mediaContentType0})`);
+          }
         }
       } catch (mErr) {
         console.warn('[WhatsAppWorker] Error fetching incoming WhatsApp media attachment:', mErr);
@@ -224,8 +234,11 @@ export class WhatsAppWorker {
 
     // Multimodal & General Conversational Turn Processing with Autonomous Tool Execution
     const turnResult = await twinAgentService.executeTurn({
-      userPrompt: userMessage,
+      userPrompt: incomingAudioData
+        ? 'Listen to this voice note, transcribe it accurately, extract key action items, and generate a professional PDF meeting notes document or financial forecast if applicable.'
+        : userMessage,
       imageData: incomingImageData,
+      audioData: incomingAudioData,
       channel: 'whatsapp',
     });
 

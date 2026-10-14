@@ -1213,68 +1213,32 @@ class TelegramBotManager {
         const arrayBuffer = await audioRes.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
 
-        if (!this.ai) this.initAi();
-        if (!this.ai) {
-          await ctx.reply('⚠️ Gemini AI is not initialized on the server.');
-          return;
-        }
-
         const s = settingsManager.getSettings();
-        const targetModel = this.config.activeModel || s.activeModel || s.providerModels?.gemini;
-        if (!targetModel) {
-          await ctx.reply('⚠️ No brain model configured. Please configure your active model in Settings or send /model <model_id>.');
-          return;
-        }
-
-        const systemInstruction = buildSystemPrompt({
+        const turnResult = await twinAgentService.executeTurn({
+          userPrompt: 'Listen to this voice memo / audio recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast if applicable.',
+          audioData: {
+            mimeType: 'audio/ogg',
+            data: buffer.toString('base64'),
+          },
           channel: 'telegram',
+          conversationHistory: this.conversationHistory,
           userName: this.config.ownerUsername || s.userName || 'User',
-          nickname: s.nickname || '',
-          activeModel: targetModel,
-          activeProvider: this.config.activeProvider || 'gemini',
-          selectedVoice: s.voice || 'Fenrir',
+          providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
+          modelOverride: this.config.activeModel || undefined,
         });
 
-        const contents = [
-          ...this.conversationHistory.map((m) => ({
-            role: m.role === 'assistant' ? ('model' as const) : ('user' as const),
-            parts: [{ text: m.content }],
-          })),
-          {
-            role: 'user' as const,
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'audio/ogg',
-                  data: buffer.toString('base64'),
-                },
-              },
-              {
-                text: "Listen to this voice message from my owner, process their thought or question, and provide a sharp, high-agency digital twin response.",
-              },
-            ],
-          },
-        ];
-
-        const res = await callWithBoundedRetry(
-          () =>
-            this.ai!.models.generateContent({
-              model: targetModel,
-              contents,
-              config: {
-                systemInstruction,
-                temperature: 0.7,
-              },
-            }),
-          { operationName: 'VoiceTranscribeAndRespond' }
-        );
-
-        const reply = res.text?.trim() || 'Could not process voice message.';
+        const reply = turnResult.reply;
         this.conversationHistory.push({ role: 'user', content: '[Voice Note Audio Sent]' });
         this.conversationHistory.push({ role: 'assistant', content: reply });
         this.recordSyncedMessage('assistant', reply, true);
 
-        await ctx.reply(reply);
+        try {
+          await ctx.reply(reply, { parse_mode: 'Markdown' });
+        } catch {
+          await ctx.reply(reply);
+        }
+
+        await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
 
         try {
           const voiceBuffer = await this.generateVoiceBuffer(reply);

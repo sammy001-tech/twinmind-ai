@@ -20,6 +20,7 @@ import {
   Download,
   Trash2,
   Settings,
+  Mic,
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
 
@@ -45,6 +46,7 @@ interface HeaderProps {
   themeMode: ThemeMode;
   onThemeModeChange: (mode: ThemeMode) => void;
   onProviderChange?: (provider: string) => void;
+  onOpenVoiceModal?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -69,6 +71,7 @@ export const Header: React.FC<HeaderProps> = ({
   themeMode,
   onThemeModeChange,
   onProviderChange,
+  onOpenVoiceModal,
 }) => {
   const displayName = nickname.trim() || userName.trim();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -230,6 +233,18 @@ export const Header: React.FC<HeaderProps> = ({
                 title="Start new conversation"
               >
                 <SquarePen className="w-4 h-4" />
+              </button>
+            )}
+
+            {/* Voice Memo & Executive Summary Recorder Button */}
+            {onOpenVoiceModal && (
+              <button
+                type="button"
+                onClick={onOpenVoiceModal}
+                className="p-1.5 rounded-full text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 transition active:scale-95"
+                title="Record Voice Memo & Generate Executive PDF/Excel"
+              >
+                <Mic className="w-4 h-4" />
               </button>
             )}
 

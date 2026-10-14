@@ -1206,6 +1206,48 @@ app.post('/api/settings', async (req: Request, res: Response) => {
   }
 });
 
+// Voice Note Audio Transcription & Executive Summary Generation
+app.post('/api/audio/transcribe-and-summarize', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { audioBase64, mimeType, prompt } = req.body;
+    if (!audioBase64) {
+      res.status(400).json({ success: false, error: 'audioBase64 data is required.' });
+      return;
+    }
+
+    const settings = settingsManager.getSettings();
+    const provider = settings.activeProvider || 'gemini';
+    const model = settings.activeModel || settings.providerModels?.[provider] || '';
+
+    const effectivePrompt =
+      prompt ||
+      'Listen to this voice memo / audio recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast.';
+
+    const turnResult = await twinAgentService.executeTurn({
+      userPrompt: effectivePrompt,
+      audioData: {
+        mimeType: mimeType || 'audio/webm',
+        data: audioBase64,
+      },
+      channel: 'web',
+      providerOverride: provider as any,
+      modelOverride: model,
+    });
+
+    res.json({
+      success: true,
+      reply: turnResult.reply,
+      toolsExecuted: turnResult.toolsExecuted,
+      suggestedActions: turnResult.suggestedActions,
+      provider: turnResult.provider,
+      model: turnResult.model,
+    });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+
 // =========================================================================
 // Real Telegram Bot Integration Endpoints (Owner Guard & Dual-Mode Engine)
 // =========================================================================

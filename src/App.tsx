@@ -17,6 +17,7 @@ import { ChatExportModal } from './components/ChatExportModal.tsx';
 import { ChatSearchInput } from './components/ChatSearchInput.tsx';
 import { CustomPromptModal } from './components/CustomPromptModal.tsx';
 import { EmptyState } from './components/EmptyState.tsx';
+import { VoiceRecorderModal } from './components/VoiceRecorderModal.tsx';
 import { useTheme } from './hooks/useTheme.ts';
 import {
   Sparkles,
@@ -116,6 +117,7 @@ export default function App() {
   const [isKnowledgeModalOpen, setIsKnowledgeModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isCustomPromptModalOpen, setIsCustomPromptModalOpen] = useState(false);
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
 
   // In-Chat Search & Filtering State
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -929,6 +931,7 @@ export default function App() {
         themeMode={themeMode}
         onThemeModeChange={setThemeMode}
         onProviderChange={handleProviderChange}
+        onOpenVoiceModal={() => setIsVoiceModalOpen(true)}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
@@ -1205,6 +1208,16 @@ export default function App() {
         onSavePrompt={handleSaveCustomPrompt}
         onDeletePrompt={handleDeleteCustomPrompt}
         existingCustomPrompts={customPrompts}
+      />
+
+      {/* Voice Recorder & Executive Summary Modal */}
+      <VoiceRecorderModal
+        isOpen={isVoiceModalOpen}
+        onClose={() => setIsVoiceModalOpen(false)}
+        onInsertMessage={(text) => {
+          setActiveTab('chat');
+          handleSendMessage(text);
+        }}
       />
     </div>
   );
