@@ -253,8 +253,10 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
           } else {
             console.warn('[Gemini] Provided key does not appear to be a standard Gemini API key. Skipping live models list.');
           }
-        } catch (err) {
-          console.warn('Gemini live models fetch error:', err);
+        } catch (err: any) {
+          if (!err?.message?.includes('401') && !err?.message?.includes('UNAUTHENTICATED')) {
+            console.warn('Gemini live models fetch error:', err);
+          }
           res.status(502).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'Failed to fetch live Gemini model registry.' });
           return;
         }
@@ -405,8 +407,10 @@ app.get('/api/models/all', async (req: Request, res: Response): Promise<void> =>
             isGeminiLive = true;
           }
         }
-      } catch (e) {
-        console.warn('Error fetching Gemini models in all:', e);
+      } catch (e: any) {
+        if (!e?.message?.includes('401') && !e?.message?.includes('UNAUTHENTICATED')) {
+          console.warn('Error fetching Gemini models in all:', e);
+        }
       }
     }
 
