@@ -756,7 +756,7 @@ Respond in valid JSON:
 
       return {
         timeframe: timeframe || 'all',
-        databaseStatus: status.connected ? 'Operational' : 'Local Fallback',
+        databaseStatus: status.connected ? 'Operational' : 'Local Disk Storage (Neon Unconnected)',
         totalIndexedKnowledgeNotes: docs.length,
         totalRecordedDecisions: recentDecisions.length,
         recentDecisions: verifiedDecisions,

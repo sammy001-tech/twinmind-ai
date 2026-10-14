@@ -122,10 +122,11 @@ Respond strictly in valid JSON matching this structure:
       console.error('[IntentClassifier] Intent classification error:', err);
       return {
         intent: 'GENERAL_CHAT',
-        confidence: 0.7,
-        reasoning: 'Fallback due to classification exception',
+        confidence: 0,
+        reasoning: `Intent classification unavailable: ${err instanceof Error ? err.message : String(err)}`,
         extractedParams: {},
-        requiresClarification: false,
+        requiresClarification: true,
+        clarificationPrompt: 'Unable to verify intent due to an API error. Please state your request directly.',
       };
     }
   }

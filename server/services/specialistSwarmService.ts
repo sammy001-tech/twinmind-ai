@@ -1024,8 +1024,8 @@ class SpecialistSwarmService {
 
           callbacks?.onSpecialistStart?.({
             specialist: 'PerspectiveShifter',
-            role: 'Multi-Perspective Cognitive Sim',
-            taskDescription: 'Simulating opposing viewpoints and strategic alternatives',
+            role: 'Multi-Perspective Cognitive Analysis',
+            taskDescription: 'Evaluating opposing viewpoints and strategic counter-arguments',
           });
 
           const searchRes = await this.executeSearchWeb(query, {

@@ -25,14 +25,16 @@ export interface JobRecord {
 const HEARTBEAT_EXPIRATION_MS = 5 * 60 * 1000; // 5 minutes
 
 export class JobQueueService {
+  private inMemoryJobs = new Map<string, JobRecord>();
+
   /**
    * Check if MessageSid exists already for deduplication
    */
   public async getJobByMessageSid(messageSid: string): Promise<JobRecord | null> {
     if (!messageSid) return null;
     const row = await neonDb.getJobByMessageSid(messageSid);
-    if (!row) return null;
-    return this.mapRowToJob(row);
+    if (row) return this.mapRowToJob(row);
+    return this.inMemoryJobs.get(messageSid) || null;
   }
 
   /**
@@ -50,19 +52,27 @@ export class JobQueueService {
     }
 
     const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const success = await neonDb.insertJob({
+    const newJob: JobRecord = {
+      jobId,
+      messageSid,
+      senderPhone,
+      channel: 'whatsapp',
+      status: 'pending',
+      attemptCount: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      payload,
+    };
+    this.inMemoryJobs.set(messageSid, newJob);
+
+    await neonDb.insertJob({
       id: jobId,
       message_sid: messageSid,
       sender_phone: senderPhone,
       payload,
-    });
+    }).catch(() => {});
 
-    if (success) {
-      const job = await this.getJobByMessageSid(messageSid);
-      return { job, isDuplicate: false };
-    }
-
-    return { job: null, isDuplicate: false };
+    return { job: newJob, isDuplicate: false };
   }
 
   /**
@@ -70,14 +80,37 @@ export class JobQueueService {
    */
   public async claimNextJob(workerLeaseId: string): Promise<JobRecord | null> {
     const row = await neonDb.claimNextJob(workerLeaseId, HEARTBEAT_EXPIRATION_MS);
-    if (!row) return null;
-    return this.mapRowToJob(row);
+    if (row) {
+      const mapped = this.mapRowToJob(row);
+      this.inMemoryJobs.set(mapped.messageSid, mapped);
+      return mapped;
+    }
+
+    // Local in-memory claim if database offline
+    for (const job of this.inMemoryJobs.values()) {
+      if (job.status === 'pending') {
+        job.status = 'processing';
+        job.workerLeaseId = workerLeaseId;
+        job.attemptCount += 1;
+        job.lastHeartbeatAt = new Date().toISOString();
+        job.updatedAt = new Date().toISOString();
+        return job;
+      }
+    }
+    return null;
   }
 
   /**
    * Heartbeat ping to keep worker lease active during multi-pass debates
    */
   public async updateHeartbeat(jobId: string, workerLeaseId: string): Promise<boolean> {
+    for (const job of this.inMemoryJobs.values()) {
+      if (job.jobId === jobId && job.workerLeaseId === workerLeaseId) {
+        job.lastHeartbeatAt = new Date().toISOString();
+        job.updatedAt = new Date().toISOString();
+        break;
+      }
+    }
     return await neonDb.updateJobHeartbeat(jobId, workerLeaseId);
   }
 
@@ -85,6 +118,14 @@ export class JobQueueService {
    * Mark job completed
    */
   public async completeJob(jobId: string, workerLeaseId: string, result?: any): Promise<boolean> {
+    for (const job of this.inMemoryJobs.values()) {
+      if (job.jobId === jobId) {
+        job.status = 'completed';
+        job.result = result;
+        job.updatedAt = new Date().toISOString();
+        break;
+      }
+    }
     return await neonDb.updateJobStatus(jobId, workerLeaseId, 'completed', result);
   }
 
@@ -92,6 +133,14 @@ export class JobQueueService {
    * Mark job failed
    */
   public async failJob(jobId: string, workerLeaseId: string, error: string): Promise<boolean> {
+    for (const job of this.inMemoryJobs.values()) {
+      if (job.jobId === jobId) {
+        job.status = 'failed';
+        job.error = error;
+        job.updatedAt = new Date().toISOString();
+        break;
+      }
+    }
     return await neonDb.updateJobStatus(jobId, workerLeaseId, 'failed', undefined, error);
   }
 
