@@ -7,7 +7,7 @@ import {
   normalizeArtifactFormat,
   parseArtifactContent,
 } from '../server/services/artifactFormattingService.ts';
-import { resolveArtifactStorageDirectory } from '../server/services/artifactStorageService.ts';
+import { getArtifactStorageStatus } from '../server/services/artifactStorageService.ts';
 
 test('normalizes only the file formats supported by the artifact generator', () => {
   assert.equal(normalizeArtifactFormat('xlsx'), 'xlsx');
@@ -130,21 +130,9 @@ test('does not label malformed or unsupported artifact input as successful outpu
   );
 });
 
-test('production artifact storage requires an explicit absolute persistent mount path', () => {
-  assert.throws(
-    () => resolveArtifactStorageDirectory({ configuredPath: '', nodeEnv: 'production', cwd: '/app' }),
-    /ARTIFACT_STORAGE_CONFIGURATION_MISSING/,
-  );
-  assert.throws(
-    () => resolveArtifactStorageDirectory({ configuredPath: 'artifacts', nodeEnv: 'production', cwd: '/app' }),
-    /ARTIFACT_STORAGE_PATH_MUST_BE_ABSOLUTE/,
-  );
-  assert.equal(
-    resolveArtifactStorageDirectory({ configuredPath: '/var/data/artifacts', nodeEnv: 'production', cwd: '/app' }),
-    '/var/data/artifacts',
-  );
-  assert.equal(
-    resolveArtifactStorageDirectory({ configuredPath: '', nodeEnv: 'development', cwd: '/app' }),
-    '/app/public/artifacts',
-  );
+test('artifact storage readiness is explicitly database-backed', () => {
+  const status = getArtifactStorageStatus({ configured: true, connected: true, schemaReady: true });
+  assert.equal(status.mode, 'database');
+  assert.equal(status.canGenerate, true);
+  assert.match(status.warning, /stored in Neon PostgreSQL/);
 });

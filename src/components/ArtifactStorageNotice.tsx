@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 
-type StorageMode = 'instance-local' | 'configured-path' | 'misconfigured';
+type StorageMode = 'database' | 'unavailable';
 
 interface ArtifactStorageStatus {
   mode: StorageMode;
@@ -19,7 +19,7 @@ function parseStorageStatus(value: unknown): ArtifactStorageStatus | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const payload = value as Record<string, unknown>;
   if (
-    (payload.mode !== 'instance-local' && payload.mode !== 'configured-path' && payload.mode !== 'misconfigured')
+    (payload.mode !== 'database' && payload.mode !== 'unavailable')
     || typeof payload.configured !== 'boolean'
     || typeof payload.canGenerate !== 'boolean'
     || typeof payload.warning !== 'string'
@@ -78,37 +78,33 @@ export const ArtifactStorageNotice: React.FC = () => {
 
   if (state.status === 'loading') return null;
 
-  const mode = state.status === 'ready' ? state.storage.mode : 'misconfigured';
-  const isInstanceLocal = mode === 'instance-local';
-  const isMisconfigured = state.status === 'unavailable' || mode === 'misconfigured';
+  const mode = state.status === 'ready' ? state.storage.mode : 'unavailable';
+  const isDatabaseBacked = mode === 'database';
+  const isUnavailable = state.status === 'unavailable' || mode === 'unavailable';
   const statusMessage = state.status === 'ready'
     ? state.storage.warning
     : state.message;
 
   return (
     <div
-      role={isInstanceLocal || isMisconfigured ? 'alert' : 'status'}
+      role={isUnavailable ? 'alert' : 'status'}
       className={
         'mx-3 mb-2 flex items-start gap-2 rounded-xl border px-3 py-2.5 text-xs leading-relaxed sm:mx-4 ' +
-        (isMisconfigured
+        (isUnavailable
           ? 'border-red-500/30 bg-red-500/5 text-red-800 dark:text-red-300'
-          : isInstanceLocal
-            ? 'border-amber-500/30 bg-amber-500/5 text-amber-800 dark:text-amber-300'
-            : 'border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300')
+          : 'border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300')
       }
     >
-      {state.status === 'ready' && state.storage.mode === 'configured-path'
+      {state.status === 'ready' && state.storage.mode === 'database'
         ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
         : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
       <div className="min-w-0">
         <p className="font-semibold">
-          {state.status === 'unavailable'
-            ? 'Artifact storage status unavailable'
-            : isMisconfigured
-              ? 'Artifact storage configuration needs attention'
-              : isInstanceLocal
-                ? 'Generated files may not survive restarts'
-                : 'Artifact storage path configured'}
+          {state.status === 'unavailable' || isUnavailable
+            ? 'Database-backed artifact storage unavailable'
+            : isDatabaseBacked
+              ? 'Database-backed artifact storage active'
+              : 'Artifact storage status unavailable'}
         </p>
         <p className="mt-0.5 break-words">{statusMessage}</p>
       </div>

@@ -29,13 +29,7 @@ import {
 import ExcelJS from 'exceljs';
 import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
-import { getArtifactStorageDirectoryForGeneration } from './artifactStorageService.ts';
-import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 export interface SwarmToolTrace {
   toolName: string;
@@ -288,8 +282,8 @@ class SpecialistSwarmService {
     durationMs: number;
   }> {
     const startTime = Date.now();
-    let temporaryPath = '';
-    let finalPath = '';
+    let finalFileName = '';
+    let artifactPersisted = false;
 
     try {
       if (budget) budget.claim('generateArtifact', 1);
@@ -298,7 +292,6 @@ class SpecialistSwarmService {
       if (typeof fileName !== 'string' || !fileName.trim()) {
         throw new Error('ARTIFACT_FILENAME_REQUIRED');
       }
-
       const suppliedName = fileName.trim();
       if (path.basename(suppliedName) !== suppliedName || suppliedName === '.' || suppliedName === '..') {
         throw new Error('INVALID_ARTIFACT_FILENAME');
@@ -314,30 +307,31 @@ class SpecialistSwarmService {
       const generated = await generateArtifactBuffer(normalizedType, content, displayFileName);
       if (!generated.buffer.length) throw new Error('ARTIFACT_VALIDATION_FAILED: generated file is empty');
 
-      const publicDir = getArtifactStorageDirectoryForGeneration();
-      await fs.promises.mkdir(publicDir, { recursive: true });
+      finalFileName = Date.now() + '_' + randomUUID() + '_' + displayFileName;
 
-      const finalFileName = Date.now() + '_' + randomUUID() + '_' + displayFileName;
-      finalPath = path.join(publicDir, finalFileName);
-      temporaryPath = path.join(publicDir, '.' + finalFileName + '.' + randomUUID() + '.tmp');
-
-      // Fail closed if secure download signing is not configured. Never return a
-      // permanent public link for a user-generated artifact.
+      // Fail closed before writing bytes when secure download signing is not configured.
       const downloadUrl = artifactAccessService.createSignedPath(finalFileName);
 
-      await fs.promises.writeFile(temporaryPath, generated.buffer, { flag: 'wx', mode: 0o600 });
-      await fs.promises.rename(temporaryPath, finalPath);
-      temporaryPath = '';
+      // Persist the actual file bytes to Neon PostgreSQL. No local filesystem fallback is allowed.
+      await neonDb.saveArtifact({
+        fileName: finalFileName,
+        displayName: displayFileName,
+        type: normalizedType,
+        mimeType: generated.mimeType,
+        content: generated.buffer,
+        generatedAt: generated.generatedAt,
+      });
+      artifactPersisted = true;
 
-      const savedBuffer = await fs.promises.readFile(finalPath);
-      const savedStats = await fs.promises.stat(finalPath);
-      if (!savedStats.isFile() || savedStats.size === 0 || savedStats.size !== generated.buffer.length) {
-        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted file size did not match the generated output');
+      // Read the durable record back and validate stored bytes before exposing a link.
+      const storedArtifact = await neonDb.getArtifactContent(finalFileName);
+      if (!storedArtifact) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: database did not return the persisted artifact');
       }
-      if (!savedBuffer.equals(generated.buffer)) {
-        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted file contents did not match the generated output');
+      const savedBuffer = storedArtifact.content;
+      if (storedArtifact.sizeBytes !== generated.buffer.length || !savedBuffer.equals(generated.buffer)) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted database bytes did not match generated output');
       }
-
       if (normalizedType === 'pdf' && savedBuffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
         throw new Error('ARTIFACT_VALIDATION_FAILED: persisted PDF signature is invalid');
       }
@@ -358,16 +352,21 @@ class SpecialistSwarmService {
         fileName: finalFileName,
         displayName: displayFileName,
         type: normalizedType,
-        mimeType: generated.mimeType,
-        sizeBytes: savedStats.size,
-        generatedAt: generated.generatedAt,
+        mimeType: storedArtifact.mimeType,
+        sizeBytes: storedArtifact.sizeBytes,
+        generatedAt: storedArtifact.generatedAt,
         validationStatus: 'validated',
         themeName: 'TwinMind Professional',
         durationMs: Date.now() - startTime,
       };
     } catch (err) {
-      if (temporaryPath) await fs.promises.unlink(temporaryPath).catch(() => undefined);
-      if (finalPath) await fs.promises.unlink(finalPath).catch(() => undefined);
+      if (artifactPersisted && finalFileName) {
+        try {
+          await neonDb.deleteArtifact(finalFileName);
+        } catch {
+          // Never expose an unvalidated artifact. Cleanup failure is operationally recoverable.
+        }
+      }
       return {
         status: 'error',
         url: '',
@@ -378,6 +377,8 @@ class SpecialistSwarmService {
       };
     }
   }
+
+
 
   /**
    * Intent analysis: determines what sub-tasks to dispatch to specialists
