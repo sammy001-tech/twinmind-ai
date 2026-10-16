@@ -35,27 +35,27 @@ export class TwilioService {
     const envUserPhone = (process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '').trim();
 
     // 1. Check Settings first
-    const hasSettingsConfig = Boolean(sAccountSid && sAuthToken);
+    const hasSettingsConfig = Boolean(sAccountSid && sAuthToken && sWhatsAppNumber && sUserPhone);
     if (hasSettingsConfig) {
       return {
         accountSid: sAccountSid,
         authToken: sAuthToken,
-        whatsappNumber: this.formatWhatsAppNumber(sWhatsAppNumber || envWhatsAppNumber),
-        userPhoneNumber: this.normalizePhoneNumber(sUserPhone || envUserPhone),
-        enforceSignature: settings.enforceTwilioSignature !== false,
+        whatsappNumber: this.formatWhatsAppNumber(sWhatsAppNumber),
+        userPhoneNumber: this.normalizePhoneNumber(sUserPhone),
+        enforceSignature: process.env.NODE_ENV === 'production' || settings.enforceTwilioSignature !== false,
         source: 'settings',
       };
     }
 
     // 2. Check Environment Variables second
-    const hasEnvConfig = Boolean(envAccountSid && envAuthToken);
+    const hasEnvConfig = Boolean(envAccountSid && envAuthToken && envWhatsAppNumber && envUserPhone);
     if (hasEnvConfig) {
       return {
         accountSid: envAccountSid,
         authToken: envAuthToken,
-        whatsappNumber: this.formatWhatsAppNumber(envWhatsAppNumber || sWhatsAppNumber),
-        userPhoneNumber: this.normalizePhoneNumber(envUserPhone || sUserPhone),
-        enforceSignature: settings.enforceTwilioSignature !== false,
+        whatsappNumber: this.formatWhatsAppNumber(envWhatsAppNumber),
+        userPhoneNumber: this.normalizePhoneNumber(envUserPhone),
+        enforceSignature: process.env.NODE_ENV === 'production' || settings.enforceTwilioSignature !== false,
         source: 'env',
       };
     }
@@ -109,19 +109,36 @@ export class TwilioService {
     }
 
     try {
-      const protocol = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
-      const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'localhost';
-      const url = `${protocol}://${host}${req.originalUrl || req.url}`;
-      
+      const configuredWebhookUrl = (process.env.TWILIO_WEBHOOK_URL || '').trim();
+      let url: string;
+      if (configuredWebhookUrl) {
+        const canonical = new URL(configuredWebhookUrl);
+        const incoming = new URL(req.originalUrl || req.url, canonical.origin);
+        if (incoming.pathname !== canonical.pathname) {
+          console.warn('[TwilioService] Request path does not match configured canonical webhook path.');
+          return false;
+        }
+        // The canonical host/protocol always comes from deployment configuration, never forwarded headers.
+        url = `${canonical.origin}${canonical.pathname}${incoming.search || canonical.search}`;
+      } else {
+        if (process.env.NODE_ENV === 'production') {
+          console.error('[TwilioService] TWILIO_WEBHOOK_URL is required in production for signature verification.');
+          return false;
+        }
+        const host = req.get('host');
+        if (!host) return false;
+        url = `${req.protocol}://${host}${req.originalUrl || req.url}`;
+      }
+
       const params = req.body || {};
       const isValid = twilio.validateRequest(config.authToken, signature, url, params);
-      
+
       if (!isValid) {
-        console.warn(`[TwilioService] X-Twilio-Signature validation failed for URL: ${url}`);
+        console.warn('[TwilioService] X-Twilio-Signature validation failed.');
       }
       return isValid;
     } catch (err) {
-      console.error('[TwilioService] Error during signature validation:', err);
+      console.error('[TwilioService] Error during signature validation:', err instanceof Error ? err.message : 'unknown error');
       return false;
     }
   }
@@ -133,21 +150,17 @@ export class TwilioService {
     const config = this.getResolvedConfig();
     const sender = this.normalizePhoneNumber(fromHeader);
 
-    if (!sender) return false;
-
-    // If userPhoneNumber is configured, strictly enforce matching
-    if (config?.userPhoneNumber) {
-      const authorized = this.normalizePhoneNumber(config.userPhoneNumber);
-      const matches = sender === authorized;
-      if (!matches) {
-        console.warn(`[TwilioService] Unauthorized WhatsApp sender: ${sender} (Expected: ${authorized})`);
-      }
-      return matches;
+    if (!sender || !config?.userPhoneNumber) {
+      console.warn('[TwilioService] Rejecting inbound WhatsApp message: sender allowlist is not configured.');
+      return false;
     }
 
-    // If no explicit user phone number is locked down, permit for initial setup but log warning
-    console.warn(`[TwilioService] No userPhoneNumber locked down in settings. Permitting message from ${sender}`);
-    return true;
+    const authorized = this.normalizePhoneNumber(config.userPhoneNumber);
+    const matches = sender === authorized;
+    if (!matches) {
+      console.warn('[TwilioService] Rejected WhatsApp sender that does not match the configured owner allowlist.');
+    }
+    return matches;
   }
 
   /**
