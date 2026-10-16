@@ -124,7 +124,7 @@ interface ChatMessageProps {
 export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   message,
   channel,
-  displayName = 'User',
+  displayName = '',
   onGenerateAudio,
   onEditMessage,
   onEditAndRegenerate,
@@ -672,7 +672,7 @@ interface GroupedChatMessageListProps {
 export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   messages,
   channel,
-  displayName = 'User',
+  displayName = '',
   onGenerateAudio,
   onEditMessage,
   onEditAndRegenerate,
