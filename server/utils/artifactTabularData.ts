@@ -20,7 +20,8 @@ function cellValue(value: unknown): ArtifactCell {
     if (Number.isNaN(value.getTime())) return null;
     return value.toISOString();
   }
-  return JSON.stringify(value);
+  const serialized = JSON.stringify(value);
+  return typeof serialized === 'string' ? serialized : String(value);
 }
 
 function validateTable(headersInput: unknown[], rowsInput: unknown[][]): ParsedArtifactTable {
@@ -277,7 +278,13 @@ export function parseArtifactTableContent(content: unknown): ParsedArtifactTable
 }
 
 function toCsvCell(value: ArtifactCell): string {
-  const text = value === null ? '' : String(value);
+  if (value === null) return '';
+  // CSV opened directly in spreadsheet software can execute formula-like cells.
+  // Preserve numeric types while neutralizing formula syntax in source text.
+  const rawText = String(value);
+  const text = typeof value === 'string' && /^[\\t\\r\\n ]*[=+@-]/.test(rawText)
+    ? `'${rawText}`
+    : rawText;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
