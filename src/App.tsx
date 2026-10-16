@@ -66,12 +66,12 @@ export default function App() {
   const [isThreadDrawerOpen, setIsThreadDrawerOpen] = useState(false);
 
   // App Brand Name & User Identity (Dynamically loaded directly from database)
-  const [brandName, setBrandName] = useState<string>('TwinMind AI');
+  const [brandName, setBrandName] = useState<string>('');
   const [userName, setUserName] = useState<string>('');
   const [nickname, setNickname] = useState<string>('');
 
   // Multi-Model Brain: Per-provider Model Selection (Dynamically loaded from database)
-  const [activeProvider, setActiveProvider] = useState<string>('gemini');
+  const [activeProvider, setActiveProvider] = useState<string>('');
 
   const [providerModels, setProviderModels] = useState<{
     gemini: string;
