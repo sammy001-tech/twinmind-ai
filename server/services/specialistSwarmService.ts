@@ -32,6 +32,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { parseArtifactTableContent, serializeArtifactCsv } from '../utils/artifactTabularData.ts';
+import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
 import { getArtifactStorageDirectory, getArtifactStorageScope, resolveArtifactFilePath } from '../utils/artifactStorage.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -678,6 +679,7 @@ class SpecialistSwarmService {
       .replace(/\s+(and\s+calculate|and\s+compute).*$/i, '')
       .trim();
     if (!researchQuery) researchQuery = prompt.slice(0, 80);
+    const resolvedArtifactFormat = resolveArtifactFormat(prompt, undefined);
 
     return {
       needsResearch,
@@ -690,8 +692,8 @@ class SpecialistSwarmService {
       needsPerspective,
       needsSignalFilter,
       needsHistory,
-      needsArtifact: /(generate|create|export|make|build)\s+(document|report|pdf|csv|excel|xlsx|markdown|spreadsheet|file|artifact)/i.test(lower),
-      artifactType: lower.includes('excel') || lower.includes('xlsx') ? 'xlsx' : lower.includes('pdf') ? 'pdf' : lower.includes('csv') || lower.includes('spreadsheet') ? 'csv' : 'md',
+      needsArtifact: isArtifactGenerationRequest(prompt),
+      artifactType: 'format' in resolvedArtifactFormat ? resolvedArtifactFormat.format : undefined,
     };
   }
 
@@ -1279,7 +1281,7 @@ class SpecialistSwarmService {
             docContent += `${trace.summary}\n\n`;
           }
 
-          const artifactType = goals.artifactType || 'md';
+          const artifactType = goals.artifactType;
           const tabularTypes = artifactType === 'xlsx' || artifactType === 'csv';
           const tabularRows = specialistTraces
             .filter((trace) =>
@@ -1297,12 +1299,22 @@ class SpecialistSwarmService {
             }));
           const artifactContent = tabularTypes ? tabularRows : docContent;
 
-          const artifactRes = await this.executeGenerateArtifact(
-            artifactType,
-            artifactContent,
-            `Report_${Date.now()}.${artifactType}`,
-            scope.budget
-          );
+          const artifactRes = artifactType
+            ? await this.executeGenerateArtifact(
+                artifactType,
+                artifactContent,
+                `Report_${Date.now()}.${artifactType}`,
+                scope.budget,
+              )
+            : {
+                status: 'error' as const,
+                url: '',
+                fileName: '',
+                displayName: '',
+                type: 'unknown',
+                error: 'ARTIFACT_FORMAT_REQUIRED: specify PDF, XLSX, CSV, or Markdown before generating this file.',
+                durationMs: Date.now() - specStart,
+              };
 
           if (scope.isTerminated) return;
 
