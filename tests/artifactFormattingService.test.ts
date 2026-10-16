@@ -78,7 +78,7 @@ test('creates CSV with proper quoting, UTF-8 BOM, and formula-like text neutrali
   const generated = await generateArtifactBuffer(
     'csv',
     [
-      { Brand: 'Brand, Incorporated', Notes: 'Says "hello"\nand then left', FormulaLike: '=HYPERLINK("https://example.com","open")', NegativeFormulaLike: '-HYPERLINK("https://example.com","open")', Balance: -100 },
+      { Brand: 'Brand, Incorporated', Notes: 'Says "hello"\nand then left', FormulaLike: '=HYPERLINK("https://example.com","open")', NegativeFormulaLike: '-HYPERLINK("https://example.com","open")', Balance: -100, NegativeNumericText: '-12.5' },
     ],
     'Prospects.csv',
     new Date('2026-01-02T03:04:05.000Z'),
@@ -91,6 +91,7 @@ test('creates CSV with proper quoting, UTF-8 BOM, and formula-like text neutrali
   assert.ok(csv.includes("'=HYPERLINK"));
   assert.ok(csv.includes("'-HYPERLINK"));
   assert.ok(csv.includes(',-100'));
+  assert.ok(csv.includes(',-100,-12.5'));
 });
 
 test('creates readable Markdown with a title and a valid table without changing source values', async () => {
@@ -135,4 +136,43 @@ test('artifact storage readiness is explicitly database-backed', () => {
   assert.equal(status.mode, 'database');
   assert.equal(status.canGenerate, true);
   assert.match(status.warning, /stored in Neon PostgreSQL/);
+});
+
+
+test('parses JSON-encoded records as structured table data', () => {
+  const parsed = parseArtifactContent('[{"Brand":"Brand A","Website":"https://brand-a.example"},{"Brand":"Brand B","Website":"https://brand-b.example"}]');
+  assert.equal(parsed.kind, 'table');
+  if (parsed.kind !== 'table') return;
+  assert.deepEqual(parsed.headers, ['Brand', 'Website']);
+  assert.deepEqual(parsed.rows, [
+    ['Brand A', 'https://brand-a.example'],
+    ['Brand B', 'https://brand-b.example'],
+  ]);
+});
+
+test('parses fenced JSON and explicit headers/rows as a table', () => {
+  const fence = String.fromCharCode(96, 96, 96);
+  const parsed = parseArtifactContent(fence + 'json\n{"headers":["Brand","Website"],"rows":[{"Brand":"Brand A","Website":"https://brand-a.example"}]}\n' + fence);
+  assert.equal(parsed.kind, 'table');
+  if (parsed.kind !== 'table') return;
+  assert.deepEqual(parsed.headers, ['Brand', 'Website']);
+  assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
+});
+
+test('rejects malformed JSON table input instead of treating it as document prose', () => {
+  assert.throws(
+    () => parseArtifactContent('[{"Brand":'),
+    /ARTIFACT_JSON_INVALID/,
+  );
+});
+
+test('rejects prose-only CSV and XLSX instead of fabricating a one-column table', async () => {
+  await assert.rejects(
+    () => generateArtifactBuffer('csv', 'The report includes three findings.', 'Findings.csv'),
+    /ARTIFACT_TABULAR_DATA_REQUIRED/,
+  );
+  await assert.rejects(
+    () => generateArtifactBuffer('xlsx', 'The report includes three findings.', 'Findings.xlsx'),
+    /ARTIFACT_TABULAR_DATA_REQUIRED/,
+  );
 });
