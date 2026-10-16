@@ -1279,10 +1279,28 @@ class SpecialistSwarmService {
             docContent += `${trace.summary}\n\n`;
           }
 
+          const artifactType = goals.artifactType || 'md';
+          const tabularTypes = artifactType === 'xlsx' || artifactType === 'excel' || artifactType === 'csv';
+          const tabularRows = specialistTraces
+            .filter((trace) =>
+              trace.specialist !== 'ArtifactArchitect' &&
+              typeof trace.summary === 'string' &&
+              trace.summary.trim().length > 0,
+            )
+            .map((trace) => ({
+              specialist: trace.specialist,
+              role: trace.roleName,
+              task: trace.taskDescription,
+              status: trace.status,
+              summary: trace.summary,
+              durationMs: trace.durationMs,
+            }));
+          const artifactContent = tabularTypes ? tabularRows : docContent;
+
           const artifactRes = await this.executeGenerateArtifact(
-            goals.artifactType || 'md',
-            docContent,
-            `Report_${Date.now()}.${goals.artifactType || 'md'}`,
+            artifactType,
+            artifactContent,
+            `Report_${Date.now()}.${artifactType}`,
             scope.budget
           );
 
