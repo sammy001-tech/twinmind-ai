@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { neonDb } from '../db/neonService.ts';
 
 export interface JobRecord {
@@ -25,16 +26,13 @@ export interface JobRecord {
 const HEARTBEAT_EXPIRATION_MS = 5 * 60 * 1000; // 5 minutes
 
 export class JobQueueService {
-  private inMemoryJobs = new Map<string, JobRecord>();
-
   /**
    * Check if MessageSid exists already for deduplication
    */
   public async getJobByMessageSid(messageSid: string): Promise<JobRecord | null> {
     if (!messageSid) return null;
     const row = await neonDb.getJobByMessageSid(messageSid);
-    if (row) return this.mapRowToJob(row);
-    return this.inMemoryJobs.get(messageSid) || null;
+    return row ? this.mapRowToJob(row) : null;
   }
 
   /**
@@ -45,34 +43,33 @@ export class JobQueueService {
     senderPhone: string,
     payload: { body: string; from: string; to: string; messageSid: string; [key: string]: any }
   ): Promise<{ job: JobRecord | null; isDuplicate: boolean }> {
-    const existing = await this.getJobByMessageSid(messageSid);
-    if (existing) {
-      console.log(`[JobQueueService] Duplicate MessageSid detected: ${messageSid}. Skipping.`);
-      return { job: existing, isDuplicate: true };
-    }
+    const normalizedSid = messageSid.trim();
+    if (!normalizedSid) throw new Error('TWILIO_MESSAGE_SID_MISSING');
 
-    const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const newJob: JobRecord = {
-      jobId,
-      messageSid,
-      senderPhone,
-      channel: 'whatsapp',
-      status: 'pending',
-      attemptCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      payload,
-    };
-    this.inMemoryJobs.set(messageSid, newJob);
+    const existing = await this.getJobByMessageSid(normalizedSid);
+    if (existing) return { job: existing, isDuplicate: true };
 
-    await neonDb.insertJob({
+    const jobId = `job-${randomUUID()}`;
+    const persisted = await neonDb.insertJob({
       id: jobId,
-      message_sid: messageSid,
+      message_sid: normalizedSid,
       sender_phone: senderPhone,
       payload,
-    }).catch(() => {});
+    });
 
-    return { job: newJob, isDuplicate: false };
+    if (!persisted) {
+      // A concurrent webhook may have inserted the same MessageSid. Only acknowledge
+      // it as a duplicate after the durable row can be read back from the database.
+      const concurrent = await this.getJobByMessageSid(normalizedSid);
+      if (concurrent) return { job: concurrent, isDuplicate: true };
+      throw new Error('PERSISTENCE_FAILED: inbound WhatsApp job was not written to the durable queue');
+    }
+
+    const persistedRow = await this.getJobByMessageSid(normalizedSid);
+    if (!persistedRow) {
+      throw new Error('PERSISTENCE_VERIFICATION_FAILED: inserted WhatsApp job could not be read back');
+    }
+    return { job: persistedRow, isDuplicate: false };
   }
 
   /**
@@ -80,37 +77,13 @@ export class JobQueueService {
    */
   public async claimNextJob(workerLeaseId: string): Promise<JobRecord | null> {
     const row = await neonDb.claimNextJob(workerLeaseId, HEARTBEAT_EXPIRATION_MS);
-    if (row) {
-      const mapped = this.mapRowToJob(row);
-      this.inMemoryJobs.set(mapped.messageSid, mapped);
-      return mapped;
-    }
-
-    // Local in-memory claim if database offline
-    for (const job of this.inMemoryJobs.values()) {
-      if (job.status === 'pending') {
-        job.status = 'processing';
-        job.workerLeaseId = workerLeaseId;
-        job.attemptCount += 1;
-        job.lastHeartbeatAt = new Date().toISOString();
-        job.updatedAt = new Date().toISOString();
-        return job;
-      }
-    }
-    return null;
+    return row ? this.mapRowToJob(row) : null;
   }
 
   /**
    * Heartbeat ping to keep worker lease active during multi-pass debates
    */
   public async updateHeartbeat(jobId: string, workerLeaseId: string): Promise<boolean> {
-    for (const job of this.inMemoryJobs.values()) {
-      if (job.jobId === jobId && job.workerLeaseId === workerLeaseId) {
-        job.lastHeartbeatAt = new Date().toISOString();
-        job.updatedAt = new Date().toISOString();
-        break;
-      }
-    }
     return await neonDb.updateJobHeartbeat(jobId, workerLeaseId);
   }
 
@@ -118,14 +91,6 @@ export class JobQueueService {
    * Mark job completed
    */
   public async completeJob(jobId: string, workerLeaseId: string, result?: any): Promise<boolean> {
-    for (const job of this.inMemoryJobs.values()) {
-      if (job.jobId === jobId) {
-        job.status = 'completed';
-        job.result = result;
-        job.updatedAt = new Date().toISOString();
-        break;
-      }
-    }
     return await neonDb.updateJobStatus(jobId, workerLeaseId, 'completed', result);
   }
 
@@ -133,14 +98,6 @@ export class JobQueueService {
    * Mark job failed
    */
   public async failJob(jobId: string, workerLeaseId: string, error: string): Promise<boolean> {
-    for (const job of this.inMemoryJobs.values()) {
-      if (job.jobId === jobId) {
-        job.status = 'failed';
-        job.error = error;
-        job.updatedAt = new Date().toISOString();
-        break;
-      }
-    }
     return await neonDb.updateJobStatus(jobId, workerLeaseId, 'failed', undefined, error);
   }
 
