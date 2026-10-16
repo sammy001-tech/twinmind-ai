@@ -103,11 +103,8 @@ app.use('/api', (req: Request, res: Response, next) => {
     }
     try {
       const parsedOrigin = new URL(origin);
-      if (parsedOrigin.origin !== `${req.protocol}://${host}` && parsedOrigin.host.toLowerCase() !== host.toLowerCase()) {
-        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
-        return;
-      }
-      if (parsedOrigin.host.toLowerCase() !== host.toLowerCase()) {
+      const expectedOrigin = new URL(`${req.protocol}://${host}`);
+      if (parsedOrigin.origin.toLowerCase() !== expectedOrigin.origin.toLowerCase()) {
         res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
         return;
       }
