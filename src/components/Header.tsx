@@ -18,11 +18,13 @@ import {
   Check,
   MoreVertical,
   Download,
+  LogOut,
   Trash2,
   Settings,
   Mic,
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
+import { useAuthSession } from '../contexts/AuthSessionContext.tsx';
 
 interface HeaderProps {
   brandName?: string;
@@ -74,6 +76,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenVoiceModal,
 }) => {
   const displayName = nickname.trim() || userName.trim();
+  const authSession = useAuthSession();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
@@ -264,7 +267,7 @@ export const Header: React.FC<HeaderProps> = ({
 
               {/* Overflow Options Popover Menu */}
               {isMoreMenuOpen && (
-                <div className="absolute top-9 right-0 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-1.5 z-50 animate-in fade-in duration-150">
+                <div className="absolute top-9 right-0 w-48 max-h-[min(80dvh,32rem)] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-1.5 z-50 animate-in fade-in duration-150">
                   {onToggleSearch && (
                     <button
                       type="button"
@@ -392,6 +395,21 @@ export const Header: React.FC<HeaderProps> = ({
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                         <span>Clear Session</span>
+                      </button>
+                    </div>
+                  )}
+                  {authSession && (
+                    <div className="border-t border-slate-200 dark:border-slate-800 my-1 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsMoreMenuOpen(false);
+                          void authSession.signOut();
+                        }}
+                        className="w-full text-left px-2.5 py-2 rounded-xl text-xs text-red-500 hover:bg-red-500/10 flex items-center gap-2.5 transition"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Sign out</span>
                       </button>
                     </div>
                   )}

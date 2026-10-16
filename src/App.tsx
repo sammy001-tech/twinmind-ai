@@ -987,12 +987,11 @@ export default function App() {
       console.error('Chat error:', err);
       const errMsg = err instanceof Error ? err.message : 'Failed to communicate with your digital twin.';
       setErrorMessage(errMsg);
-      ensureAssistantMessage({ content: `⚠️ Error: ${errMsg}. Check Brain Settings or server configuration.` });
+      const visibleError = `⚠️ Error: ${errMsg}`;
+      ensureAssistantMessage({ content: visibleError });
       setMessages((prev) =>
         prev.map((msg) =>
-          msg.id === assistantId
-            ? { ...msg, content: `⚠️ Error: ${errMsg}. Check Brain Settings or server configuration.` }
-            : msg
+          msg.id === assistantId ? { ...msg, content: visibleError } : msg
         )
       );
     } finally {

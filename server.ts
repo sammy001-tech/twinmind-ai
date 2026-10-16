@@ -24,6 +24,7 @@ import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
 import { getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
+import { evaluateSameOriginRequest, resolveProviderCredential } from './server/services/providerCredentialService.ts';
 
 dotenv.config();
 
@@ -97,15 +98,15 @@ app.use('/api', (req: Request, res: Response, next) => {
       res.status(403).json({ success: false, code: 'ORIGIN_REQUIRED', error: 'A same-origin browser request is required for state-changing API operations.' });
       return;
     }
-    try {
-      const parsedOrigin = new URL(origin);
-      const expectedOrigin = new URL(`${req.protocol}://${host}`);
-      if (parsedOrigin.origin.toLowerCase() !== expectedOrigin.origin.toLowerCase()) {
-        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
-        return;
-      }
-    } catch {
-      res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Invalid request origin.' });
+    const publicOrigin = process.env.PUBLIC_APP_ORIGIN || process.env.APP_URL || process.env.RENDER_EXTERNAL_URL;
+    const originDecision = evaluateSameOriginRequest({ origin, host, protocol: req.protocol, publicOrigin });
+    if (originDecision.allowed === false) {
+      const error = originDecision.code === 'ORIGIN_REQUIRED'
+        ? 'A same-origin browser request is required.'
+        : originDecision.code === 'INVALID_PUBLIC_ORIGIN_CONFIGURATION'
+          ? 'The server public-origin configuration is invalid. Set PUBLIC_APP_ORIGIN to the public HTTPS origin.'
+          : 'The request origin does not match the configured public origin. Set PUBLIC_APP_ORIGIN or configure TRUST_PROXY_HOPS for your reverse proxy.';
+      res.status(403).json({ success: false, code: originDecision.code, error });
       return;
     }
   }
@@ -192,7 +193,7 @@ app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) =
   try {
     const artifact = await neonDb.getArtifactMetadata(fileName);
     if (!artifact) {
-      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The requested artifact was not found.' });
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The artifact record or content was not found in the active Neon database. Files generated before database-backed storage was enabled were not automatically migrated; regenerate this file if it is an older artifact.' });
       return;
     }
 
@@ -240,7 +241,7 @@ app.get('/artifacts/:filename', async (req: Request, res: Response) => {
   try {
     const artifact = await neonDb.getArtifactContent(fileName);
     if (!artifact) {
-      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The requested artifact was not found.' });
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The artifact record or content was not found in the active Neon database. Files generated before database-backed storage was enabled were not automatically migrated; regenerate this file if it is an older artifact.' });
       return;
     }
     const safeDisplayName = artifact.displayName.replace(/[^a-z0-9._-]/gi, '_') || 'artifact';
@@ -278,7 +279,7 @@ function getAiClient(req?: Request): GoogleGenAI {
     : '');
   const settingsKey = normalizeProviderApiKey(settingsManager.getSettings().customGeminiKey);
   const envKey = normalizeProviderApiKey(process.env.GEMINI_API_KEY);
-  const apiKey = customKey || settingsKey || envKey;
+  const apiKey = resolveProviderCredential(envKey, settingsKey, customKey).key;
 
   if (!apiKey) throw new Error('PROVIDER_CREDENTIALS_MISSING:gemini');
   return new GoogleGenAI({
@@ -415,9 +416,9 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
 app.get('/api/models/status', async (_req: Request, res: Response) => {
   const settings = settingsManager.getSettings();
   const keys = {
-    gemini: (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
-    groq: (settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
-    mistral: (settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+    gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key,
+    groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey).key,
+    mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey).key,
   };
 
   const [geminiModels, groqModels, mistralModels] = await Promise.all([
@@ -511,9 +512,9 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   const userProvidedKey = isMasked(cleanKey) ? '' : cleanKey;
 
   if (provider === 'gemini') {
-    const sKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-    const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-    const effectiveKey = userProvidedKey || sKey || eKey;
+    const sKey = settingsManager.getSettings().customGeminiKey;
+    const eKey = process.env.GEMINI_API_KEY;
+    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Gemini API key (starting with AIza or AQ.) or configure GEMINI_API_KEY.' });
@@ -559,9 +560,9 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   }
 
   if (provider === 'groq') {
-    const sKey = (settingsManager.getSettings().customGroqKey || '').trim();
-    const eKey = (process.env.GROQ_API_KEY || '').trim();
-    const effectiveKey = userProvidedKey || sKey || eKey;
+    const sKey = settingsManager.getSettings().customGroqKey;
+    const eKey = process.env.GROQ_API_KEY;
+    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Groq API key to test (starting with gsk_).' });
@@ -596,9 +597,9 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   }
 
   if (provider === 'mistral') {
-    const sKey = (settingsManager.getSettings().customMistralKey || '').trim();
-    const eKey = (process.env.MISTRAL_API_KEY || '').trim();
-    const effectiveKey = userProvidedKey || sKey || eKey;
+    const sKey = settingsManager.getSettings().customMistralKey;
+    const eKey = process.env.MISTRAL_API_KEY;
+    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Mistral API key to test.' });
@@ -645,12 +646,9 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
 
   const settings = settingsManager.getSettings();
   const requestKey = normalizeProviderApiKey(req.get(`x-${provider}-key`) || req.get('x-api-key'));
-  const storedKey = provider === 'gemini'
-    ? normalizeProviderApiKey(settings.customGeminiKey || process.env.GEMINI_API_KEY)
-    : provider === 'groq'
-      ? normalizeProviderApiKey(settings.customGroqKey || process.env.GROQ_API_KEY)
-      : normalizeProviderApiKey(settings.customMistralKey || process.env.MISTRAL_API_KEY);
-  const key = requestKey || storedKey;
+  const environmentKey = provider === 'gemini' ? process.env.GEMINI_API_KEY : provider === 'groq' ? process.env.GROQ_API_KEY : process.env.MISTRAL_API_KEY;
+  const settingsKey = provider === 'gemini' ? settings.customGeminiKey : provider === 'groq' ? settings.customGroqKey : settings.customMistralKey;
+  const key = resolveProviderCredential(environmentKey, settingsKey, requestKey).key;
 
   if (!key) {
     res.status(503).json({ success: false, provider, code: 'PROVIDER_CREDENTIALS_MISSING', models: [], isLiveApi: false });
@@ -682,9 +680,9 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
 app.get('/api/models/all', async (req: Request, res: Response): Promise<void> => {
   const settings = settingsManager.getSettings();
   const keys = {
-    gemini: normalizeProviderApiKey(req.get('x-gemini-key')) || normalizeProviderApiKey(settings.customGeminiKey || process.env.GEMINI_API_KEY),
-    groq: normalizeProviderApiKey(req.get('x-groq-key')) || normalizeProviderApiKey(settings.customGroqKey || process.env.GROQ_API_KEY),
-    mistral: normalizeProviderApiKey(req.get('x-mistral-key')) || normalizeProviderApiKey(settings.customMistralKey || process.env.MISTRAL_API_KEY),
+    gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey, req.get('x-gemini-key')).key,
+    groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey, req.get('x-groq-key')).key,
+    mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey, req.get('x-mistral-key')).key,
   };
 
   const [gemini, groq, mistral] = await Promise.all([
@@ -1339,11 +1337,11 @@ app.post('/api/analyze-decision', async (req: Request, res: Response): Promise<v
       return;
     }
 
-    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
-      normalizeProviderApiKey(req.get('x-api-key')) ||
-      normalizeProviderApiKey(req.body?.customGeminiKey) ||
-      normalizeProviderApiKey(currentSettings.customGeminiKey) ||
-      normalizeProviderApiKey(process.env.GEMINI_API_KEY);
+    const geminiKey = resolveProviderCredential(
+      process.env.GEMINI_API_KEY,
+      currentSettings.customGeminiKey,
+      req.get('x-gemini-key') || req.get('x-api-key') || req.body?.customGeminiKey,
+    ).key;
 
     if (!geminiKey) {
       res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
@@ -1443,7 +1441,7 @@ ${dilemma}`;
     // The challenger is optional and only runs when explicitly requested. It never silently
     // substitutes a second Gemini call and labels it an independent provider.
     if (includeChallenger === true) {
-      const mistralKey = (customMistralKey || currentSettings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim();
+      const mistralKey = resolveProviderCredential(process.env.MISTRAL_API_KEY, currentSettings.customMistralKey, customMistralKey).key;
       const challengerConfiguredModel = req.body?.challengerModel ||
         currentSettings.providerModels?.mistral ||
         (currentSettings.activeProvider === 'mistral' ? currentSettings.activeModel : '');
@@ -1553,11 +1551,11 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
-      normalizeProviderApiKey(req.get('x-api-key')) ||
-      normalizeProviderApiKey(req.body?.customGeminiKey) ||
-      normalizeProviderApiKey(settings.customGeminiKey) ||
-      normalizeProviderApiKey(process.env.GEMINI_API_KEY);
+    const geminiKey = resolveProviderCredential(
+      process.env.GEMINI_API_KEY,
+      settings.customGeminiKey,
+      req.get('x-gemini-key') || req.get('x-api-key') || req.body?.customGeminiKey,
+    ).key;
     if (!geminiKey) {
       res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
       return;
@@ -2307,7 +2305,7 @@ app.get('/api/tavily/status', (req: Request, res: Response): void => {
 });
 
 app.post('/api/tavily/test', async (req: Request, res: Response): Promise<void> => {
-  const apiKey = req.body.apiKey || settingsManager.getSettings().customTavilyKey || process.env.TAVILY_API_KEY;
+  const apiKey = resolveProviderCredential(process.env.TAVILY_API_KEY, settingsManager.getSettings().customTavilyKey, req.body.apiKey).key;
   if (!apiKey) {
     res.status(400).json({
       success: false,
@@ -2357,11 +2355,11 @@ app.post('/api/search', async (req: Request, res: Response): Promise<void> => {
     res.status(400).json({ success: false, error: 'Search query is required' });
     return;
   }
-  const tavilyApiKey =
-    req.body.customTavilyKey ||
-    (req.headers['x-tavily-api-key'] as string) ||
-    settingsManager.getSettings().customTavilyKey ||
-    process.env.TAVILY_API_KEY;
+  const tavilyApiKey = resolveProviderCredential(
+    process.env.TAVILY_API_KEY,
+    settingsManager.getSettings().customTavilyKey,
+    (req.headers['x-tavily-api-key'] as string) || req.body.customTavilyKey,
+  ).key;
   if (!tavilyApiKey) {
     res.status(500).json({ success: false, error: 'TAVILY_API_KEY is not configured on the server or in request. Live search requires a valid Tavily API key.' });
     return;
@@ -2406,11 +2404,11 @@ app.post('/api/scrape', async (req: Request, res: Response): Promise<void> => {
     res.status(400).json({ success: false, error: 'Target URL is required' });
     return;
   }
-  const tavilyApiKey =
-    req.body.customTavilyKey ||
-    (req.headers['x-tavily-api-key'] as string) ||
-    settingsManager.getSettings().customTavilyKey ||
-    process.env.TAVILY_API_KEY;
+  const tavilyApiKey = resolveProviderCredential(
+    process.env.TAVILY_API_KEY,
+    settingsManager.getSettings().customTavilyKey,
+    (req.headers['x-tavily-api-key'] as string) || req.body.customTavilyKey,
+  ).key;
   if (!tavilyApiKey) {
     res.status(500).json({ success: false, error: 'TAVILY_API_KEY is not configured on the server or in request.' });
     return;
@@ -2471,9 +2469,9 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
 
     const settings = settingsManager.getSettings();
     const keys = {
-      gemini: (req.body.customGeminiKey || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
-      groq: (req.body.customGroqKey || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
-      mistral: (req.body.customMistralKey || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+      gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey, req.body.customGeminiKey).key,
+      groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey, req.body.customGroqKey).key,
+      mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey, req.body.customMistralKey).key,
     };
     const missingCredentials = Object.entries(keys).filter(([, key]) => !key).map(([provider]) => provider);
     if (missingCredentials.length) {

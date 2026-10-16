@@ -266,7 +266,7 @@ class TwinAgentService {
 
   public getGeminiClient(customKey?: string): GoogleGenAI {
     const s = settingsManager.getSettings();
-    const apiKey = this.resolveUsableCredential(customKey, s.customGeminiKey, process.env.GEMINI_API_KEY);
+    const apiKey = this.resolveUsableCredential(process.env.GEMINI_API_KEY, s.customGeminiKey, customKey);
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY is not configured on the server. Please check your credentials in Settings.');
     }
@@ -304,7 +304,7 @@ class TwinAgentService {
 
     // Provider 1: Groq LPUs
     if (effectiveProvider === 'groq') {
-      const key = this.resolveUsableCredential(options.customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY);
+      const key = this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, options.customGroqKey);
       if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:groq');
       if (key) {
         const model = await modelCatalogService.resolveModelForProvider('groq', options.model || s.providerModels.groq, key);
@@ -350,7 +350,7 @@ class TwinAgentService {
 
     // Provider 2: Mistral AI
     if (effectiveProvider === 'mistral') {
-      const key = this.resolveUsableCredential(options.customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
+      const key = this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, options.customMistralKey);
       if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:mistral');
       if (key) {
         const model = await modelCatalogService.resolveModelForProvider('mistral', options.model || s.providerModels.mistral, key);
@@ -395,7 +395,7 @@ class TwinAgentService {
     }
 
     // Provider 3: Google Gemini
-    const geminiKey = this.resolveUsableCredential(options.customGeminiKey, s.customGeminiKey, process.env.GEMINI_API_KEY);
+    const geminiKey = this.resolveUsableCredential(process.env.GEMINI_API_KEY, s.customGeminiKey, options.customGeminiKey);
     if (!geminiKey) {
       throw new Error(`No valid API key found for provider "${effectiveProvider}". Please configure your API key in Settings.`);
     }
@@ -443,9 +443,9 @@ class TwinAgentService {
     }
 
     const tavilyKey =
-      customTavilyKey ||
       process.env.TAVILY_API_KEY ||
-      settingsManager.getSettings().customTavilyKey;
+      settingsManager.getSettings().customTavilyKey ||
+      customTavilyKey;
 
     if (!tavilyKey) {
       return {
@@ -905,10 +905,10 @@ Respond in valid JSON:
     }
     const configuredModel = modelOverride || s.providerModels?.[provider] || (s.activeProvider === provider ? s.activeModel : '');
     const providerApiKey = provider === 'gemini'
-      ? this.resolveUsableCredential(options.customGeminiKey, s.customGeminiKey, process.env.GEMINI_API_KEY)
+      ? this.resolveUsableCredential(process.env.GEMINI_API_KEY, s.customGeminiKey, options.customGeminiKey)
       : provider === 'groq'
-        ? this.resolveUsableCredential(customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY)
-        : this.resolveUsableCredential(customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
+        ? this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, customGroqKey)
+        : this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, customMistralKey);
     if (!providerApiKey) throw new Error(`PROVIDER_CREDENTIALS_MISSING:${provider}`);
     const model = await modelCatalogService.resolveModelForProvider(provider, configuredModel, providerApiKey);
 
@@ -1192,7 +1192,7 @@ Respond in valid JSON:
     // PROVIDER 2: GROQ LPUS TOOL CALLING LOOP (OPENAI-COMPATIBLE)
     // =========================================================================
     if (provider === 'groq') {
-      const effectiveGroqKey = customGroqKey || process.env.GROQ_API_KEY || s.customGroqKey;
+      const effectiveGroqKey = process.env.GROQ_API_KEY || s.customGroqKey || customGroqKey;
       if (!effectiveGroqKey) {
         throw new Error('GROQ_API_KEY is not configured for Groq provider. Please provide your key in Settings.');
       }
@@ -1314,7 +1314,7 @@ Respond in valid JSON:
     // PROVIDER 3: MISTRAL AI TOOL CALLING LOOP (OPENAI-COMPATIBLE)
     // =========================================================================
     if (provider === 'mistral') {
-      const effectiveMistralKey = customMistralKey || process.env.MISTRAL_API_KEY || s.customMistralKey;
+      const effectiveMistralKey = process.env.MISTRAL_API_KEY || s.customMistralKey || customMistralKey;
       if (!effectiveMistralKey) {
         throw new Error('MISTRAL_API_KEY is not configured for Mistral provider. Please provide your key in Settings.');
       }

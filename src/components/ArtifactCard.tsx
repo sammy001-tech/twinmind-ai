@@ -89,7 +89,9 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
       if (!response.ok || data?.success !== true || typeof data.url !== 'string') {
         const serverError = typeof data?.error === 'string' && data.error.trim()
           ? data.error
-          : 'The secure link service returned HTTP ' + response.status + '.';
+          : data?.code === 'ARTIFACT_NOT_FOUND'
+            ? 'This file is not present in the database-backed store. Regenerate it if it predates the storage rollout.'
+            : 'The secure link service returned HTTP ' + response.status + '.';
         throw new Error(serverError);
       }
 

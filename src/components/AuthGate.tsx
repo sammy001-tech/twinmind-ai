@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { AuthSessionContext } from '../contexts/AuthSessionContext.tsx';
 
 type AccessState = 'checking' | 'locked' | 'unconfigured' | 'authenticated';
 
@@ -63,17 +64,9 @@ export default function AuthGate({ children }: AuthGateProps) {
 
   if (state === 'authenticated') {
     return (
-      <>
+      <AuthSessionContext.Provider value={{ signOut }}>
         {children}
-        <button
-          type="button"
-          onClick={() => void signOut()}
-          className="fixed right-3 top-3 z-[1000] rounded-lg border border-white/20 bg-black/70 px-3 py-2 text-xs font-medium text-white shadow-lg backdrop-blur"
-          aria-label="Sign out of owner session"
-        >
-          Sign out
-        </button>
-      </>
+      </AuthSessionContext.Provider>
     );
   }
 
