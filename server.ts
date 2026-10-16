@@ -1025,6 +1025,15 @@ app.post('/api/swarm/execute', async (req: Request, res: Response): Promise<void
       customGeminiKey: req.body.customGeminiKey,
     });
 
+    if (session.status !== 'completed') {
+      res.status(503).json({
+        success: false,
+        code: 'SWARM_EXECUTION_INCOMPLETE',
+        status: session.status,
+        session,
+      });
+      return;
+    }
     res.json({ success: true, session });
   } catch (err: unknown) {
     console.error('Swarm execution error:', err);
