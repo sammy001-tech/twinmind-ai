@@ -23,6 +23,7 @@ import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
 import { getArtifactStorageScope, resolveArtifactFilePath } from './server/utils/artifactStorage.ts';
+import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
 
 dotenv.config();
 
@@ -1107,7 +1108,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       (req as any)._artifactErrors = artifactErrors;
     }
 
-    const requestedArtifact = /\b(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|format|convert)\b[\s\S]{0,100}\b(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook)\b|\b(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook)\b[\s\S]{0,100}\b(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|format|convert)\b/i.test(lastUserQuery);
+    const requestedArtifact = isArtifactGenerationRequest(lastUserQuery);
     const verifiedArtifacts = Array.isArray((req as any)._artifacts) ? (req as any)._artifacts : [];
     const artifactErrors = Array.isArray((req as any)._artifactErrors) ? (req as any)._artifactErrors : [];
 
