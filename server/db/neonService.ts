@@ -1252,6 +1252,18 @@ class NeonDatabaseService {
   public async claimNextJob(workerLeaseId: string, heartbeatExpirationMs: number): Promise<any | null> {
     if (!this.pool || !this.isConnected) return null;
     try {
+      // Exhausted leases are terminally failed before a new job is claimed.
+      await this.pool.query(
+        `UPDATE twin_jobs
+         SET status = 'failed',
+             error = 'RETRY_LIMIT_EXCEEDED',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE status = 'processing'
+           AND last_heartbeat_at < CURRENT_TIMESTAMP - ($1 || ' milliseconds')::interval
+           AND attempt_count >= 3`,
+        [heartbeatExpirationMs]
+      );
+
       // Atomic claim using UPDATE ... RETURNING
       // Finds pending jobs OR processing jobs with expired heartbeat
       const res = await this.pool.query(
