@@ -95,13 +95,7 @@ export interface ArtifactStorageReadiness {
   schemaReady: boolean;
 }
 
-function postgresErrorCode(error: unknown): string {
-  if (error && typeof error === 'object' && 'code' in error) {
-    const code = (error as { code?: unknown }).code;
-    if (typeof code === 'string' && /^[A-Z0-9]+$/.test(code)) return code;
-  }
-  return 'unknown';
-}
+
 
 class NeonDatabaseService {
   private pool: Pool | null = null;
