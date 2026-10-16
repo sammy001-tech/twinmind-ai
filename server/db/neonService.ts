@@ -95,6 +95,14 @@ class NeonDatabaseService {
     return attempt;
   }
 
+  /**
+   * Backward-compatible entry point for services that explicitly refresh the
+   * connection. It shares the same in-flight attempt and bounded retry policy.
+   */
+  public refreshConnection(): Promise<boolean> {
+    return this.ensureConnected();
+  }
+
   private async connectWithRetries(): Promise<boolean> {
     const { url } = this.getActiveUrl();
     if (!url) return this.connectOnce();
