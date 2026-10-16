@@ -1069,7 +1069,8 @@ Respond in valid JSON:
 
         // If no tool call was requested by the model, we have our final synthesized response!
         if (!functionCalls || functionCalls.length === 0) {
-          const finalReply = response.text?.trim() || 'No response returned from model.';
+          const finalReply = response.text?.trim() || '';
+          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Gemini returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
@@ -1141,6 +1142,7 @@ Respond in valid JSON:
       );
 
       const finalReply = finalSynthesis.text?.trim() || '';
+      if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Gemini final synthesis returned no reply');
       const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
 
       // Background Memory Extraction (Autonomous Learning)
@@ -1207,7 +1209,8 @@ Respond in valid JSON:
         const toolCalls = message?.tool_calls;
 
         if (!toolCalls || toolCalls.length === 0) {
-          const finalReply = message?.content?.trim() || 'No response returned from Groq.';
+          const finalReply = message?.content?.trim() || '';
+          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Groq returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
@@ -1261,6 +1264,7 @@ Respond in valid JSON:
       });
       const finalData = await finalRes.json();
       const finalReplyGroq = finalData.choices?.[0]?.message?.content?.trim() || '';
+      if (!finalReplyGroq) throw new Error('AI_OUTPUT_EMPTY: Groq final synthesis returned no reply');
       const suggestedActionsGroq = this.extractSuggestedActions(finalReplyGroq, userPrompt, toolsExecuted);
       
       // Background Memory Extraction (Autonomous Learning)
@@ -1328,6 +1332,7 @@ Respond in valid JSON:
 
         if (!toolCalls || toolCalls.length === 0) {
           const finalReply = message?.content?.trim() || '';
+          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Mistral returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
@@ -1381,6 +1386,7 @@ Respond in valid JSON:
       });
       const finalData = await finalRes.json();
       const finalReplyMistral = finalData.choices?.[0]?.message?.content?.trim() || '';
+      if (!finalReplyMistral) throw new Error('AI_OUTPUT_EMPTY: Mistral final synthesis returned no reply');
       const suggestedActionsMistral = this.extractSuggestedActions(finalReplyMistral, userPrompt, toolsExecuted);
       
       // Background Memory Extraction (Autonomous Learning)
