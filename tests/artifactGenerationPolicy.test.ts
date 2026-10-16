@@ -26,6 +26,12 @@ test('parses records using the union of keys actually present in source data', (
   ]);
 });
 
+test('parses explicitly fenced JSON emitted by the model as structured data', () => {
+  const parsed = parseArtifactTableContent('```json\\n[{"brand":"Brand A","website":"https://brand-a.example"}]\\n```');
+  assert.deepEqual(parsed.headers, ['brand', 'website']);
+  assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
+});
+
 test('parses markdown tables without inventing rows or column labels', () => {
   const parsed = parseArtifactTableContent(
     '| Brand | Website |\n| --- | --- |\n| Brand A | https://brand-a.example |\n| Brand B | https://brand-b.example |',
@@ -130,7 +136,7 @@ test('does not show unverified successful-generation claims when generation fail
     'The Excel file has been generated and formatted.',
     'You can download it here: /artifacts/file.xlsx',
     'The source notes still explain the intended columns.',
-  ].join('\\n');
+  ].join('\n');
 
   assert.equal(
     removeUnverifiedArtifactSuccessClaims(content, [], errors),
