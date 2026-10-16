@@ -1427,29 +1427,43 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
 app.post('/api/audio/transcribe-and-summarize', async (req: Request, res: Response): Promise<void> => {
   try {
     const { audioBase64, mimeType, prompt } = req.body;
-    if (!audioBase64) {
-      res.status(400).json({ success: false, error: 'audioBase64 data is required.' });
+    if (typeof audioBase64 !== 'string' || !audioBase64.trim()) {
+      res.status(400).json({ success: false, code: 'AUDIO_INPUT_REQUIRED' });
+      return;
+    }
+    if (typeof mimeType !== 'string' || !mimeType.trim()) {
+      res.status(400).json({ success: false, code: 'AUDIO_MIME_TYPE_REQUIRED' });
       return;
     }
 
     const settings = settingsManager.getSettings();
-    const provider = settings.activeProvider || 'gemini';
-    const model = settings.activeModel || settings.providerModels?.[provider] || '';
+    const provider = settings.activeProvider;
+    if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'PROVIDER_CONFIGURATION_REQUIRED' });
+      return;
+    }
+    const model = settings.providerModels?.[provider] ||
+      (settings.activeProvider === provider ? settings.activeModel : '');
+    if (!model) {
+      res.status(503).json({ success: false, code: 'MODEL_CONFIGURATION_REQUIRED', provider });
+      return;
+    }
 
-    const effectivePrompt =
-      prompt ||
-      'Listen to this voice memo / audio recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast.';
+    const taskPrompt = typeof prompt === 'string' && prompt.trim()
+      ? prompt.trim()
+      : 'Transcribe the supplied audio accurately. Summarize only content actually present in the recording, distinguish uncertain speech from clear speech, and do not invent missing words, speakers, action items, dates, or commitments.';
 
     const turnResult = await twinAgentService.executeTurn({
-      userPrompt: effectivePrompt,
-      audioData: {
-        mimeType: mimeType || 'audio/webm',
-        data: audioBase64,
-      },
+      userPrompt: taskPrompt,
+      audioData: { mimeType: mimeType.trim(), data: audioBase64 },
       channel: 'web',
-      providerOverride: provider as any,
+      providerOverride: provider,
       modelOverride: model,
     });
+    if (typeof turnResult.reply !== 'string' || !turnResult.reply.trim()) {
+      res.status(502).json({ success: false, code: 'AI_OUTPUT_EMPTY' });
+      return;
+    }
 
     res.json({
       success: true,
@@ -1459,8 +1473,9 @@ app.post('/api/audio/transcribe-and-summarize', async (req: Request, res: Respon
       provider: turnResult.provider,
       model: turnResult.model,
     });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Audio transcription failed';
+    res.status(502).json({ success: false, code: message.split(':')[0], error: message });
   }
 });
 
