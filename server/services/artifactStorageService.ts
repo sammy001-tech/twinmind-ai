@@ -51,7 +51,13 @@ export function resolveArtifactStorageDirectory(
 
 /** Resolve the same storage directory for download/access routes and generation. */
 export function getArtifactStorageDirectory(): string {
-  return resolveArtifactStorageDirectory({ nodeEnv: 'development' });
+  const configuredPath = process.env.ARTIFACTS_DIR?.trim();
+  // Keep the server bootable so the UI can report a misconfiguration. Generation
+  // is separately fail-closed by getArtifactStorageDirectoryForGeneration().
+  if (!configuredPath || !path.isAbsolute(configuredPath)) {
+    return path.resolve(process.cwd(), 'public', 'artifacts');
+  }
+  return path.resolve(configuredPath);
 }
 
 /** Strict production generation gate. */
