@@ -188,7 +188,6 @@ function getAiClient(req?: Request): GoogleGenAI {
   const customKey = (req
     ? ((req.headers['x-gemini-key'] as string) ||
        (req.headers['x-api-key'] as string) ||
-       (req.query?.apiKey as string) ||
        (req.body?.customGeminiKey as string))
     : '')?.trim().replace(/^["']|["']$/g, '');
 
@@ -536,275 +535,82 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   res.status(400).json({ success: false, error: `Unknown provider: ${provider}` });
 });
 
-import { 
-  GEMINI_CATALOG_MODELS
-} from './src/config/models.ts';
-
-
 // Live Dynamic Models Query Endpoint (Queries live API or catalog)
 app.get('/api/models/live', async (req: Request, res: Response): Promise<void> => {
-  const provider = (req.query.provider as string) || 'gemini';
-  const customKey = (req.headers['x-api-key'] as string) || (req.query.apiKey as string);
-
-  try {
-    if (provider === 'gemini') {
-      const settings = settingsManager.getSettings();
-      const sKey = (settings.customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-      const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-      const cKey = ((req.headers['x-api-key'] as string) || (req.query.apiKey as string) || '').trim().replace(/^["']|["']$/g, '');
-      
-      const hasGeminiKey = Boolean(sKey || eKey || cKey);
-      
-      if (hasGeminiKey) {
-        try {
-          const client = getAiClient(req);
-          // Only attempt live fetch if key looks valid (standard AI Studio keys start with AIza)
-          const currentKey = sKey || eKey || cKey;
-          if (currentKey.startsWith('AIza') || currentKey.startsWith('AQ.') || currentKey.length > 30) {
-            const pager = await client.models.list();
-            const models: { id: string; displayName: string; description?: string }[] = [];
-            for await (const m of pager) {
-              const id = m.name?.replace(/^models\//, '') || '';
-              if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
-                models.push({
-                  id,
-                  displayName: m.displayName || id,
-                  description: m.description,
-                });
-              }
-            }
-            if (models.length > 0) {
-              res.json({ provider: 'gemini', models, isLiveApi: true });
-              return;
-            }
-          } else {
-            console.warn('[Gemini] Provided key does not appear to be a standard Gemini API key. Skipping live models list.');
-          }
-        } catch (err: any) {
-          if (!err?.message?.includes('401') && !err?.message?.includes('UNAUTHENTICATED')) {
-            console.warn('Gemini live models fetch error:', err);
-          }
-          res.status(502).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'Failed to fetch live Gemini model registry.' });
-          return;
-        }
-      } else {
-        res.status(401).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'API key required for live Gemini model retrieval.' });
-        return;
-      }
-    }
-
-    if (provider === 'groq') {
-      const savedKey = settingsManager.getSettings().customGroqKey;
-      const key = customKey || savedKey || process.env.GROQ_API_KEY;
-      if (key) {
-        try {
-          const gRes = await fetch('https://api.groq.com/openai/v1/models', {
-            headers: { Authorization: `Bearer ${key}` },
-          });
-          if (gRes.ok) {
-            const data = await gRes.json();
-            const models = (data.data || []).map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Groq LPU model (${m.id})`,
-            }));
-            res.json({ provider: 'groq', models, isLiveApi: true });
-            return;
-          } else {
-            const errData = await gRes.json().catch(() => ({}));
-            res.status(gRes.status).json({
-              provider: 'groq',
-              models: [],
-              isLiveApi: false,
-              error: errData.error?.message || `Groq API returned status ${gRes.status}`,
-            });
-            return;
-          }
-        } catch (e: any) {
-          console.warn('Groq live query error:', e);
-          res.status(502).json({ provider: 'groq', models: [], isLiveApi: false, error: e.message || 'Groq API connection error' });
-          return;
-        }
-      }
-      // Zero-Fallback: No hardcoded models. Return empty list requiring key for live fetch.
-      res.json({
-        provider: 'groq',
-        models: [],
-        isLiveApi: false,
-        requiresKey: true,
-        message: 'Groq API key required to query live models.',
-      });
-      return;
-    }
-
-    if (provider === 'mistral') {
-      const savedKey = settingsManager.getSettings().customMistralKey;
-      const key = customKey || savedKey || process.env.MISTRAL_API_KEY;
-      if (key) {
-        try {
-          const mRes = await fetch('https://api.mistral.ai/v1/models', {
-            headers: { Authorization: `Bearer ${key}` },
-          });
-          if (mRes.ok) {
-            const data = await mRes.json();
-            const models = (data.data || []).map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Mistral model (${m.id})`,
-            }));
-            res.json({ provider: 'mistral', models, isLiveApi: true });
-            return;
-          } else {
-            const errData = await mRes.json().catch(() => ({}));
-            res.status(mRes.status).json({
-              provider: 'mistral',
-              models: [],
-              isLiveApi: false,
-              error: errData.message || `Mistral API returned status ${mRes.status}`,
-            });
-            return;
-          }
-        } catch (e: any) {
-          console.warn('Mistral live query error:', e);
-          res.status(502).json({ provider: 'mistral', models: [], isLiveApi: false, error: e.message || 'Mistral API connection error' });
-          return;
-        }
-      }
-      // Zero-Fallback: No hardcoded models. Return empty list requiring key for live fetch.
-      res.json({
-        provider: 'mistral',
-        models: [],
-        isLiveApi: false,
-        requiresKey: true,
-        message: 'Mistral API key required to query live models.',
-      });
-      return;
-    }
-
-    res.status(400).json({ error: `Unsupported provider: ${provider}` });
-  } catch (err: unknown) {
-    console.error('Live models query error:', err);
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to query live models.' });
+  const provider = req.query.provider as string;
+  if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+    res.status(400).json({ success: false, code: 'PROVIDER_REQUIRED', error: 'Specify a supported provider to query its live model catalogue.' });
+    return;
   }
+
+  const settings = settingsManager.getSettings();
+  const key = (
+    req.get(`x-${provider}-key`) ||
+    req.get('x-api-key') ||
+    (provider === 'gemini' ? settings.customGeminiKey || process.env.GEMINI_API_KEY :
+      provider === 'groq' ? settings.customGroqKey || process.env.GROQ_API_KEY :
+        settings.customMistralKey || process.env.MISTRAL_API_KEY) ||
+    ''
+  ).trim().replace(/^["']|["']$/g, '');
+
+  if (!key) {
+    res.status(503).json({ success: false, provider, code: 'PROVIDER_CREDENTIALS_MISSING', models: [], isLiveApi: false });
+    return;
+  }
+
+  const models = await modelCatalogService.getLiveModels(provider, key);
+  if (!models.length) {
+    res.status(502).json({
+      success: false,
+      provider,
+      code: 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+      models: [],
+      isLiveApi: false,
+      checkedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    provider,
+    models,
+    isLiveApi: true,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
-// All Providers Models Endpoint (Dynamic Live Queries across all providers)
 app.get('/api/models/all', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const customGroqKey =
-      (req.headers['x-groq-key'] as string) ||
-      (req.query.groqKey as string) ||
-      settingsManager.getSettings().customGroqKey ||
-      process.env.GROQ_API_KEY;
+  const settings = settingsManager.getSettings();
+  const keys = {
+    gemini: (req.get('x-gemini-key') || req.get('x-api-key') || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
+    groq: (req.get('x-groq-key') || req.get('x-api-key') || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
+    mistral: (req.get('x-mistral-key') || req.get('x-api-key') || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+  };
 
-    const customMistralKey =
-      (req.headers['x-mistral-key'] as string) ||
-      (req.query.mistralKey as string) ||
-      settingsManager.getSettings().customMistralKey ||
-      process.env.MISTRAL_API_KEY;
+  const [gemini, groq, mistral] = await Promise.all([
+    modelCatalogService.getLiveModels('gemini', keys.gemini),
+    modelCatalogService.getLiveModels('groq', keys.groq),
+    modelCatalogService.getLiveModels('mistral', keys.mistral),
+  ]);
 
-    let geminiModels: any[] = [];
-    let isGeminiLive = false;
-    const settings = settingsManager.getSettings();
-    const sKey = (settings.customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-    const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-    const hKey = (req.headers['x-gemini-key'] || req.headers['x-api-key'] || '').toString().trim().replace(/^["']|["']$/g, '');
-    
-    const hasGeminiKey = Boolean(sKey || eKey || hKey);
-    
-    if (hasGeminiKey) {
-      try {
-        const currentKey = sKey || eKey || hKey;
-        // Only attempt live fetch if key looks valid
-        if (currentKey.startsWith('AIza') || currentKey.startsWith('AQ.') || currentKey.length > 30) {
-          const pager = await getAiClient(req).models.list();
-          const liveModels: { id: string; displayName: string; description?: string }[] = [];
-          for await (const m of pager) {
-            const id = m.name?.replace(/^models\//, '') || '';
-            if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
-              liveModels.push({
-                id,
-                displayName: m.displayName || id,
-                description: m.description,
-              });
-            }
-          }
-          if (liveModels.length > 0) {
-            geminiModels = liveModels;
-            isGeminiLive = true;
-          }
-        }
-      } catch (e: any) {
-        if (!e?.message?.includes('401') && !e?.message?.includes('UNAUTHENTICATED')) {
-          console.warn('Error fetching Gemini models in all:', e);
-        }
-      }
-    }
-
-    let groqModels: { id: string; displayName: string; description?: string }[] = [];
-    let isGroqLive = false;
-    if (customGroqKey) {
-      try {
-        const gRes = await fetch('https://api.groq.com/openai/v1/models', {
-          headers: { Authorization: `Bearer ${customGroqKey}` },
-        });
-        if (gRes.ok) {
-          const data = await gRes.json();
-          if (Array.isArray(data.data) && data.data.length > 0) {
-            groqModels = data.data.map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Groq LPU model (${m.id})`,
-            }));
-            isGroqLive = true;
-          }
-        }
-      } catch (e) {
-        console.warn('Groq live query error in /api/models/all:', e);
-      }
-    }
-
-    let mistralModels: { id: string; displayName: string; description?: string }[] = [];
-    let isMistralLive = false;
-    if (customMistralKey) {
-      try {
-        const mRes = await fetch('https://api.mistral.ai/v1/models', {
-          headers: { Authorization: `Bearer ${customMistralKey}` },
-        });
-        if (mRes.ok) {
-          const data = await mRes.json();
-          if (Array.isArray(data.data) && data.data.length > 0) {
-            mistralModels = data.data.map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Mistral model (${m.id})`,
-            }));
-            isMistralLive = true;
-          }
-        }
-      } catch (e) {
-        console.warn('Mistral live query error in /api/models/all:', e);
-      }
-    }
-
-    res.json({
-      gemini: geminiModels,
-      groq: groqModels,
-      mistral: mistralModels,
-      isLive: {
-        gemini: isGeminiLive,
-        groq: isGroqLive,
-        mistral: isMistralLive,
-      },
-      counts: {
-        gemini: geminiModels.length,
-        groq: groqModels.length,
-        mistral: mistralModels.length,
-      },
-    });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Failed to load models catalog.' });
-  }
+  res.json({
+    gemini,
+    groq,
+    mistral,
+    checkedAt: new Date().toISOString(),
+    isLive: {
+      gemini: Boolean(keys.gemini && gemini.length),
+      groq: Boolean(keys.groq && groq.length),
+      mistral: Boolean(keys.mistral && mistral.length),
+    },
+    counts: { gemini: gemini.length, groq: groq.length, mistral: mistral.length },
+    configured: {
+      gemini: Boolean(keys.gemini),
+      groq: Boolean(keys.groq),
+      mistral: Boolean(keys.mistral),
+    },
+  });
 });
 
 // Live Streaming Chat endpoint with Server-Sent Events (SSE) and Router
