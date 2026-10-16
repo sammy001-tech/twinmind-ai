@@ -65,7 +65,7 @@ function loadConfig(): TelegramConfig {
     pairingCode: generatePairingCode(),
     mode: (process.env.TELEGRAM_MODE as 'polling' | 'webhook') || currentSavedSettings.telegramMode || 'polling',
     webhookUrl: process.env.TELEGRAM_WEBHOOK_URL || currentSavedSettings.telegramWebhookUrl || '',
-    activeProvider: currentSavedSettings.activeProvider || 'gemini',
+    activeProvider: currentSavedSettings.activeProvider || '',
     activeModel: currentSavedSettings.activeModel || '',
   };
 
