@@ -46,7 +46,7 @@ export function normalizeGeneratedArtifacts(value: unknown): GeneratedArtifact[]
     const artifact: GeneratedArtifact = {
       name: candidate.name.trim(),
       url: `${parsedUrl.pathname}${parsedUrl.search}`,
-      type: candidate.type.toLowerCase(),
+      type: candidate.type.toLowerCase() as GeneratedArtifact['type'],
     };
 
     if (typeof candidate.mimeType === 'string' && candidate.mimeType.trim()) {
