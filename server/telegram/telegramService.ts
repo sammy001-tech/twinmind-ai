@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { randomInt } from 'node:crypto';
 import { Bot, InputFile, InlineKeyboard, webhookCallback } from 'grammy';
 import { GoogleGenAI } from '@google/genai';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
@@ -48,8 +49,8 @@ export interface TelegramCommandHandler {
 function generatePairingCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = 'LKN-';
-  for (let i = 0; i < 4; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(randomInt(chars.length));
   }
   return code;
 }
@@ -139,7 +140,7 @@ class TelegramBotManager {
           if (!from) return;
           const userId = from.id;
 
-          if (this.config.ownerId === null || this.config.ownerId === userId) {
+          if (this.config.ownerId === userId) {
             this.config.ownerId = userId;
             this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
             saveConfig(this.config);
@@ -697,7 +698,7 @@ class TelegramBotManager {
     this.config.ownerUsername = null;
     this.config.pairingCode = newCode;
     saveConfig(this.config);
-    this.log('auth', `Pairing reset. New pairing code: ${newCode}`);
+    this.log('auth', 'Owner pairing was reset. A new one-time code was generated.');
     return newCode;
   }
 
@@ -771,19 +772,27 @@ class TelegramBotManager {
       } else {
         // Webhook Mode
         if (this.config.webhookUrl) {
-          const cleanUrl = this.config.webhookUrl.replace(/\/+$/, '');
+          const webhookSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+          if (!webhookSecret) {
+            this.log('error', 'TELEGRAM_WEBHOOK_SECRET is required before enabling Telegram webhook mode.');
+            return false;
+          }
+          const cleanUrl = this.config.webhookUrl.replace(/\\/+$/, '');
           const webhookTarget = cleanUrl.endsWith('/api/telegram/webhook') ? cleanUrl : `${cleanUrl}/api/telegram/webhook`;
-          const setRes = await fetch(
-            `https://api.telegram.org/bot${this.config.token}/setWebhook?url=${encodeURIComponent(webhookTarget)}`
-          );
+          const setRes = await fetch(`https://api.telegram.org/bot${this.config.token}/setWebhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ url: webhookTarget, secret_token: webhookSecret }).toString(),
+          });
           const setData = await setRes.json();
           if (setData.ok) {
-            this.log('info', `Webhook registered successfully at ${webhookTarget}`);
+            this.log('info', 'Telegram webhook registered successfully.');
           } else {
-            this.log('error', `Webhook registration failed: ${setData.description}`);
+            this.log('error', `Telegram webhook registration failed: ${setData.description || 'provider rejected request'}`);
+            return false;
           }
         } else {
-          this.log('info', 'Webhook mode enabled; waiting for HTTPS webhook URL.');
+          this.log('info', 'Webhook mode enabled without a configured URL.');
         }
         await this.syncTelegramCommandMenu();
         this.isRunning = true;
@@ -846,25 +855,20 @@ class TelegramBotManager {
       const text = ctx.message?.text || '';
 
       if (this.config.ownerId === null) {
-        if (text.startsWith('/start') && text.includes(this.config.pairingCode)) {
+        const startParts = text.trim().split(/\\s+/);
+        const suppliedCode = startParts[0]?.startsWith('/start') ? (startParts[1] || '') : '';
+        if (suppliedCode && suppliedCode === this.config.pairingCode) {
           this.config.ownerId = userId;
-          this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
+          this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
           saveConfig(this.config);
-          this.log('auth', `Auto-paired via pairing code with owner ID ${userId} (@${this.config.ownerUsername})`);
-          await ctx.reply(`🎉 *Pairing Successful!*\nYour Telegram account is now linked as the owner of this digital twin.`, {
-            parse_mode: 'Markdown',
-          });
+          this.log('auth', `Owner pairing completed for Telegram user ID ${userId}`);
+          await ctx.reply('Pairing successful. This Telegram account is now linked as the owner.', { parse_mode: 'Markdown' });
           return;
         }
 
-        this.config.ownerId = userId;
-        this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
-        saveConfig(this.config);
-        this.log('auth', `Auto-paired with first detected owner ID ${userId} (@${this.config.ownerUsername})`);
-        await ctx.reply(
-          `🤝 *Account Auto-Paired!*\nLinked to \`${userId}\` (@${this.config.ownerUsername}). You now have exclusive access.`,
-          { parse_mode: 'Markdown' }
-        );
+        this.log('auth', 'Rejected Telegram update while owner pairing is not configured.');
+        await ctx.reply('Owner pairing is not configured. An administrator must provide the current one-time pairing code.');
+        return;
       }
 
       if (this.config.ownerId !== userId) {
