@@ -1,4 +1,5 @@
 import express from 'express';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -26,6 +27,12 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function secretsMatch(left: string, right: string): boolean {
+  const leftDigest = createHash('sha256').update(left).digest();
+  const rightDigest = createHash('sha256').update(right).digest();
+  return timingSafeEqual(leftDigest, rightDigest);
+}
 
 const app = express();
 // Trust forwarded headers only when the deployment explicitly states its trusted proxy hop count.
@@ -1621,6 +1628,12 @@ app.post('/api/telegram/sync-commands', async (req: Request, res: Response) => {
 
 // Webhook endpoint (used when mode is set to 'webhook')
 app.post('/api/telegram/webhook', (req: Request, res: Response, next) => {
+  const expectedSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+  const suppliedSecret = req.get('x-telegram-bot-api-secret-token') || '';
+  if (!expectedSecret || !suppliedSecret || !secretsMatch(expectedSecret, suppliedSecret)) {
+    res.status(403).json({ success: false, code: 'TELEGRAM_WEBHOOK_UNAUTHORIZED' });
+    return;
+  }
   return telegramBotManager.getWebhookCallback()(req, res, next);
 });
 
