@@ -47,9 +47,12 @@ function normalizeModelFormat(value: unknown): ArtifactFormat | null {
 
 /** Detect file-generation requests without treating every format mention as a request. */
 export function isArtifactGenerationRequest(userRequest: string): boolean {
-  const forward = /\b(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|format|convert|save|build|write|give(?: me)?)\b[\s\S]{0,100}\b(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook|markdown|artifact|report)\b/i;
-  const reverse = /\b(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook|markdown|artifact|report)\b[\s\S]{0,100}\b(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|format|convert|save|build|write|give(?: me)?)\b/i;
-  return forward.test(userRequest) || reverse.test(userRequest);
+  const actions = '(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|convert|save|build|write|give(?: me)?)';
+  const artifactNouns = '(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook|markdown|artifact|report)';
+  const forward = new RegExp('\\b' + actions + '\\b[\\s\\S]{0,100}\\b' + artifactNouns + '\\b', 'i');
+  const reverse = new RegExp('\\b' + artifactNouns + '\\b[\\s\\S]{0,100}\\b' + actions + '\\b', 'i');
+  const explicitFormatAction = /\bformat\b[\s\S]{0,100}\b(?:as|to|into|in)\s+(?:a\s+)?(?:csv|comma[- ]separated(?: values)?|excel|xlsx|spreadsheet|workbook|pdf|portable document format|markdown|md)\b/i;
+  return forward.test(userRequest) || reverse.test(userRequest) || explicitFormatAction.test(userRequest);
 }
 
 /**
