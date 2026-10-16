@@ -219,7 +219,7 @@ function formatCellForExcel(value: unknown): ExcelJS.CellValue {
   return displayValue(value);
 }
 function columnWidth(header: string, values: unknown[]): number {
-  const longest = values.reduce((width, value) => Math.max(width, ...displayValue(value).split('\n').map((line) => line.length)), header.length);
+  const longest = values.reduce<number>((width, value) => Math.max(width, ...displayValue(value).split('\n').map((line) => line.length)), header.length);
   return Math.min(44, Math.max(14, longest + 2));
 }
 
