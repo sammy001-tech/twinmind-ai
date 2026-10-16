@@ -824,20 +824,53 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = swarmSession.synthesis || fullReply;
 
-      // Extract artifacts from session traces for persistence and client UI
-      const artifacts: any[] = [];
-      swarmSession.traces.forEach((trace) => {
-        trace.tools.forEach((tool) => {
-          if (tool.toolName === 'generateArtifact' && tool.status === 'success') {
-            const res = tool.output as any;
-            if (res.url) {
-              artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-            }
-          }
-        });
-      });
+      // Only expose artifacts when the generator confirms successful validation and durable file persistence.
+      const artifactToolResults = swarmSession.traces.flatMap((trace) =>
+        trace.tools
+          .filter((tool) => tool.toolName === 'generateArtifact')
+          .map((tool) => ({ traceStatus: tool.status, output: tool.output as Record<string, unknown> | null })),
+      );
+      const artifacts: Array<Record<string, unknown>> = [];
+      const artifactFailures: string[] = [];
 
-      // Pass artifacts to client via SSE for immediate display
+      for (const entry of artifactToolResults) {
+        const output = entry.output;
+        const valid = entry.traceStatus === 'success'
+          && output?.status === 'success'
+          && output.validationStatus === 'validated'
+          && typeof output.fileName === 'string'
+          && typeof output.displayName === 'string'
+          && typeof output.type === 'string'
+          && typeof output.url === 'string'
+          && output.url.startsWith('/artifacts/')
+          && typeof output.sizeBytes === 'number'
+          && output.sizeBytes > 0;
+        if (valid) {
+          artifacts.push({
+            name: output.fileName,
+            displayName: output.displayName,
+            url: output.url,
+            type: output.type,
+            mimeType: output.mimeType,
+            sizeBytes: output.sizeBytes,
+            generatedAt: output.generatedAt,
+            validationStatus: output.validationStatus,
+          });
+        } else {
+          artifactFailures.push(
+            typeof output?.error === 'string' && output.error.trim()
+              ? output.error
+              : 'Artifact output did not include verified, validated file metadata.',
+          );
+        }
+      }
+
+      if (artifactFailures.length > 0) {
+        const details = [...new Set(artifactFailures)].join('; ');
+        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+      }
+
+      // Pass only validated artifacts to the client via SSE for immediate display
       if (artifacts.length > 0) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
@@ -881,18 +914,50 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = turnResult.reply;
 
-      // Extract artifacts from executed tools for single-agent mode
-      const artifacts: any[] = [];
-      turnResult.toolsExecuted.forEach((tool) => {
-        if (tool.toolName === 'generateArtifact' && (tool.result as any)?.status === 'success') {
-          const res = tool.result as any;
-          if (res.url) {
-            artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-          }
-        }
-      });
+      // Only surface generated files that passed real format and saved-file validation.
+      const artifactToolResults = turnResult.toolsExecuted.filter((tool) => tool.toolName === 'generateArtifact');
+      const artifacts: Array<Record<string, unknown>> = [];
+      const artifactFailures: string[] = [];
 
-      // Pass artifacts to client via SSE
+      for (const tool of artifactToolResults) {
+        const output = tool.result && typeof tool.result === 'object'
+          ? tool.result as Record<string, unknown>
+          : null;
+        const valid = output?.status === 'success'
+          && output.validationStatus === 'validated'
+          && typeof output.fileName === 'string'
+          && typeof output.displayName === 'string'
+          && typeof output.type === 'string'
+          && typeof output.url === 'string'
+          && output.url.startsWith('/artifacts/')
+          && typeof output.sizeBytes === 'number'
+          && output.sizeBytes > 0;
+        if (valid) {
+          artifacts.push({
+            name: output.fileName,
+            displayName: output.displayName,
+            url: output.url,
+            type: output.type,
+            mimeType: output.mimeType,
+            sizeBytes: output.sizeBytes,
+            generatedAt: output.generatedAt,
+            validationStatus: output.validationStatus,
+          });
+        } else {
+          artifactFailures.push(
+            typeof output?.error === 'string' && output.error.trim()
+              ? output.error
+              : 'Artifact output did not include verified, validated file metadata.',
+          );
+        }
+      }
+
+      if (artifactFailures.length > 0) {
+        const details = [...new Set(artifactFailures)].join('; ');
+        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+      }
+
+      // Pass only validated artifacts to the client via SSE
       if (artifacts.length > 0) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
