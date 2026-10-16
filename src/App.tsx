@@ -255,8 +255,8 @@ export default function App() {
             content: m.content,
             timestamp: m.created_at
               ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            createdAt: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
+              : '',
+            createdAt: m.created_at ? new Date(m.created_at).getTime() : undefined,
             channel: m.channel,
             modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
