@@ -337,7 +337,7 @@ class TelegramBotManager {
             if (res.recentDecisions && res.recentDecisions.length > 0) {
               summaryText += `🎯 *Recently Logged Decisions & Frameworks:*\n`;
               res.recentDecisions.forEach((d: any, idx: number) => {
-                summaryText += `${idx + 1}. *${d.title}*\n   • Confidence: \`${d.confidence || 70}%\`\n   • Recommended: ${d.recommendation || 'Evaluated'}\n`;
+                summaryText += `${idx + 1}. *${d.title}*\n   • Confidence: \`${d.confidence ?? 'Not recorded'}%\`\n   • Recommended: ${d.recommendation || 'No recommendation recorded'}\n`;
               });
               summaryText += `\n`;
             } else {
@@ -391,7 +391,7 @@ class TelegramBotManager {
 
             const replyMessage =
               `🎯 *Decision Deconstruction*\n\n` +
-              `📊 *Confidence Level:* \`${a.confidenceLevel || 'Medium'}\`\n` +
+              `📊 *Confidence Level:* \`${a.confidenceLevel || 'Not available'}\`\n` +
               `💡 *Evidence Reason:* ${a.confidenceReason || 'Grounded in pragmatic leverage'}\n\n` +
               `1️⃣ *Actual Situation:*\n${a.actualSituation}\n\n` +
               `2️⃣ *What Matters Most:*\n${a.whatMattersMost}\n\n` +
@@ -456,7 +456,7 @@ class TelegramBotManager {
               .text('Mistral Large', 'set_model_mistral');
 
             await ctx.reply(
-              `⚡ *Current Brain Model:* \`${this.config.activeModel || 'Not Set'}\` (${(this.config.activeProvider || 'gemini').toUpperCase()})\n\n` +
+              `⚡ *Current Brain Model:* \`${this.config.activeModel || 'Not Set'}\` (${(this.config.activeProvider || 'Not configured').toUpperCase()})\n\n` +
               `Select an engine or send \`/model <model_id>\`:`,
               { parse_mode: 'Markdown', reply_markup: keyboard }
             );
