@@ -18,6 +18,7 @@ import { twilioService } from './server/services/twilioService.ts';
 import { jobQueueService } from './server/services/jobQueueService.ts';
 import { whatsAppWorker } from './server/services/whatsappWorker.ts';
 import { calibrationService } from './server/services/calibrationService.ts';
+import { isExperimentLifecycleStatus, validatePredictionForecast } from './server/services/decisionCalibrationRules.ts';
 import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
@@ -1797,167 +1798,330 @@ app.get('/api/decisions/:id', async (req: Request, res: Response): Promise<void>
   }
 });
 
-// Post-decision outcome observation submission (Append-only & Idempotent)
+// Append outcome observations without accepting caller-supplied identity as authentication.
 app.post('/api/decisions/:id/reviews', async (req: Request, res: Response): Promise<void> => {
+  const decisionId = Number(req.params.id);
+  if (!Number.isSafeInteger(decisionId) || decisionId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DECISION_ID' });
+    return;
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+  const observation = typeof body.observation === 'string' ? body.observation.trim() : '';
+  const actualOutcome = typeof body.actualOutcome === 'string' ? body.actualOutcome.trim() : '';
+  const evidenceSource = typeof body.evidenceSource === 'string' ? body.evidenceSource.trim() : '';
+  const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+  const supersedesReviewId = body.supersedesReviewId;
+  const allowedOutcomes = ['Met Success Threshold', 'Missed Baseline', 'Inconclusive', 'Pivot Executed', 'Cancelled', 'Pending Verification'];
+
+  if (!observation || observation.length > 8000 || !evidenceSource || evidenceSource.length > 2048) {
+    res.status(400).json({ success: false, code: 'REVIEW_OBSERVATION_AND_EVIDENCE_REQUIRED' });
+    return;
+  }
+  if (!allowedOutcomes.includes(actualOutcome)) {
+    res.status(400).json({ success: false, code: 'INVALID_REVIEW_OUTCOME' });
+    return;
+  }
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey)) {
+    res.status(400).json({ success: false, code: 'IDEMPOTENCY_KEY_REQUIRED' });
+    return;
+  }
+  if (supersedesReviewId !== undefined && (!Number.isSafeInteger(supersedesReviewId) || (supersedesReviewId as number) < 1)) {
+    res.status(400).json({ success: false, code: 'INVALID_REVIEW_CORRECTION_TARGET' });
+    return;
+  }
+
   try {
-    const decId = parseInt(req.params.id, 10);
-    if (isNaN(decId)) {
-      res.status(400).json({ error: 'Invalid decision ID' });
+    if (!(await neonDb.ensureConnected())) {
+      res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE' });
       return;
     }
-
-    // 1. Authorization check at server boundary
-    const userEmail = (req.headers['x-user-email'] as string) || req.body.userEmail || '';
-    if (!userEmail || !userEmail.trim()) {
-      res.status(401).json({
-        error: 'Unauthorized review request. Valid user identity header (x-user-email) is required.',
-      });
-      return;
-    }
-
-    // 2. Check if original decision exists
-    const decision = await neonDb.getDecisionById(decId);
+    const decision = await neonDb.getDecisionById(decisionId);
     if (!decision) {
-      res.status(404).json({ error: 'Target decision record not found for review.' });
+      res.status(404).json({ success: false, code: 'DECISION_NOT_FOUND' });
+      return;
+    }
+    const binaryOutcome = actualOutcome === 'Met Success Threshold' || actualOutcome === 'Missed Baseline';
+    if (binaryOutcome && body.ownerConfirmed !== true) {
+      res.status(400).json({ success: false, code: 'OUTCOME_CONFIRMATION_REQUIRED' });
       return;
     }
 
-    const { observation, actualOutcome, idempotencyKey, reviewData } = req.body;
-    if (!observation || typeof observation !== 'string' || !observation.trim()) {
-      res.status(400).json({ error: 'Observation string is required.' });
-      return;
-    }
-
-    // 3. Generate idempotency key if not provided
-    const effectiveKey =
-      idempotencyKey ||
-      `rev-${decId}-${userEmail.trim().toLowerCase()}-${Buffer.from(observation.trim().slice(0, 32)).toString('hex')}`;
-
-    // 4. Save review observation without mutating original decision row
     const result = await neonDb.saveDecisionReview({
-      decisionId: decId,
-      idempotencyKey: effectiveKey,
-      userEmail: userEmail.trim(),
-      observation: observation.trim(),
-      actualOutcome: actualOutcome || 'Pending Verification',
-      reviewData: reviewData || {},
+      decisionId,
+      idempotencyKey,
+      observation,
+      actualOutcome,
+      evidenceSource,
+      outcomeVerified: binaryOutcome && body.ownerConfirmed === true,
+      ...(supersedesReviewId === undefined ? {} : { supersedesReviewId: supersedesReviewId as number }),
+      reviewData: body.reviewData && typeof body.reviewData === 'object' && !Array.isArray(body.reviewData)
+        ? body.reviewData as Record<string, unknown>
+        : {},
     });
-
     if (result.conflict) {
-      res.status(409).json({
-        success: false,
-        error: '409 Conflict: Idempotency key reused with a different observation payload.',
-      });
+      res.status(409).json({ success: false, code: 'IDEMPOTENCY_PAYLOAD_CONFLICT', error: 'That key was already used for a different review payload.' });
       return;
     }
-
-    res.json({
+    if (!result.reviewId) {
+      res.status(503).json({ success: false, code: 'REVIEW_PERSISTENCE_FAILED' });
+      return;
+    }
+    res.status(result.isDuplicate ? 200 : 201).json({
       success: true,
       reviewId: result.reviewId,
       isDuplicate: result.isDuplicate,
-      message: result.isDuplicate
-        ? 'Duplicate review submission detected (idempotent response returned).'
-        : 'Outcome observation successfully appended to decision history.',
+      outcomeVerified: binaryOutcome && body.ownerConfirmed === true,
+      message: result.isDuplicate ? 'Identical observation already recorded.' : 'Observation appended to immutable history.',
     });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Failed to record decision review observation.' });
+  } catch (error: unknown) {
+    const code = error instanceof Error ? error.message : 'REVIEW_PERSISTENCE_FAILED';
+    const status = code === 'INVALID_REVIEW_PAYLOAD' ? 400
+      : code === 'REVIEW_CORRECTION_TARGET_NOT_FOUND' ? 404
+      : code === 'REVIEW_ALREADY_CORRECTED' ? 409
+      : 503;
+    res.status(status).json({ success: false, code: status === 503 ? 'REVIEW_PERSISTENCE_FAILED' : code });
   }
 });
 
-// Retrieve immutable decision review outcome history
 app.get('/api/decisions/:id/reviews', async (req: Request, res: Response): Promise<void> => {
+  const decisionId = Number(req.params.id);
+  if (!Number.isSafeInteger(decisionId) || decisionId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DECISION_ID' });
+    return;
+  }
   try {
-    const decId = parseInt(req.params.id, 10);
-    if (isNaN(decId)) {
-      res.status(400).json({ error: 'Invalid decision ID' });
+    if (!(await neonDb.ensureConnected())) {
+      res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE' });
       return;
     }
-
-    const decision = await neonDb.getDecisionById(decId);
+    const decision = await neonDb.getDecisionById(decisionId);
     if (!decision) {
-      res.status(404).json({ error: 'Decision record not found.' });
+      res.status(404).json({ success: false, code: 'DECISION_NOT_FOUND' });
       return;
     }
-
-    const reviews = await neonDb.getDecisionReviews(decId);
+    const reviews = await neonDb.getDecisionReviews(decisionId);
     res.json({ success: true, reviews });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Error fetching decision reviews' });
+  } catch {
+    res.status(503).json({ success: false, code: 'REVIEW_HISTORY_UNAVAILABLE' });
   }
 });
 
-// Calibration analytics metrics endpoint (Unbundled Brier score & sample size gated)
-app.get('/api/calibration', async (req: Request, res: Response): Promise<void> => {
+app.get('/api/calibration', async (_req: Request, res: Response): Promise<void> => {
   try {
     const metrics = await neonDb.getCalibrationMetrics();
+    if (!metrics.available) {
+      res.status(503).json({ success: false, code: metrics.error || 'CALIBRATION_UNAVAILABLE' });
+      return;
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
     res.json({ success: true, metrics });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Error computing calibration metrics' });
+  } catch {
+    res.status(503).json({ success: false, code: 'CALIBRATION_UNAVAILABLE' });
   }
 });
 
-// Register or update decision experiment
 app.post('/api/decisions/:id/experiments', async (req: Request, res: Response): Promise<void> => {
+  const decisionId = Number(req.params.id);
+  if (!Number.isSafeInteger(decisionId) || decisionId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DECISION_ID' });
+    return;
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+  const hypothesisOnly = body.hypothesisOnly;
+  if (typeof hypothesisOnly !== 'boolean') {
+    res.status(400).json({ success: false, code: 'EXPERIMENT_TYPE_REQUIRED' });
+    return;
+  }
+  const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey)) {
+    res.status(400).json({ success: false, code: 'IDEMPOTENCY_KEY_REQUIRED' });
+    return;
+  }
+  const targetDate = typeof body.targetDate === 'string' && body.targetDate.trim() ? body.targetDate.trim() : undefined;
+  const thresholdValue = typeof body.thresholdValue === 'number' ? body.thresholdValue : undefined;
+  const observationWindowDays = typeof body.observationWindowDays === 'number' ? body.observationWindowDays : undefined;
+  const baselineValue = typeof body.baselineValue === 'number' ? body.baselineValue : undefined;
+
   try {
-    const decId = parseInt(req.params.id, 10);
-    if (isNaN(decId)) {
-      res.status(400).json({ error: 'Invalid decision ID' });
+    if (!(await neonDb.ensureConnected())) {
+      res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE' });
       return;
     }
-
-    const userEmail = (req.headers['x-user-email'] as string) || req.body.userEmail || '';
-    if (!userEmail) {
-      res.status(401).json({ error: 'Unauthorized: User identity header (x-user-email) is required.' });
-      return;
-    }
-
-    const { baselineMetric, targetMetric, units, thresholdValue, measurementDirection, status, targetDate } = req.body;
-
     const result = await neonDb.saveDecisionExperiment({
-      decisionId: decId,
-      userEmail: userEmail.trim(),
-      baselineMetric,
-      targetMetric,
-      units,
-      thresholdValue: typeof thresholdValue === 'number' ? thresholdValue : undefined,
-      measurementDirection,
-      status: status || (baselineMetric ? 'Active' : 'Proposed'),
+      decisionId,
+      baselineMetric: typeof body.baselineMetric === 'string' ? body.baselineMetric : undefined,
+      baselineValue,
+      targetMetric: typeof body.targetMetric === 'string' ? body.targetMetric : undefined,
+      units: typeof body.units === 'string' ? body.units : undefined,
+      thresholdValue,
+      measurementDirection: body.measurementDirection === 'below' ? 'below' : body.measurementDirection === 'above' ? 'above' : undefined,
       targetDate,
+      observationWindowDays,
+      evidenceSource: typeof body.evidenceSource === 'string' ? body.evidenceSource : undefined,
+      hypothesisOnly,
+      supersedesExperimentId: typeof body.supersedesExperimentId === 'number' ? body.supersedesExperimentId : undefined,
+      idempotencyKey,
     });
-
-    res.json({
+    if (result.conflict) {
+      res.status(409).json({ success: false, code: 'IDEMPOTENCY_PAYLOAD_CONFLICT' });
+      return;
+    }
+    if (!result.id) {
+      res.status(503).json({ success: false, code: 'EXPERIMENT_PERSISTENCE_FAILED' });
+      return;
+    }
+    res.status(result.isDuplicate ? 200 : 201).json({
       success: true,
       experimentId: result.id,
-      message: 'Decision experiment registered successfully.',
+      isDuplicate: result.isDuplicate === true,
+      status: 'Proposed',
+      isHypothesis: hypothesisOnly,
     });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Error registering decision experiment' });
+  } catch (error: unknown) {
+    const code = error instanceof Error ? error.message : 'EXPERIMENT_PERSISTENCE_FAILED';
+    const status = code === 'INVALID_EXPERIMENT_CRITERIA' ? 400
+      : code === 'DECISION_NOT_FOUND' || code === 'PIVOT_PARENT_NOT_FOUND' ? 404
+      : 503;
+    res.status(status).json({ success: false, code: status === 503 ? 'EXPERIMENT_PERSISTENCE_FAILED' : code });
   }
 });
 
-// Get experiments for a specific decision
 app.get('/api/decisions/:id/experiments', async (req: Request, res: Response): Promise<void> => {
+  const decisionId = Number(req.params.id);
+  if (!Number.isSafeInteger(decisionId) || decisionId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DECISION_ID' });
+    return;
+  }
   try {
-    const decId = parseInt(req.params.id, 10);
-    if (isNaN(decId)) {
-      res.status(400).json({ error: 'Invalid decision ID' });
+    if (!(await neonDb.ensureConnected())) {
+      res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE' });
       return;
     }
-
-    const experiments = await neonDb.getDecisionExperiments(decId);
+    const experiments = await neonDb.getDecisionExperiments(decisionId);
     res.json({ success: true, experiments });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Error fetching experiments' });
+  } catch {
+    res.status(503).json({ success: false, code: 'EXPERIMENT_LOOKUP_UNAVAILABLE' });
   }
 });
 
-// Get all experiments across decisions
-app.get('/api/experiments', async (req: Request, res: Response): Promise<void> => {
+app.get('/api/experiments', async (_req: Request, res: Response): Promise<void> => {
   try {
+    if (!(await neonDb.ensureConnected())) {
+      res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE' });
+      return;
+    }
     const experiments = await neonDb.getDecisionExperiments();
     res.json({ success: true, experiments });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Error fetching all experiments' });
+  } catch {
+    res.status(503).json({ success: false, code: 'EXPERIMENT_LOOKUP_UNAVAILABLE' });
+  }
+});
+
+app.post('/api/experiments/:id/status', async (req: Request, res: Response): Promise<void> => {
+  const experimentId = Number(req.params.id);
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+  const toStatus = body.toStatus;
+  const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+  if (!Number.isSafeInteger(experimentId) || experimentId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_EXPERIMENT_ID' });
+    return;
+  }
+  if (!isExperimentLifecycleStatus(toStatus) || toStatus === 'Overdue') {
+    res.status(400).json({ success: false, code: 'INVALID_EXPERIMENT_STATUS' });
+    return;
+  }
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey)) {
+    res.status(400).json({ success: false, code: 'IDEMPOTENCY_KEY_REQUIRED' });
+    return;
+  }
+  try {
+    const result = await neonDb.transitionDecisionExperiment({
+      experimentId,
+      toStatus,
+      idempotencyKey,
+      note: typeof body.note === 'string' ? body.note : undefined,
+      replacementExperimentId: typeof body.replacementExperimentId === 'number' ? body.replacementExperimentId : undefined,
+    });
+    if (result.conflict) {
+      res.status(409).json({ success: false, code: 'IDEMPOTENCY_PAYLOAD_CONFLICT' });
+      return;
+    }
+    res.json({ success: true, ...result });
+  } catch (error: unknown) {
+    const code = error instanceof Error ? error.message : 'EXPERIMENT_TRANSITION_PERSISTENCE_FAILED';
+    const status = code === 'EXPERIMENT_NOT_FOUND' ? 404
+      : code.startsWith('INVALID_') || code.endsWith('_REQUIRED') || code === 'PIVOT_REPLACEMENT_NOT_LINKED' ? 400
+      : 503;
+    res.status(status).json({ success: false, code: status === 503 ? 'EXPERIMENT_TRANSITION_PERSISTENCE_FAILED' : code });
+  }
+});
+
+app.post('/api/experiments/:id/observations', async (req: Request, res: Response): Promise<void> => {
+  const experimentId = Number(req.params.id);
+  const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {};
+  if (!Number.isSafeInteger(experimentId) || experimentId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_EXPERIMENT_ID' });
+    return;
+  }
+  const idempotencyKey = typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+  try {
+    const result = await neonDb.appendDecisionExperimentObservation({
+      experimentId,
+      idempotencyKey,
+      observation: typeof body.observation === 'string' ? body.observation : '',
+      measuredValue: typeof body.measuredValue === 'number' ? body.measuredValue : undefined,
+      evidenceSource: typeof body.evidenceSource === 'string' ? body.evidenceSource : '',
+      actualOutcome: typeof body.actualOutcome === 'string' ? body.actualOutcome : undefined,
+      ownerConfirmed: body.ownerConfirmed === true,
+    });
+    if (result.conflict) {
+      res.status(409).json({ success: false, code: 'IDEMPOTENCY_PAYLOAD_CONFLICT' });
+      return;
+    }
+    res.status(result.isDuplicate ? 200 : 201).json({ success: true, ...result });
+  } catch (error: unknown) {
+    const code = error instanceof Error ? error.message : 'EXPERIMENT_OBSERVATION_PERSISTENCE_FAILED';
+    const status = code === 'EXPERIMENT_NOT_FOUND' ? 404
+      : code.startsWith('INVALID_') || code === 'OUTCOME_CONFIRMATION_REQUIRED' ? 400
+      : 503;
+    res.status(status).json({ success: false, code: status === 503 ? 'EXPERIMENT_OBSERVATION_PERSISTENCE_FAILED' : code });
+  }
+});
+
+app.get('/api/experiments/:id/events', async (req: Request, res: Response): Promise<void> => {
+  const experimentId = Number(req.params.id);
+  if (!Number.isSafeInteger(experimentId) || experimentId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_EXPERIMENT_ID' });
+    return;
+  }
+  try {
+    res.json({ success: true, events: await neonDb.getDecisionExperimentEvents(experimentId) });
+  } catch {
+    res.status(503).json({ success: false, code: 'EXPERIMENT_HISTORY_UNAVAILABLE' });
+  }
+});
+
+app.get('/api/decisions/:id/forecast', async (req: Request, res: Response): Promise<void> => {
+  const decisionId = Number(req.params.id);
+  if (!Number.isSafeInteger(decisionId) || decisionId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DECISION_ID' });
+    return;
+  }
+  try {
+    const decision = await neonDb.getDecisionById(decisionId);
+    if (!decision) {
+      res.status(404).json({ success: false, code: 'DECISION_NOT_FOUND' });
+      return;
+    }
+    res.json({
+      success: true,
+      decisionId,
+      forecast: decision.prediction_event && decision.predicted_probability !== null && decision.predicted_probability !== undefined && decision.prediction_deadline
+        ? { predictionEvent: decision.prediction_event, predictedProbability: decision.predicted_probability, predictionDeadline: decision.prediction_deadline }
+        : null,
+    });
+  } catch {
+    res.status(503).json({ success: false, code: 'DECISION_LOOKUP_UNAVAILABLE' });
   }
 });
 
@@ -2294,6 +2458,17 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
+    const forecastValidation = validatePredictionForecast({
+      predictionEvent: req.body?.predictionEvent,
+      predictedProbability: req.body?.predictedProbability,
+      predictionDeadline: req.body?.predictionDeadline,
+    });
+    if (forecastValidation.error) {
+      res.status(400).json({ success: false, code: forecastValidation.error });
+      return;
+    }
+    const forecast = forecastValidation.forecast;
+
     const settings = settingsManager.getSettings();
     const keys = {
       gemini: (req.body.customGeminiKey || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
@@ -2435,6 +2610,11 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
       title: topic.slice(0, 100),
       situation: evidenceContext,
       recommendation: verdict.slice(0, 500),
+      ...(forecast ? {
+        prediction_event: forecast.predictionEvent,
+        predicted_probability: forecast.predictedProbability,
+        prediction_deadline: forecast.predictionDeadline,
+      } : {}),
       full_analysis: {
         topic,
         knowledgeStatus,
@@ -2446,10 +2626,16 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
 
     res.json({
       success: true,
+      decisionId: savedId ?? undefined,
       topic,
       knowledgeStatus,
       rounds,
       synthesis: verdict,
+      forecast: forecast ? {
+        predictionEvent: forecast.predictionEvent,
+        predictedProbability: forecast.predictedProbability,
+        predictionDeadline: forecast.predictionDeadline,
+      } : null,
       persistence: savedId === null || savedId === undefined
         ? { status: 'failed', code: 'PERSISTENCE_FAILED' }
         : { status: 'persisted', decisionId: savedId },

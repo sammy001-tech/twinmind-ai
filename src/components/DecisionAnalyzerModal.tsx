@@ -77,11 +77,21 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
   const [showCalibrationModal, setShowCalibrationModal] = useState(false);
   const [showReviewForm, setShowReviewForm] = useState(false);
   const [reviewObservation, setReviewObservation] = useState('');
-  const [reviewOutcome, setReviewOutcome] = useState('Met Threshold');
-  const [reviewUserEmail, setReviewUserEmail] = useState('olalekan4565@gmail.com');
+  const [reviewEvidenceSource, setReviewEvidenceSource] = useState('');
+  const [reviewOutcome, setReviewOutcome] = useState('');
+  const [reviewOwnerConfirmed, setReviewOwnerConfirmed] = useState(false);
+  const [reviewIdempotencyKey, setReviewIdempotencyKey] = useState(() => globalThis.crypto.randomUUID());
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
   const [reviewMsg, setReviewMsg] = useState<string | null>(null);
-  const [reviewHistory, setReviewHistory] = useState<Array<{ id: number; observation: string; actual_outcome: string | null; created_at: string; user_email: string | null }>>([]);
+  const [reviewHistory, setReviewHistory] = useState<Array<{
+    id: number;
+    observation: string;
+    actual_outcome: string | null;
+    evidence_source: string | null;
+    outcome_verified: boolean;
+    supersedes_review_id: number | null;
+    created_at: string;
+  }>>([]);
 
   if (!isOpen) return null;
 
@@ -152,34 +162,47 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
   };
 
   const handleSubmitReview = async () => {
-    if (!debateResult?.decisionId || !reviewObservation.trim()) return;
+    if (!debateResult?.decisionId || !reviewObservation.trim() || !reviewEvidenceSource.trim() || !reviewOutcome) {
+      setReviewMsg('Outcome, observation, and evidence source are required.');
+      return;
+    }
+
+    const isBinaryOutcome = reviewOutcome === 'Met Success Threshold' || reviewOutcome === 'Missed Baseline';
+    if (isBinaryOutcome && !reviewOwnerConfirmed) {
+      setReviewMsg('Confirm the binary outcome as an owner attestation before recording it.');
+      return;
+    }
+
     setReviewSubmitting(true);
     setReviewMsg(null);
 
     try {
       const res = await fetch(`/api/decisions/${debateResult.decisionId}/reviews`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-email': reviewUserEmail.trim(),
-        },
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          idempotencyKey: reviewIdempotencyKey,
           observation: reviewObservation.trim(),
           actualOutcome: reviewOutcome,
-          userEmail: reviewUserEmail.trim(),
+          evidenceSource: reviewEvidenceSource.trim(),
+          ownerConfirmed: reviewOwnerConfirmed,
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to submit review');
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || data.success !== true) {
+        throw new Error(data?.code || data?.error || 'Failed to persist the review observation.');
       }
 
-      setReviewMsg(data.message || 'Observation recorded successfully.');
+      setReviewMsg(data.message || 'Observation appended to immutable history.');
       setReviewObservation('');
-      fetchReviews(debateResult.decisionId);
+      setReviewEvidenceSource('');
+      setReviewOwnerConfirmed(false);
+      setReviewIdempotencyKey(globalThis.crypto.randomUUID());
+      await fetchReviews(debateResult.decisionId);
     } catch (err: unknown) {
-      setReviewMsg(err instanceof Error ? err.message : 'Submission failed');
+      setReviewMsg(err instanceof Error ? err.message : 'Submission failed; the observation was not confirmed as saved.');
     } finally {
       setReviewSubmitting(false);
     }
@@ -806,12 +829,14 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
                           <div>
                             <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">
-                              User Email (Server Authorization)
+                              Evidence Source
                             </label>
                             <input
-                              type="email"
-                              value={reviewUserEmail}
-                              onChange={(e) => setReviewUserEmail(e.target.value)}
+                              type="text"
+                              value={reviewEvidenceSource}
+                              onChange={(e) => setReviewEvidenceSource(e.target.value)}
+                              maxLength={2048}
+                              placeholder="Report, dashboard, document, or source URL"
                               className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                             />
                           </div>
@@ -821,13 +846,19 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                             </label>
                             <select
                               value={reviewOutcome}
-                              onChange={(e) => setReviewOutcome(e.target.value)}
+                              onChange={(e) => {
+                                setReviewOutcome(e.target.value);
+                                setReviewOwnerConfirmed(false);
+                              }}
                               className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                             >
-                              <option value="Met Threshold">Met Success Threshold</option>
-                              <option value="Missed Baseline">Missed Baseline Target</option>
-                              <option value="Inconclusive">Inconclusive Experiment</option>
+                              <option value="">Select an observed outcome</option>
+                              <option value="Pending Verification">Pending Verification</option>
+                              <option value="Met Success Threshold">Met Success Threshold</option>
+                              <option value="Missed Baseline">Missed Baseline</option>
+                              <option value="Inconclusive">Inconclusive</option>
                               <option value="Pivot Executed">Pivot Executed</option>
+                              <option value="Cancelled">Cancelled</option>
                             </select>
                           </div>
                         </div>
@@ -845,8 +876,20 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                           />
                         </div>
 
+                        {(reviewOutcome === 'Met Success Threshold' || reviewOutcome === 'Missed Baseline') && (
+                          <label className="flex items-start gap-2 text-[11px] leading-5 text-slate-600 dark:text-slate-300">
+                            <input
+                              type="checkbox"
+                              checked={reviewOwnerConfirmed}
+                              onChange={(e) => setReviewOwnerConfirmed(e.target.checked)}
+                              className="mt-1"
+                            />
+                            <span>I attest that this binary outcome was observed. This is an owner attestation, not independent verification.</span>
+                          </label>
+                        )}
+
                         {reviewMsg && (
-                          <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                          <p role="status" className="text-xs font-semibold text-slate-700 dark:text-slate-300">
                             {reviewMsg}
                           </p>
                         )}
@@ -878,10 +921,18 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                               className="p-2.5 rounded-lg bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs space-y-1"
                             >
                               <div className="flex items-center justify-between text-[10px] text-slate-500">
-                                <span className="font-semibold text-slate-700 dark:text-slate-300">{rh.user_email || 'User'}</span>
+                                <span className="font-semibold text-slate-700 dark:text-slate-300">
+                                  {rh.outcome_verified ? 'Owner-attested binary outcome' : 'Observation not eligible for calibration'}
+                                </span>
                                 <span className="font-mono">{new Date(rh.created_at).toLocaleString()}</span>
                               </div>
                               <p className="text-slate-800 dark:text-slate-200 font-sans">{rh.observation}</p>
+                              {rh.evidence_source && (
+                                <p className="text-slate-500 dark:text-slate-400">Evidence source: {rh.evidence_source}</p>
+                              )}
+                              {rh.supersedes_review_id && (
+                                <p className="text-amber-700 dark:text-amber-300">Correction supersedes review #{rh.supersedes_review_id}</p>
+                              )}
                               {rh.actual_outcome && (
                                 <span className="inline-block px-1.5 py-0.5 text-[9px] font-bold rounded bg-indigo-500/15 text-indigo-600 dark:text-indigo-300">
                                   Outcome: {rh.actual_outcome}

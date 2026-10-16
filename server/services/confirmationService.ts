@@ -120,22 +120,55 @@ export class ConfirmationService {
 
     const item = list[idx];
 
-    // Remove from pending list (single use)
+    const allowedOutcomes = [
+      'Met Success Threshold',
+      'Missed Baseline',
+      'Inconclusive',
+      'Pivot Executed',
+      'Cancelled',
+      'Pending Verification',
+    ];
+    if (!allowedOutcomes.includes(item.proposedStatus)) {
+      return {
+        success: false,
+        replyMessage: '⚠️ I could not record that outcome because its status is not supported. The confirmation remains pending.',
+      };
+    }
+
+    // Save to the authoritative database before consuming the pending confirmation.
+    let reviewRes: Awaited<ReturnType<typeof neonDb.saveDecisionReview>>;
+    try {
+      const binaryOutcome = item.proposedStatus === 'Met Success Threshold' || item.proposedStatus === 'Missed Baseline';
+      reviewRes = await neonDb.saveDecisionReview({
+        decisionId: item.targetDecisionId,
+        idempotencyKey: `wa-${item.actionId}`,
+        observation: item.proposedNotes,
+        actualOutcome: item.proposedStatus,
+        evidenceSource: 'Owner-confirmed WhatsApp observation',
+        outcomeVerified: binaryOutcome,
+        reviewData: { channel: 'whatsapp', confirmationActionId: item.actionId },
+      });
+    } catch {
+      return {
+        success: false,
+        replyMessage: '⚠️ The database did not confirm this outcome was saved. The confirmation remains pending; please retry after the storage issue is resolved.',
+      };
+    }
+
+    if (!reviewRes.reviewId || reviewRes.conflict) {
+      return {
+        success: false,
+        replyMessage: '⚠️ The outcome was not confirmed as saved. The confirmation remains pending.',
+      };
+    }
+
+    // Consume the confirmation only after the durable append succeeded.
     list.splice(idx, 1);
     this.writeConfirmations(list);
 
-    // Save decision outcome review to Neon PostgreSQL
-    const reviewRes = await neonDb.saveDecisionReview({
-      decisionId: item.targetDecisionId,
-      idempotencyKey: `wa-${item.actionId}`,
-      userEmail: `whatsapp:${normalizedSender}`,
-      observation: item.proposedNotes,
-      actualOutcome: item.proposedStatus,
-    });
-
-    const replyMessage = reviewRes.reviewId
-      ? `✅ *Decision Outcome Logged Successfully!*\n\nDecision #${item.targetDecisionId} updated with status: *${item.proposedStatus}*.\nNotes: "${item.proposedNotes}"`
-      : `⚠️ Outcome saved locally for Decision #${item.targetDecisionId}.`;
+    const replyMessage = reviewRes.isDuplicate
+      ? `✅ *Decision Outcome Already Recorded*\n\nDecision #${item.targetDecisionId} already has this observation.\nNotes: "${item.proposedNotes}"`
+      : `✅ *Decision Outcome Logged Successfully!*\n\nDecision #${item.targetDecisionId} appended with status: *${item.proposedStatus}*.\nNotes: "${item.proposedNotes}"`;
 
     return { success: true, replyMessage };
   }
