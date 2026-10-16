@@ -258,7 +258,7 @@ export default function App() {
               : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             createdAt: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
             channel: m.channel,
-            modelInfo: m.provider || m.model ? { provider: m.provider || 'gemini', model: m.model || '' } : undefined,
+            modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
           }));
           setMessages(loaded);
