@@ -32,6 +32,12 @@ test('parses explicitly fenced JSON emitted by the model as structured data', ()
   assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
 });
 
+test('parses fenced JSON separated by real newline characters', () => {
+  const parsed = parseArtifactTableContent('\\x60\\x60\\x60json\\n[{"brand":"Brand A","website":"https://brand-a.example"}]\\n\\x60\\x60\\x60');
+  assert.deepEqual(parsed.headers, ['brand', 'website']);
+  assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
+});
+
 test('parses markdown tables without inventing rows or column labels', () => {
   const parsed = parseArtifactTableContent(
     '| Brand | Website |\n| --- | --- |\n| Brand A | https://brand-a.example |\n| Brand B | https://brand-b.example |',
