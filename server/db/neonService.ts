@@ -522,19 +522,20 @@ class NeonDatabaseService {
     return [];
   }
 
-  public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<void> {
+  public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
     const channel = thread.channel || 'web';
-    if (this.pool && this.isConnected) {
-      try {
-        await this.pool.query(
-          `INSERT INTO chat_threads (id, title, channel, updated_at)
-           VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-           ON CONFLICT (id) DO UPDATE SET title = $2, updated_at = CURRENT_TIMESTAMP`,
-          [thread.id, thread.title, channel]
-        );
-      } catch (err) {
-        console.error('[NeonDB] Error saving thread to DB:', err);
-      }
+    try {
+      await this.pool.query(
+        `INSERT INTO chat_threads (id, title, channel, updated_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET title = $2, updated_at = CURRENT_TIMESTAMP`,
+        [thread.id, thread.title, channel]
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error saving thread to DB:', err);
+      return false;
     }
   }
 
