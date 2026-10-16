@@ -924,7 +924,7 @@ class TelegramBotManager {
             userPrompt: actionItem.payload,
             channel: 'telegram',
             conversationHistory: this.conversationHistory,
-            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
             providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
             modelOverride: this.config.activeModel || undefined,
           });
