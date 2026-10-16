@@ -1280,7 +1280,7 @@ class SpecialistSwarmService {
           }
 
           const artifactType = goals.artifactType || 'md';
-          const tabularTypes = artifactType === 'xlsx' || artifactType === 'excel' || artifactType === 'csv';
+          const tabularTypes = artifactType === 'xlsx' || artifactType === 'csv';
           const tabularRows = specialistTraces
             .filter((trace) =>
               trace.specialist !== 'ArtifactArchitect' &&
