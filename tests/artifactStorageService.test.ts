@@ -1,51 +1,50 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { getArtifactStorageStatus, resolveArtifactStorageDirectory } from '../server/services/artifactStorageService.ts';
+import { getArtifactStorageStatus, validateStoredArtifact } from '../server/services/artifactStorageService.ts';
 
-test('production storage is unavailable without ARTIFACTS_DIR and reports instance-local risk', () => {
-  const status = getArtifactStorageStatus({ configuredPath: '', nodeEnv: 'production', cwd: '/app' });
-  assert.equal(status.mode, 'instance-local');
+test('database-backed artifact storage is unavailable when DATABASE_URL is not configured', () => {
+  const status = getArtifactStorageStatus({ configured: false, connected: false, schemaReady: false });
+  assert.equal(status.mode, 'unavailable');
   assert.equal(status.configured, false);
   assert.equal(status.canGenerate, false);
-  assert.match(status.warning, /may disappear/);
-  assert.match(status.warning, /persistent mounted volume/);
-  assert.throws(
-    () => resolveArtifactStorageDirectory({ configuredPath: '', nodeEnv: 'production', cwd: '/app' }),
-    /ARTIFACT_STORAGE_CONFIGURATION_MISSING/,
-  );
+  assert.match(status.warning, /DATABASE_URL/);
 });
 
-test('a relative ARTIFACTS_DIR is explicitly misconfigured and cannot authorize generation', () => {
-  const status = getArtifactStorageStatus({ configuredPath: 'artifacts', nodeEnv: 'production', cwd: '/app' });
-  assert.equal(status.mode, 'misconfigured');
+test('database-backed artifact storage requires a live database connection', () => {
+  const status = getArtifactStorageStatus({ configured: true, connected: false, schemaReady: false });
+  assert.equal(status.mode, 'unavailable');
   assert.equal(status.configured, true);
   assert.equal(status.canGenerate, false);
-  assert.match(status.warning, /absolute path/);
-  assert.throws(
-    () => resolveArtifactStorageDirectory({ configuredPath: 'artifacts', nodeEnv: 'production', cwd: '/app' }),
-    /ARTIFACT_STORAGE_PATH_MUST_BE_ABSOLUTE/,
-  );
+  assert.match(status.warning, /not connected/);
 });
 
-test('an absolute configured path is disclosed without claiming the host mount is verified', () => {
-  const status = getArtifactStorageStatus({ configuredPath: '/var/data/artifacts', nodeEnv: 'production', cwd: '/app' });
-  assert.equal(status.mode, 'configured-path');
+test('database-backed artifact storage requires the generated_artifacts table', () => {
+  const status = getArtifactStorageStatus({ configured: true, connected: true, schemaReady: false });
+  assert.equal(status.mode, 'unavailable');
+  assert.equal(status.canGenerate, false);
+  assert.match(status.warning, /generated_artifacts table/);
+});
+
+test('ready database storage does not require ARTIFACTS_DIR or a Render disk', () => {
+  const status = getArtifactStorageStatus({ configured: true, connected: true, schemaReady: true });
+  assert.equal(status.mode, 'database');
   assert.equal(status.configured, true);
   assert.equal(status.canGenerate, true);
-  assert.match(status.warning, /cannot verify that the host mounted a persistent volume/);
-  assert.equal(
-    resolveArtifactStorageDirectory({ configuredPath: '/var/data/artifacts', nodeEnv: 'production', cwd: '/app' }),
-    '/var/data/artifacts',
-  );
+  assert.match(status.warning, /Neon PostgreSQL/);
+  assert.match(status.warning, /does not depend on Render local storage or ARTIFACTS_DIR/);
 });
 
-test('development can use instance-local storage but the status still warns about durability', () => {
-  const status = getArtifactStorageStatus({ configuredPath: '', nodeEnv: 'development', cwd: '/app' });
-  assert.equal(status.mode, 'instance-local');
-  assert.equal(status.canGenerate, true);
-  assert.match(status.warning, /may disappear/);
-  assert.equal(
-    resolveArtifactStorageDirectory({ configuredPath: '', nodeEnv: 'development', cwd: '/app' }),
-    '/app/public/artifacts',
-  );
+test('accepts database bytes only when byte length and SHA-256 match persisted metadata', () => {
+  const content = Buffer.from('artifact bytes persisted in PostgreSQL');
+  const hash = createHash('sha256').update(content).digest('hex');
+  assert.deepEqual(validateStoredArtifact(content, content.length, hash), content);
+});
+
+test('rejects truncated or changed database artifact content', () => {
+  const content = Buffer.from('original artifact bytes');
+  const hash = createHash('sha256').update(content).digest('hex');
+  assert.throws(() => validateStoredArtifact(content, content.length + 1, hash), /ARTIFACT_INTEGRITY_CHECK_FAILED/);
+  assert.throws(() => validateStoredArtifact(Buffer.from('modified artifact bytes'), content.length, hash), /ARTIFACT_INTEGRITY_CHECK_FAILED/);
+  assert.throws(() => validateStoredArtifact(content, content.length, 'invalid-hash'), /ARTIFACT_INTEGRITY_CHECK_FAILED/);
 });

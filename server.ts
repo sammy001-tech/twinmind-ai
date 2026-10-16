@@ -22,7 +22,7 @@ import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
-import { getArtifactStorageDirectory, getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
+import { getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 
 dotenv.config();
 
@@ -55,12 +55,6 @@ if (configuredProxyHops) {
 const isProduction = process.env.NODE_ENV === 'production';
 // In development, the dev server must always listen on port 3000; in production, use PORT provided by host (e.g. Render)
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
-
-// Ensure local artifact storage directory exists
-const artifactsDir = getArtifactStorageDirectory();
-if (!fs.existsSync(artifactsDir)) {
-  fs.mkdirSync(artifactsDir, { recursive: true });
-}
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -166,38 +160,38 @@ app.post('/api/auth/logout', (_req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-// Expose storage durability state to the signed-in UI without returning an absolute server path.
-app.get('/api/artifacts/storage-status', (_req: Request, res: Response) => {
-  const status = getArtifactStorageStatus();
-  res.setHeader('Cache-Control', 'private, no-store');
-  res.json({ success: true, ...status });
+// Expose database-backed artifact storage readiness without returning connection details.
+app.get('/api/artifacts/storage-status', async (_req: Request, res: Response) => {
+  try {
+    const readiness = await neonDb.getArtifactStorageReadiness();
+    const status = getArtifactStorageStatus(readiness);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ success: true, ...status });
+  } catch {
+    res.status(503).json({
+      success: false,
+      code: 'ARTIFACT_STORAGE_UNAVAILABLE',
+      error: 'Database-backed artifact storage readiness could not be confirmed.',
+    });
+  }
 });
 
-// Resolve a fresh, short-lived download path for a previously persisted artifact.
-// This protected route prevents old chat messages from keeping expired signed URLs.
+// Resolve a fresh, short-lived download path for a durable database artifact.
 app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) => {
   const fileName = req.params.filename || '';
   if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
     res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
     return;
   }
-
   if (!ownerAuthService.isAuthenticated(req)) {
     res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED' });
     return;
   }
 
-  const artifactsRoot = getArtifactStorageDirectory();
-  const filePath = path.resolve(artifactsRoot, fileName);
-  if (!filePath.startsWith(artifactsRoot + path.sep)) {
-    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
-    return;
-  }
-
   try {
-    const stats = await fs.promises.stat(filePath);
-    if (!stats.isFile() || stats.size <= 0) {
-      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+    const artifact = await neonDb.getArtifactMetadata(fileName);
+    if (!artifact) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The requested artifact was not found.' });
       return;
     }
 
@@ -208,26 +202,27 @@ app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) =
       res.status(500).json({ success: false, code: 'ARTIFACT_LINK_INVALID' });
       return;
     }
-
     res.setHeader('Cache-Control', 'private, no-store');
     res.json({ success: true, url, expiresAt: new Date(expires * 1000).toISOString() });
   } catch (error: unknown) {
-    const code = error instanceof Error && error.message === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+    const message = error instanceof Error ? error.message : '';
+    const code = message === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
       ? 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
-      : 'ARTIFACT_ACCESS_UNAVAILABLE';
-    const status = code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING' ? 503 : 404;
-    res.status(status).json({
+      : message === 'ARTIFACT_DATABASE_UNAVAILABLE'
+        ? 'ARTIFACT_DATABASE_UNAVAILABLE'
+        : 'ARTIFACT_STORAGE_UNAVAILABLE';
+    res.status(503).json({
       success: false,
       code,
       error: code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
         ? 'Artifact download signing is not configured.'
-        : 'The requested artifact is missing or cannot be accessed.',
+        : 'The database-backed artifact store is unavailable.',
     });
   }
 });
 
-// Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
-app.get('/artifacts/:filename', (req: Request, res: Response) => {
+// Artifacts are private: owner sessions or short-lived signed URLs are required.
+app.get('/artifacts/:filename', async (req: Request, res: Response) => {
   const fileName = req.params.filename || '';
   if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
     res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
@@ -241,18 +236,36 @@ app.get('/artifacts/:filename', (req: Request, res: Response) => {
     return;
   }
 
-  const artifactsRoot = getArtifactStorageDirectory();
-  const filePath = path.resolve(artifactsRoot, fileName);
-  if (!filePath.startsWith(artifactsRoot + path.sep)) {
-    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
-    return;
-  }
-
-  res.sendFile(filePath, (err) => {
-    if (err && !res.headersSent) {
-      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+  try {
+    const artifact = await neonDb.getArtifactContent(fileName);
+    if (!artifact) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The requested artifact was not found.' });
+      return;
     }
-  });
+    const safeDisplayName = artifact.displayName.replace(/[^a-z0-9._-]/gi, '_') || 'artifact';
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Type', artifact.mimeType);
+    res.setHeader('Content-Length', String(artifact.sizeBytes));
+    res.setHeader('Content-Disposition', 'inline; filename="' + safeDisplayName + '"');
+    res.status(200).send(artifact.content);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '';
+    const isDatabaseUnavailable = message === 'ARTIFACT_DATABASE_UNAVAILABLE' || message === 'ARTIFACT_STORAGE_UNAVAILABLE';
+    const isIntegrityFailure = message === 'ARTIFACT_INTEGRITY_CHECK_FAILED';
+    const code = isDatabaseUnavailable
+      ? message
+      : isIntegrityFailure
+        ? 'ARTIFACT_INTEGRITY_CHECK_FAILED'
+        : 'ARTIFACT_STORAGE_UNAVAILABLE';
+    res.status(isDatabaseUnavailable ? 503 : 500).json({
+      success: false,
+      code,
+      error: isIntegrityFailure
+        ? 'The stored artifact failed integrity validation.'
+        : 'The database-backed artifact store is unavailable.',
+    });
+  }
 });
 
 // Shared server-side dynamic Gemini client supporting customGeminiKey override
