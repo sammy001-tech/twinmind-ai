@@ -30,6 +30,21 @@ test('rejects missing content and malformed markdown table structures', async ()
   );
 });
 
+test('parses JSON-encoded tabular source records without converting them into prose', () => {
+  const parsed = parseArtifactContent('[{"Brand":"Source Brand","Website":"https://source.example"}]');
+  assert.equal(parsed.kind, 'table');
+  if (parsed.kind !== 'table') return;
+  assert.deepEqual(parsed.headers, ['Brand', 'Website']);
+  assert.deepEqual(parsed.rows, [['Source Brand', 'https://source.example']]);
+
+  const objectTable = parseArtifactContent(
+    '{"headers":["Brand","Email"],"rows":[{"Brand":"Source Brand","Email":"contact@source.example"}]}',
+  );
+  assert.equal(objectTable.kind, 'table');
+  if (objectTable.kind !== 'table') return;
+  assert.deepEqual(objectTable.rows, [['Source Brand', 'contact@source.example']]);
+});
+
 test('parses structured records without inventing fields or rows', () => {
   const parsed = parseArtifactContent([
     { brand: 'Brand A', email: 'contact@example.com' },
