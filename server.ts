@@ -363,7 +363,18 @@ app.get('/artifacts/:filename', (req: Request, res: Response) => {
     return;
   }
 
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+  try {
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size <= 0) {
+      res.status(404).json({
+        success: false,
+        code: 'ARTIFACT_NOT_FOUND',
+        error: 'The generated file is no longer available at the configured storage path.',
+        storageScope: getArtifactStorageScope(),
+      });
+      return;
+    }
+  } catch {
     res.status(404).json({
       success: false,
       code: 'ARTIFACT_NOT_FOUND',
