@@ -29,6 +29,7 @@ import {
 import ExcelJS from 'exceljs';
 import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
+import { getArtifactStorageDirectoryForGeneration } from './artifactStorageService.ts';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -313,7 +314,7 @@ class SpecialistSwarmService {
       const generated = await generateArtifactBuffer(normalizedType, content, displayFileName);
       if (!generated.buffer.length) throw new Error('ARTIFACT_VALIDATION_FAILED: generated file is empty');
 
-      const publicDir = path.resolve(process.cwd(), 'public', 'artifacts');
+      const publicDir = getArtifactStorageDirectoryForGeneration();
       await fs.promises.mkdir(publicDir, { recursive: true });
 
       const finalFileName = Date.now() + '_' + randomUUID() + '_' + displayFileName;
