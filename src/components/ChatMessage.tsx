@@ -17,9 +17,11 @@ import {
   MoreVertical,
   FileText,
   Pencil,
-  FileDown,
+  AlertTriangle,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
+import { GeneratedArtifactCard } from './GeneratedArtifactCard.tsx';
+import { removeDuplicateArtifactDownloadLines } from '../utils/artifacts.ts';
 
 export interface GroupedMessages {
   groupId: string;
@@ -140,6 +142,9 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   isDark = true,
 }) => {
   const isUser = message.role === 'user';
+  const displayContent = isUser
+    ? message.content
+    : removeDuplicateArtifactDownloadLines(message.content, message.artifacts);
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
@@ -151,7 +156,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.content);
+    navigator.clipboard.writeText(displayContent);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -367,7 +372,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
                   </div>
                 ) : (
                   <>
-                    {renderFormattedMarkdown(message.content)}
+                    {renderFormattedMarkdown(displayContent)}
                     {isUser && message.content.length > 320 && isExpanded && (
                       <button
                         type="button"
@@ -400,23 +405,40 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           </div>
         )}
         
+        {message.artifactErrors && message.artifactErrors.length > 0 && !isEditing && (
+          <div
+            role="alert"
+            className="mt-3 w-full min-w-0 max-w-xl rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-slate-700 dark:text-slate-200"
+          >
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-500" aria-hidden="true" />
+              <h3 className="text-sm font-semibold">File generation did not complete</h3>
+            </div>
+            <div className="mt-2 space-y-2">
+              {message.artifactErrors.map((error, idx) => (
+                <div key={`${error.code}-${idx}`} className="min-w-0">
+                  <span className="inline-flex rounded-md border border-amber-500/30 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+                    {error.code}
+                  </span>
+                  <p className="mt-1 break-words text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+                    {error.message}
+                  </p>
+                </div>
+              ))}
+              <p className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                No download link was created for a file the system could not verify.
+              </p>
+            </div>
+          </div>
+        )}
+
         {message.artifacts && message.artifacts.length > 0 && !isEditing && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {message.artifacts.map((art, idx) => (
-              <a
-                key={idx}
-                href={art.url}
-                download={art.name}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-amber-500 transition text-xs font-medium text-slate-700 dark:text-slate-200 group"
-              >
-                <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400">
-                  <FileDown className="w-4 h-4" />
-                </div>
-                <div className="flex flex-col">
-                  <span className="truncate max-w-[140px] font-semibold">{art.name}</span>
-                  <span className="text-[10px] text-slate-500 uppercase font-bold">{art.type} Artifact</span>
-                </div>
-              </a>
+          <div className="mt-3 w-full min-w-0 space-y-2">
+            {message.artifacts.map((artifact, idx) => (
+              <GeneratedArtifactCard
+                key={`${artifact.url}-${artifact.name}-${idx}`}
+                artifact={artifact}
+              />
             ))}
           </div>
         )}
@@ -580,7 +602,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
             type="button"
             onClick={() => {
               if (navigator.share) {
-                navigator.share({ title: 'TwinMind Response', text: message.content }).catch(() => {});
+                navigator.share({ title: 'TwinMind Response', text: displayContent }).catch(() => {});
               } else {
                 handleCopy();
               }
