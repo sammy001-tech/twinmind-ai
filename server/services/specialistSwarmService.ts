@@ -759,27 +759,61 @@ class SpecialistSwarmService {
             input: { codeLength: goals.extractedCode.length, snippet: goals.extractedCode.slice(0, 100) },
           });
 
-          let auditReport: CodeAuditReport;
+          let auditReport: CodeAuditReport | null = null;
+          let auditError = '';
           try {
             auditReport = this.executeCodeAudit(goals.extractedCode, 'source.ts', scope.budget);
           } catch (auditErr: unknown) {
-            auditReport = {
-              filePath: 'source.ts',
-              findings: [],
-              summary: { totalIssues: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 },
-              securityNotice: 'Audit failed due to execution error: ' + (auditErr instanceof Error ? auditErr.message : String(auditErr)),
-              durationMs: Date.now() - specStart,
-            };
+            auditError = auditErr instanceof Error ? auditErr.message : String(auditErr);
           }
 
           if (scope.isTerminated) return;
+
+          if (!auditReport) {
+            const durationMs = Date.now() - specStart;
+            const summary = 'Code audit unavailable because execution failed: ' + auditError;
+            const toolTrace: SwarmToolTrace = {
+              toolName: 'auditCode',
+              specialist: 'CodeAuditor',
+              input: { snippet: goals.extractedCode.slice(0, 120) },
+              output: { status: 'error', error: auditError },
+              status: 'error',
+              durationMs,
+              timestamp: new Date().toISOString(),
+            };
+            callbacks?.onToolResult?.({
+              specialist: 'CodeAuditor',
+              toolName: 'auditCode',
+              status: 'error',
+              durationMs,
+              outputSummary: summary,
+              result: { status: 'error', error: auditError },
+            });
+            callbacks?.onSpecialistDone?.({
+              specialist: 'CodeAuditor',
+              durationMs,
+              summaryPreview: summary,
+            });
+            specialistTraces.push({
+              specialist: 'CodeAuditor',
+              roleName: 'TypeScript AST Security & Quality Auditor',
+              taskDescription: 'AST security and code smell audit',
+              tools: [toolTrace],
+              summary,
+              status: 'error',
+              durationMs,
+            });
+            return;
+          }
 
           callbacks?.onToolResult?.({
             specialist: 'CodeAuditor',
             toolName: 'auditCode',
             status: 'success',
             durationMs: auditReport.durationMs,
-            outputSummary: `Detected ${auditReport.summary.totalIssues} issues (${auditReport.summary.critical} critical, ${auditReport.summary.high} high, ${auditReport.summary.medium} medium)`,
+            outputSummary: 'Detected ' + auditReport.summary.totalIssues + ' issues (' +
+              auditReport.summary.critical + ' critical, ' + auditReport.summary.high +
+              ' high, ' + auditReport.summary.medium + ' medium)',
             result: auditReport,
           });
 
@@ -794,7 +828,8 @@ class SpecialistSwarmService {
           };
 
           const durationMs = Date.now() - specStart;
-          const summary = `Audited code AST in ${auditReport.durationMs}ms: found ${auditReport.summary.totalIssues} issues (${auditReport.summary.critical} critical).`;
+          const summary = 'Audited code AST in ' + auditReport.durationMs + 'ms: found ' +
+            auditReport.summary.totalIssues + ' issues (' + auditReport.summary.critical + ' critical).';
 
           callbacks?.onSpecialistDone?.({
             specialist: 'CodeAuditor',
@@ -849,7 +884,7 @@ class SpecialistSwarmService {
             durationMs: searchRes.durationMs,
             outputSummary:
               searchRes.status === 'success'
-                ? `Retrieved ${searchRes.results.length} verified web sources`
+                ? `Retrieved ${searchRes.results.length} web sources; retrieval alone does not independently verify their claims`
                 : `Error: ${searchRes.error}`,
             result: searchRes,
           });
