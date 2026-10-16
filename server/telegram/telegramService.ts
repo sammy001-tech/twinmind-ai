@@ -129,7 +129,7 @@ class TelegramBotManager {
 
           if (this.config.ownerId === userId) {
             this.config.ownerId = userId;
-            this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
+            this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
             saveConfig(this.config);
             this.log('auth', `Paired with owner ID ${userId} (@${from.username || from.first_name})`);
 
@@ -1003,7 +1003,7 @@ class TelegramBotManager {
           userPrompt: text,
           channel: 'telegram',
           conversationHistory: this.conversationHistory,
-          userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+          userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
           providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
           modelOverride: this.config.activeModel || undefined,
         });
@@ -1093,7 +1093,7 @@ class TelegramBotManager {
           },
           channel: 'telegram',
           conversationHistory: this.conversationHistory,
-          userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+          userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
           providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
           modelOverride: this.config.activeModel || undefined,
         });
@@ -1151,7 +1151,7 @@ class TelegramBotManager {
             },
             channel: 'telegram',
             conversationHistory: this.conversationHistory,
-            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
             providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
             modelOverride: this.config.activeModel || undefined,
           });
@@ -1165,7 +1165,7 @@ class TelegramBotManager {
             userPrompt: prompt,
             channel: 'telegram',
             conversationHistory: this.conversationHistory,
-            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
             providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
             modelOverride: this.config.activeModel || undefined,
           });
@@ -1214,7 +1214,7 @@ class TelegramBotManager {
           },
           channel: 'telegram',
           conversationHistory: this.conversationHistory,
-          userName: this.config.ownerUsername || s.userName || 'User',
+          userName: this.config.ownerUsername || s.userName || '',
           providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
           modelOverride: this.config.activeModel || undefined,
         });
@@ -1308,7 +1308,7 @@ class TelegramBotManager {
       userPrompt,
       channel: 'telegram',
       conversationHistory: this.conversationHistory,
-      userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+      userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
       providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
       modelOverride: this.config.activeModel || undefined,
     });
