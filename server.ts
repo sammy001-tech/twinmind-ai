@@ -165,6 +165,59 @@ app.post('/api/auth/logout', (_req: Request, res: Response) => {
   res.json({ success: true });
 });
 
+// Resolve a fresh, short-lived download path for a previously persisted artifact.
+// This protected route prevents old chat messages from keeping expired signed URLs.
+app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) => {
+  const fileName = req.params.filename || '';
+  if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
+    return;
+  }
+
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED' });
+    return;
+  }
+
+  const artifactsRoot = path.resolve(process.cwd(), 'public', 'artifacts');
+  const filePath = path.resolve(artifactsRoot, fileName);
+  if (!filePath.startsWith(artifactsRoot + path.sep)) {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
+    return;
+  }
+
+  try {
+    const stats = await fs.promises.stat(filePath);
+    if (!stats.isFile() || stats.size <= 0) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+      return;
+    }
+
+    const url = artifactAccessService.createSignedPath(fileName);
+    const signed = new URL(url, 'https://artifact-link.invalid');
+    const expires = Number(signed.searchParams.get('expires'));
+    if (!Number.isSafeInteger(expires) || expires <= Math.floor(Date.now() / 1000)) {
+      res.status(500).json({ success: false, code: 'ARTIFACT_LINK_INVALID' });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ success: true, url, expiresAt: new Date(expires * 1000).toISOString() });
+  } catch (error: unknown) {
+    const code = error instanceof Error && error.message === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+      ? 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+      : 'ARTIFACT_ACCESS_UNAVAILABLE';
+    const status = code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING' ? 503 : 404;
+    res.status(status).json({
+      success: false,
+      code,
+      error: code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+        ? 'Artifact download signing is not configured.'
+        : 'The requested artifact is missing or cannot be accessed.',
+    });
+  }
+});
+
 // Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
 app.get('/artifacts/:filename', (req: Request, res: Response) => {
   const fileName = req.params.filename || '';
