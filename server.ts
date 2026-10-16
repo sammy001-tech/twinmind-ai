@@ -1118,61 +1118,95 @@ app.post('/api/analyze-decision', async (req: Request, res: Response): Promise<v
     const {
       dilemma,
       channel = 'web',
-      userName = 'Olalekan',
-      nickname = '',
+      userName: requestedUserName,
+      nickname: requestedNickname,
       model,
-      includeChallenger = true,
+      provider: requestedProvider,
+      includeChallenger,
       customMistralKey,
     } = req.body;
 
-    if (!dilemma || typeof dilemma !== 'string') {
-      res.status(400).json({ error: 'Dilemma or decision prompt is required.' });
+    if (typeof dilemma !== 'string' || !dilemma.trim()) {
+      res.status(400).json({ success: false, code: 'INVALID_DECISION_INPUT', error: 'A non-empty decision prompt is required.' });
       return;
     }
-
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(500).json({ error: 'GEMINI_API_KEY is missing on server.' });
-      return;
-    }
-
-    const systemInstruction = `${buildSystemPrompt(channel, userName, nickname)}
-    
-TASK SPECIFICATION:
-You are analyzing a situation or decision using Olalekan's 7-part Advice Framework (Section 7 and Section 3 of your Master System Prompt).
-Break down the issue with total authenticity: practical, analytical, cost-conscious, separating facts from assumptions, substance over hype, identifying trade-offs and the realistic next step.
-
-CRITICAL ENHANCEMENT: Assess your Confidence & Evidence Level.
-- Indicate confidence level: "High", "Medium", or "Low"
-- Explain why: based on verified information X vs unresolved assumption Y.
-
-Respond strictly in valid JSON format with the following keys:
-{
-  "actualSituation": "Concise summary of what the situation actually is (separating facts from assumptions)",
-  "confidenceLevel": "High" | "Medium" | "Low",
-  "confidenceReason": "Why: Based on verified information X; assumption Y remains unresolved.",
-  "whatMattersMost": "The core priority or leverage point that really matters",
-  "realisticOptions": ["Option A with brief realism check", "Option B with brief realism check"],
-  "tradeOffs": "Clear analysis of costs, risks, opportunity costs, and diminishing returns",
-  "principalRisks": "The main risks or hidden assumptions to watch out for",
-  "recommendedAction": "The grounded, practical recommended course of action (substance over hype)",
-  "nextPracticalStep": "The immediate, realistic next step to take with currently available resources",
-  "clarifyingQuestion": "A concise question if any critical fact is missing, otherwise empty string"
-}`;
 
     const currentSettings = settingsManager.getSettings();
-    const primaryModel = model || currentSettings.activeModel || currentSettings.providerModels.gemini || telegramBotManager.getConfig().activeModel;
-    if (!primaryModel) {
-      res.status(400).json({
-        error: 'No active model configured for decision analysis. Please configure your model in Settings.',
+    const provider = requestedProvider || currentSettings.activeProvider;
+    if (provider !== 'gemini') {
+      res.status(409).json({
+        success: false,
+        code: 'PROVIDER_UNSUPPORTED_FOR_ENDPOINT',
+        error: 'This endpoint currently implements Gemini analysis only. Select Gemini explicitly or use the multi-provider chat endpoint.',
       });
       return;
     }
 
-    // Step 1: Core analysis via dynamic model
+    const geminiKey = (
+      req.get('x-gemini-key') ||
+      req.get('x-api-key') ||
+      req.body?.customGeminiKey ||
+      currentSettings.customGeminiKey ||
+      process.env.GEMINI_API_KEY ||
+      ''
+    ).trim().replace(/^["']|["']$/g, '');
+
+    if (!geminiKey) {
+      res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
+      return;
+    }
+
+    const configuredModel = model ||
+      currentSettings.providerModels?.gemini ||
+      (currentSettings.activeProvider === 'gemini' ? currentSettings.activeModel : '');
+
+    if (!configuredModel) {
+      res.status(503).json({ success: false, code: 'MODEL_CONFIGURATION_REQUIRED:gemini' });
+      return;
+    }
+
+    const primaryModel = await modelCatalogService.resolveModelForProvider('gemini', configuredModel, geminiKey);
+    const userName = typeof requestedUserName === 'string' && requestedUserName.trim()
+      ? requestedUserName.trim()
+      : (currentSettings.userName || '');
+    const nickname = typeof requestedNickname === 'string' && requestedNickname.trim()
+      ? requestedNickname.trim()
+      : (currentSettings.nickname || '');
+
+    const systemInstruction = buildSystemPrompt({
+      channel,
+      userName,
+      nickname,
+      activeModel: primaryModel,
+      activeProvider: 'gemini',
+      selectedVoice: currentSettings.voice || '',
+    });
+
+    const analysisPrompt = \`Analyze the following decision using evidence-bound reasoning.
+Separate facts from assumptions, compare realistic options and trade-offs, and identify practical next steps.
+Do not invent personal facts, sources, historical data, or user preferences.
+Return only one valid JSON object with these keys:
+{
+  "actualSituation": "string",
+  "confidenceLevel": "High" | "Medium" | "Low",
+  "confidenceScore": "integer from 0 to 100, or null when a defensible estimate is not possible",
+  "confidenceReason": "string describing verified evidence and unresolved assumptions",
+  "whatMattersMost": "string",
+  "realisticOptions": ["string"],
+  "tradeOffs": "string",
+  "principalRisks": "string",
+  "recommendedAction": "string",
+  "nextPracticalStep": "string",
+  "clarifyingQuestion": "string; empty only when no critical fact is missing"
+}
+confidenceScore is a model estimate, not an empirically calibrated probability. Do not map confidenceLevel to a numeric score.
+Decision to analyze:
+\${dilemma}\`;
+
     const response = await callWithRetry(() =>
       getAiClient(req).models.generateContent({
         model: primaryModel,
-        contents: dilemma,
+        contents: analysisPrompt,
         config: {
           systemInstruction,
           responseMimeType: 'application/json',
@@ -1180,110 +1214,132 @@ Respond strictly in valid JSON format with the following keys:
       })
     );
 
-    const jsonText = response.text?.trim() || '{}';
+    const jsonText = response.text?.trim() || '';
+    if (!jsonText) throw new Error('AI_OUTPUT_EMPTY: decision model returned no usable output');
+
     let parsed: any;
     try {
       parsed = JSON.parse(jsonText);
     } catch {
-      parsed = { raw: jsonText };
+      throw new Error('AI_OUTPUT_INVALID_JSON: decision model did not return a valid JSON object');
     }
 
-    // Step 2: Optional Challenger Second Opinion
-    if (includeChallenger) {
-      const challengerPrompt = `You are an independent reasoning auditor acting as an objective challenger to Olalekan's digital twin analysis.
-User Dilemma: "${dilemma}"
-Primary Analysis Recommendation: "${parsed.recommendedAction || ''}"
-Identified Trade-Offs: "${parsed.tradeOffs || ''}"
-Identified Risks: "${parsed.principalRisks || ''}"
+    const requiredStrings = [
+      'actualSituation',
+      'confidenceLevel',
+      'confidenceReason',
+      'whatMattersMost',
+      'tradeOffs',
+      'principalRisks',
+      'recommendedAction',
+      'nextPracticalStep',
+      'clarifyingQuestion',
+    ];
+    const validConfidence = ['High', 'Medium', 'Low'].includes(parsed.confidenceLevel);
+    const validScore = parsed.confidenceScore === null ||
+      (Number.isInteger(parsed.confidenceScore) && parsed.confidenceScore >= 0 && parsed.confidenceScore <= 100);
+    if (!parsed || typeof parsed !== 'object' ||
+        requiredStrings.some((key) => typeof parsed[key] !== 'string') ||
+        !Array.isArray(parsed.realisticOptions) ||
+        !parsed.realisticOptions.every((item: unknown) => typeof item === 'string') ||
+        !validConfidence || !validScore) {
+      throw new Error('AI_OUTPUT_SCHEMA_INVALID: decision model output failed schema validation');
+    }
 
-Critique this analysis without being contrary for the sake of it.
-Identify:
-1. What unexamined assumption is being taken for granted?
-2. What alternative scenario was under-weighted?
-3. Where could the recommendation encounter unexpected friction or diminishing returns?
+    // The challenger is optional and only runs when explicitly requested. It never silently
+    // substitutes a second Gemini call and labels it an independent provider.
+    if (includeChallenger === true) {
+      const mistralKey = (customMistralKey || currentSettings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim();
+      const challengerConfiguredModel = req.body?.challengerModel ||
+        currentSettings.providerModels?.mistral ||
+        (currentSettings.activeProvider === 'mistral' ? currentSettings.activeModel : '');
 
-Respond in valid JSON:
-{
-  "agreementLevel": "High Agreement" | "Partial Disagreement" | "Alternative Perspective",
-  "points": ["Point 1", "Point 2", "Point 3"]
-}`;
-
-      const effectiveMistralKey = customMistralKey || process.env.MISTRAL_API_KEY;
-
-      if (effectiveMistralKey) {
-        // Execute real live Mistral call as independent challenger
+      if (!mistralKey || !challengerConfiguredModel) {
+        parsed.challengerStatus = {
+          status: 'unavailable',
+          code: 'CHALLENGER_CONFIGURATION_MISSING',
+        };
+      } else {
         try {
-          const mRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          const challengerModel = await modelCatalogService.resolveModelForProvider('mistral', challengerConfiguredModel, mistralKey);
+          const challengerPrompt = \`Critically review this decision analysis using only the supplied text. Do not invent facts or evidence.
+Decision: \${dilemma}
+Primary analysis: \${JSON.stringify(parsed)}
+Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreement", "Alternative Perspective") and "points" (array of evidence-based strings).\`;
+          const challengerResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${effectiveMistralKey}`,
+              Authorization: \`Bearer \${mistralKey}\`,
             },
             body: JSON.stringify({
-              model: await modelCatalogService.resolveModelForProvider('mistral', currentSettings.providerModels?.mistral, effectiveMistralKey),
+              model: challengerModel,
               messages: [{ role: 'user', content: challengerPrompt }],
               response_format: { type: 'json_object' },
             }),
           });
-          if (mRes.ok) {
-            const mData = await mRes.json();
-            const cContent = mData.choices?.[0]?.message?.content;
-            if (cContent) {
-              const cParsed = JSON.parse(cContent);
-              parsed.challengerCritique = {
-                model: 'Mistral (Independent Challenger)',
-                points: cParsed.points || [],
-                agreementLevel: cParsed.agreementLevel || 'Alternative Perspective',
-              };
+
+          if (!challengerResponse.ok) {
+            parsed.challengerStatus = {
+              status: 'unavailable',
+              code: 'CHALLENGER_PROVIDER_ERROR',
+              httpStatus: challengerResponse.status,
+            };
+          } else {
+            const challengerData: any = await challengerResponse.json();
+            const challengerText = challengerData.choices?.[0]?.message?.content?.trim() || '';
+            if (!challengerText) {
+              parsed.challengerStatus = { status: 'failed', code: 'CHALLENGER_OUTPUT_EMPTY' };
+            } else {
+              const critique = JSON.parse(challengerText);
+              const allowedAgreement = ['High Agreement', 'Partial Disagreement', 'Alternative Perspective'];
+              if (!allowedAgreement.includes(critique.agreementLevel) ||
+                  !Array.isArray(critique.points) ||
+                  !critique.points.every((point: unknown) => typeof point === 'string')) {
+                parsed.challengerStatus = { status: 'failed', code: 'CHALLENGER_OUTPUT_SCHEMA_INVALID' };
+              } else {
+                parsed.challengerCritique = { model: challengerModel, points: critique.points, agreementLevel: critique.agreementLevel };
+                parsed.challengerStatus = { status: 'complete' };
+              }
             }
           }
-        } catch (mErr) {
-          console.warn('Mistral challenger check skipped:', mErr);
-        }
-      }
-
-      // If Mistral is not configured, run independent challenger pass dynamically
-      if (!parsed.challengerCritique) {
-        try {
-          const challengerModel = primaryModel;
-          const geminiChallenger = await callWithRetry(() =>
-            getAiClient(req).models.generateContent({
-              model: challengerModel,
-              contents: challengerPrompt,
-              config: {
-                responseMimeType: 'application/json',
-              },
-            })
-          );
-          const cText = geminiChallenger.text?.trim() || '{}';
-          const cParsed = JSON.parse(cText);
-          parsed.challengerCritique = {
-            model: `${challengerModel} (Challenger Audit)`,
-            points: cParsed.points || [],
-            agreementLevel: cParsed.agreementLevel || 'Alternative Perspective',
+        } catch (challengerError) {
+          parsed.challengerStatus = {
+            status: 'unavailable',
+            code: 'CHALLENGER_RESOLUTION_FAILED',
+            error: challengerError instanceof Error ? challengerError.message : 'Challenger resolution failed',
           };
-        } catch (gErr) {
-          console.warn('Challenger pass error:', gErr);
         }
       }
+    } else {
+      parsed.challengerStatus = { status: 'not_requested' };
     }
 
-    // Persist decision analysis to Neon Postgres if available
-    neonDb.saveDecision({
+    const decisionId = await neonDb.saveDecision({
       title: dilemma.slice(0, 100),
-      situation: parsed.actualSituation || dilemma,
-      options: parsed.realisticOptions || [],
-      recommendation: parsed.recommendedAction || '',
-      confidence: parsed.confidenceLevel === 'High' ? 90 : parsed.confidenceLevel === 'Medium' ? 70 : 50,
+      situation: parsed.actualSituation,
+      options: parsed.realisticOptions,
+      recommendation: parsed.recommendedAction,
+      confidence: parsed.confidenceScore,
       full_analysis: parsed,
-      channel: channel || 'web',
-    }).catch((dbErr) => console.warn('[NeonDB] Save decision deferred:', dbErr));
+      channel,
+    });
 
-    res.json({ success: true, analysis: parsed });
+    res.json({
+      success: true,
+      analysis: parsed,
+      persistence: decisionId === null
+        ? { status: 'failed', code: 'PERSISTENCE_FAILED' }
+        : { status: 'persisted', decisionId },
+    });
   } catch (err: unknown) {
-    console.error('Decision analysis error:', err);
-    const errorMessage = err instanceof Error ? err.message : 'Analysis failed.';
-    res.status(500).json({ error: errorMessage });
+    const message = err instanceof Error ? err.message : 'Decision analysis failed';
+    console.error('[DecisionAnalysis] Request failed:', message);
+    res.status(502).json({
+      success: false,
+      code: message.split(':')[0] || 'DECISION_ANALYSIS_FAILED',
+      error: message,
+    });
   }
 });
 
