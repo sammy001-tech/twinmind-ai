@@ -85,7 +85,7 @@ export default function App() {
 
   const activeModel = providerModels[activeProvider as keyof typeof providerModels] || '';
 
-  const [voice, setVoice] = useState<string>('Fenrir');
+  const [voice, setVoice] = useState<string>('');
   const [customGeminiKey, setCustomGeminiKey] = useState<string>('');
   const [customGroqKey, setCustomGroqKey] = useState<string>('');
   const [customMistralKey, setCustomMistralKey] = useState<string>('');
