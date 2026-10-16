@@ -24,6 +24,7 @@ import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
 import { getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
+import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
 import { evaluateSameOriginRequest, resolveProviderCredential } from './server/services/providerCredentialService.ts';
 
 dotenv.config();
@@ -850,6 +851,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     // Detect if Multi-Agent Specialist Swarm is requested
     const isSwarmRequested = Boolean(
       req.body.useSwarm ||
+      isArtifactGenerationRequest(lastUserQuery) ||
       /(\/swarm|\b(swarm|specialist\s+swarm|specialist\s+agents|deep\s+research\s+and\s+calculate|generate\s+file|create\s+pdf|export\s+csv|make\s+markdown)\b)/i.test(lastUserQuery)
     );
 

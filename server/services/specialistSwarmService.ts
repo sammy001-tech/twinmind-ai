@@ -30,6 +30,7 @@ import ExcelJS from 'exceljs';
 import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import path from 'path';
+import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
 
 export interface SwarmToolTrace {
   toolName: string;
@@ -396,6 +397,10 @@ class SpecialistSwarmService {
     needsHistory: boolean;
     needsArtifact: boolean;
     artifactType?: 'pdf' | 'md' | 'csv' | 'xlsx';
+    artifactFormatError?: {
+      error: 'ARTIFACT_FORMAT_REQUIRED' | 'ARTIFACT_FORMAT_AMBIGUOUS' | 'ARTIFACT_TYPE_UNSUPPORTED';
+      message: string;
+    };
   } {
     const lower = prompt.toLowerCase();
 
@@ -446,6 +451,7 @@ class SpecialistSwarmService {
       .replace(/\s+(and\s+calculate|and\s+compute).*$/i, '')
       .trim();
     if (!researchQuery) researchQuery = prompt.slice(0, 80);
+    const artifactFormat = resolveArtifactFormat(prompt, undefined);
 
     return {
       needsResearch,
@@ -458,8 +464,10 @@ class SpecialistSwarmService {
       needsPerspective,
       needsSignalFilter,
       needsHistory,
-      needsArtifact: /(generate|create|export|make|build)\s+(document|report|pdf|csv|excel|xlsx|markdown|spreadsheet|file|artifact)/i.test(lower),
-      artifactType: lower.includes('excel') || lower.includes('xlsx') ? 'xlsx' : lower.includes('pdf') ? 'pdf' : lower.includes('csv') || lower.includes('spreadsheet') ? 'csv' : 'md',
+      needsArtifact: isArtifactGenerationRequest(prompt),
+      ...('format' in artifactFormat
+        ? { artifactType: artifactFormat.format }
+        : { artifactFormatError: artifactFormat }),
     };
   }
 
@@ -1025,7 +1033,9 @@ class SpecialistSwarmService {
           callbacks?.onSpecialistStart?.({
             specialist: 'ArtifactArchitect',
             role: 'Professional Document & Artifact Architect',
-            taskDescription: `Generating a professional ${goals.artifactType?.toUpperCase() || 'Document'} based on task context`,
+            taskDescription: goals.artifactType
+              ? `Generating a professional ${goals.artifactType.toUpperCase()} based on task context`
+              : 'Checking output-format requirements before generating the requested file',
           });
 
           // Wait for all other specialists to populate traces
@@ -1047,12 +1057,55 @@ class SpecialistSwarmService {
             docContent += `${trace.summary}\n\n`;
           }
 
-          const artifactRes = await this.executeGenerateArtifact(
-            goals.artifactType || 'md',
-            docContent,
-            `Report_${Date.now()}.${goals.artifactType || 'md'}`,
-            scope.budget
-          );
+          const artifactType = goals.artifactType;
+          const isTabularArtifact = artifactType === 'csv' || artifactType === 'xlsx';
+          const tabularRows = specialistTraces.flatMap((trace) => {
+            const searchRows = trace.tools.flatMap((tool) => {
+              if (tool.toolName !== 'searchWeb') return [];
+              const output = tool.output as { status?: unknown; query?: unknown; results?: unknown } | null;
+              if (!output || output.status !== 'success' || !Array.isArray(output.results)) return [];
+
+              return output.results.flatMap((result) => {
+                if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
+                const source = result as Record<string, unknown>;
+                const row: Record<string, unknown> = {};
+                if (typeof output.query === 'string' && output.query.trim()) row.query = output.query;
+                if (typeof source.title === 'string' && source.title.trim()) row.title = source.title;
+                if (typeof source.url === 'string' && source.url.trim()) row.url = source.url;
+                if (typeof source.content === 'string' && source.content.trim()) row.summary = source.content;
+                return Object.keys(row).length > 0 ? [row] : [];
+              });
+            });
+            if (searchRows.length > 0) return searchRows;
+            if (trace.specialist === 'ArtifactArchitect' || !trace.summary.trim()) return [];
+            return [{
+              specialist: trace.specialist,
+              role: trace.roleName,
+              task: trace.taskDescription,
+              status: trace.status,
+              summary: trace.summary,
+              durationMs: trace.durationMs,
+            }];
+          });
+          const artifactContent = isTabularArtifact ? tabularRows : docContent;
+          const artifactRes = artifactType
+            ? await this.executeGenerateArtifact(
+                artifactType,
+                artifactContent,
+                `Report_${Date.now()}.${artifactType}`,
+                scope.budget,
+              )
+            : {
+                status: 'error' as const,
+                url: '',
+                fileName: '',
+                displayName: '',
+                type: 'unknown',
+                error: goals.artifactFormatError
+                  ? `${goals.artifactFormatError.error}: ${goals.artifactFormatError.message}`
+                  : 'ARTIFACT_FORMAT_REQUIRED: specify PDF, XLSX, CSV, or Markdown before generating this file.',
+                durationMs: Date.now() - specStart,
+              };
 
           if (scope.isTerminated) return;
 

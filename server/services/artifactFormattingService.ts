@@ -95,6 +95,66 @@ function parseMarkdownTable(text: string): ParsedArtifactContent | null {
   };
 }
 
+function parseJsonTable(text: string): ParsedArtifactContent | null {
+  let trimmed = text.trim();
+  const fenced = trimmed.match(/^\x60\x60\x60(?:json)?\s*\r?\n([\s\S]*?)\r?\n\x60\x60\x60$/i);
+  if (fenced) trimmed = fenced[1].trim();
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error('ARTIFACT_JSON_INVALID: structured artifact content contains invalid JSON');
+  }
+
+  if (Array.isArray(parsed)) {
+    const records = objectToTable(parsed);
+    if (records) return records;
+
+    if (parsed.length > 0 && parsed.every((row) => Array.isArray(row))) {
+      const [rawHeaders, ...rawRows] = parsed as unknown[][];
+      if (!rawHeaders.length || rawHeaders.some((header) => typeof header !== 'string' || !header.trim())) {
+        throw new Error('INVALID_TABLE_HEADER');
+      }
+      const headers = rawHeaders.map((header) => String(header).trim());
+      const rows = rawRows.map((row) => {
+        if (row.length !== headers.length) {
+          throw new Error('INCONSISTENT_TABLE_COLUMNS: expected ' + headers.length + ', received ' + row.length);
+        }
+        return row;
+      });
+      return { kind: 'table', headers, rows, preamble: [], postamble: [] };
+    }
+    return null;
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    const record = parsed as Record<string, unknown>;
+    if (Array.isArray(record.headers) && Array.isArray(record.rows)) {
+      const headers = record.headers.map((header) => typeof header === 'string' ? header.trim() : '');
+      if (!headers.length || headers.some((header) => !header)) throw new Error('INVALID_TABLE_HEADER');
+
+      const rows = record.rows.map((rawRow) => {
+        if (Array.isArray(rawRow)) {
+          if (rawRow.length !== headers.length) {
+            throw new Error('INCONSISTENT_TABLE_COLUMNS: expected ' + headers.length + ', received ' + rawRow.length);
+          }
+          return rawRow;
+        }
+        if (rawRow && typeof rawRow === 'object' && !Array.isArray(rawRow)) {
+          const row = rawRow as Record<string, unknown>;
+          return headers.map((header) => Object.prototype.hasOwnProperty.call(row, header) ? row[header] : null);
+        }
+        throw new Error('INCONSISTENT_TABLE_COLUMNS: structured rows must be arrays or objects');
+      });
+      return { kind: 'table', headers, rows, preamble: [], postamble: [] };
+    }
+  }
+
+  return null;
+}
+
 function parseDelimited(text: string, delimiter: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [], field = '', quoted = false;
@@ -155,7 +215,7 @@ export function parseArtifactContent(content: unknown): ParsedArtifactContent {
   if (typeof content !== 'string') throw new Error('UNSUPPORTED_ARTIFACT_CONTENT: supply non-empty text or structured table data');
   const text = content.replace(/\r\n?/g, '\n').trim();
   if (!text) throw new Error('ARTIFACT_CONTENT_REQUIRED');
-  return parseMarkdownTable(text) || detectDelimitedTable(text) || { kind: 'document', text };
+  return parseJsonTable(text) || parseMarkdownTable(text) || detectDelimitedTable(text) || { kind: 'document', text };
 }
 
 function displayValue(value: unknown): string {
@@ -168,9 +228,10 @@ function displayValue(value: unknown): string {
 }
 function safeTextCell(value: unknown): string {
   const text = displayValue(value);
-  // Numeric values remain numeric text; user-supplied strings are neutralized
-  // when spreadsheet software could interpret them as formulas.
+  // Preserve number-shaped text (including negative values) but neutralize strings
+  // that spreadsheet software could interpret as formulas.
   if (typeof value !== 'string') return text;
+  if (/^[\t\r\n ]*-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*$/.test(text)) return text;
   return /^[\t\r\n ]*[=+\-@]/.test(text) ? "'" + text : text;
 }
 function serializeCsv(headers: string[], rows: unknown[][]): string {
@@ -490,6 +551,9 @@ export async function generateArtifactBuffer(
   if (typeof fileName !== 'string' || !fileName.trim()) throw new Error('ARTIFACT_FILENAME_REQUIRED');
   const title = titleFromFileName(fileName);
   const content = parseArtifactContent(contentInput);
+  if ((type === 'csv' || type === 'xlsx') && content.kind !== 'table') {
+    throw new Error('ARTIFACT_TABULAR_DATA_REQUIRED: provide structured records or a table with source-provided headers and at least one data row');
+  }
   if (content.kind === 'table' && content.headers.length === 0) throw new Error('ARTIFACT_TABLE_HEADERS_REQUIRED');
   if (content.kind === 'table' && content.rows.length === 0) {
     throw new Error('ARTIFACT_TABLE_EMPTY: no data rows were supplied; no empty dataset was presented as a completed artifact');
