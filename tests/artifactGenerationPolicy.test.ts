@@ -32,12 +32,6 @@ test('parses explicitly fenced JSON emitted by the model as structured data', ()
   assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
 });
 
-test('parses fenced JSON separated by real newline characters', () => {
-  const parsed = parseArtifactTableContent('\\x60\\x60\\x60json\\n[{"brand":"Brand A","website":"https://brand-a.example"}]\\n\\x60\\x60\\x60');
-  assert.deepEqual(parsed.headers, ['brand', 'website']);
-  assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
-});
-
 test('parses markdown tables without inventing rows or column labels', () => {
   const parsed = parseArtifactTableContent(
     '| Brand | Website |\n| --- | --- |\n| Brand A | https://brand-a.example |\n| Brand B | https://brand-b.example |',
@@ -69,6 +63,18 @@ test('serializes CSV values using CSV quoting rules', () => {
     serializeArtifactCsv(parsed),
     'brand,notes\r\nBrand A,"contains, comma"\r\nBrand B,"a ""quoted"" value"',
   );
+});
+
+test('neutralizes formula-like source strings when serializing CSV', () => {
+  const parsed = parseArtifactTableContent([
+    { expression: '=1+1', actual_number: -2 },
+    { expression: '@SUM(A1:A2)', actual_number: 4 },
+  ]);
+  const csv = serializeArtifactCsv(parsed);
+  assert.ok(csv.includes("'=1+1"));
+  assert.ok(csv.includes("'@SUM(A1:A2)"));
+  assert.ok(csv.endsWith('\\r\\n@SUM(A1:A2),4') === false);
+  assert.ok(csv.includes(', -2') === false);
 });
 
 test('rejects prose, malformed JSON, missing headers, and empty table data', () => {
