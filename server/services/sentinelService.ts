@@ -30,14 +30,17 @@ class AdversarialSentinelService {
     try {
       const s = settingsManager.getSettings();
       // Only scan if we have an alert channel configured
-      if (!s.proactiveAlertChannel || s.proactiveAlertChannel === 'none') {
-        console.log('[Sentinel] Proactive alerts disabled in settings. Skipping scan.');
-        return;
-      }
-
-      // 1. Get active decisions (those without reviews or marked active)
+      // Audit stored decisions independently of whether an outbound alert channel is configured.
+      // Eligibility is determined from actual stored fields; no random sampling or fabricated confidence.
       const decisions = await neonDb.getDecisions(15);
-      const activeDecisions = decisions.filter(d => d.confidence > 70); // High confidence decisions are the best targets for red-teaming
+      const activeDecisions = decisions.filter((decision) =>
+        typeof decision.confidence === 'number' &&
+        Number.isFinite(decision.confidence) &&
+        decision.confidence >= 0 &&
+        decision.confidence <= 100 &&
+        typeof decision.recommendation === 'string' &&
+        decision.recommendation.trim().length > 0
+      );
 
       for (const decision of activeDecisions) {
         await this.performRedTeamAudit(decision);
@@ -55,7 +58,10 @@ class AdversarialSentinelService {
   private async performRedTeamAudit(decision: any): Promise<void> {
     const s = settingsManager.getSettings();
     const apiKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-    if (!apiKey) return;
+    if (!apiKey) {
+      console.warn('[Sentinel] Scan unavailable: GEMINI_API_KEY is not configured.');
+      return;
+    }
 
     console.log(`[Sentinel] Auditing decision #${decision.id}: "${decision.title}"`);
 
@@ -72,7 +78,7 @@ class AdversarialSentinelService {
 
       // 2. Use LLM to find the "Blind Spot"
       const genAI = new GoogleGenAI({ apiKey });
-      const modelId = await modelCatalogService.resolveModelForProvider('gemini', s.providerModels?.gemini, apiKey);
+      const modelId = await modelCatalogService.resolveModelForProvider('gemini', s.providerModels?.gemini || (s.activeProvider === 'gemini' ? s.activeModel : ''), apiKey);
 
       const auditPrompt = `
         You are the ADVERSARIAL SENTINEL for the configured Digital Twin owner. 
