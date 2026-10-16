@@ -5,6 +5,7 @@ import { confirmationService } from './confirmationService.ts';
 import { twinAgentService } from './twinAgentService.ts';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
+import { artifactAccessService } from './artifactAccessService.ts';
 
 export class WhatsAppWorker {
   private isRunning = false;
@@ -41,7 +42,8 @@ export class WhatsAppWorker {
 
       try {
         await this.executeJobPayload(job);
-        await jobQueueService.completeJob(job.jobId, this.workerLeaseId);
+        const completed = await jobQueueService.completeJob(job.jobId, this.workerLeaseId);
+        if (!completed) throw new Error('PERSISTENCE_FAILED: WhatsApp job completion was not durably recorded');
       } finally {
         clearInterval(heartbeatInterval);
       }
@@ -242,8 +244,10 @@ export class WhatsAppWorker {
       channel: 'whatsapp',
     });
 
-    const reply = turnResult?.reply?.trim() || 'Request processed.';
-    await twilioService.sendWhatsAppMessage(senderPhone, reply);
+    const reply = typeof turnResult?.reply === 'string' ? turnResult.reply.trim() : '';
+    if (!reply) throw new Error('AI_OUTPUT_EMPTY: provider returned no usable reply');
+    const delivered = await twilioService.sendWhatsAppMessage(senderPhone, reply);
+    if (!delivered.success) throw new Error(`DELIVERY_FAILED: ${delivered.error || 'WhatsApp response was not accepted by Twilio'}`);
 
     // Deliver generated artifacts (PDF, Excel .xlsx, CSV, Markdown) directly via WhatsApp mediaUrl
     if (turnResult?.toolsExecuted && Array.isArray(turnResult.toolsExecuted)) {
@@ -252,14 +256,24 @@ export class WhatsAppWorker {
         if (tool.toolName === 'generateArtifact' && res.fileName) {
           try {
             const fileName = res.fileName;
-            const publicBaseUrl = (process.env.PUBLIC_APP_URL || process.env.VITE_APP_URL || '').trim().replace(/\/+$/, '');
-            if (publicBaseUrl) {
-              const mediaUrl = `${publicBaseUrl}/artifacts/${encodeURIComponent(fileName)}`;
-              await twilioService.sendWhatsAppMessage(
-                senderPhone,
-                `📄 *Generated Document*: ${fileName}`,
-                mediaUrl
-              );
+            const publicBaseUrl = (process.env.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+            if (!publicBaseUrl) {
+              console.warn('[WhatsAppWorker] PUBLIC_APP_URL is not configured; generated artifact cannot be delivered as media.');
+              continue;
+            }
+            const parsedBaseUrl = new URL(publicBaseUrl);
+            if (parsedBaseUrl.protocol !== 'https:') {
+              throw new Error('PUBLIC_APP_URL must use HTTPS for signed artifact delivery');
+            }
+            const signedPath = artifactAccessService.createSignedPath(fileName);
+            const mediaUrl = `${parsedBaseUrl.origin}${signedPath}`;
+            const artifactDelivery = await twilioService.sendWhatsAppMessage(
+              senderPhone,
+              `📄 *Generated Document*: ${fileName}`,
+              mediaUrl
+            );
+            if (!artifactDelivery.success) {
+              throw new Error(`ARTIFACT_DELIVERY_FAILED: ${artifactDelivery.error || 'Twilio did not accept the artifact'}`);
             }
           } catch (artErr) {
             console.warn('[WhatsAppWorker] Error sending generated artifact over WhatsApp:', artErr);
