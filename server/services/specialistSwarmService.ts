@@ -26,6 +26,7 @@ import {
   SwarmSessionStatus,
   SwarmBudgetExceededError,
 } from '../utils/swarmResourceManager.ts';
+import ExcelJS from 'exceljs';
 import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import fs from 'fs';
