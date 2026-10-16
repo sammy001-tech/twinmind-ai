@@ -10,7 +10,7 @@
  * 7. Immediate discard of late results after termination.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { evaluateMathExpression, type CalculateMathResult } from '../utils/mathEvaluator.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { settingsManager } from '../db/settingsService.ts';
@@ -27,14 +27,33 @@ import {
   SwarmBudgetExceededError,
 } from '../utils/swarmResourceManager.ts';
 import PDFDocument from 'pdfkit';
-import { parse as json2csv } from 'json2csv';
 import ExcelJS from 'exceljs';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { parseArtifactTableContent, serializeArtifactCsv } from '../utils/artifactTabularData.ts';
+import { getArtifactStorageDirectory, getArtifactStorageScope, resolveArtifactFilePath } from '../utils/artifactStorage.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const ARTIFACT_MIME_TYPES: Record<'pdf' | 'md' | 'csv' | 'xlsx', string> = {
+  pdf: 'application/pdf',
+  md: 'text/markdown; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+
+async function sha256File(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
 
 export interface SwarmToolTrace {
   toolName: string;
@@ -272,17 +291,56 @@ class SpecialistSwarmService {
     fileName: string,
     budget?: SwarmToolBudget,
     requestedTheme?: string
-  ): Promise<{ status: 'success' | 'error'; url: string; fileName: string; type: string; themeName?: string; error?: string; durationMs: number }> {
+  ): Promise<{
+    status: 'success' | 'error';
+    url: string;
+    fileName: string;
+    displayName: string;
+    type: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    sha256?: string;
+    generatedAt?: string;
+    storageScope?: 'configured-directory' | 'instance-local';
+    themeName?: string;
+    error?: string;
+    durationMs: number;
+  }> {
     const startTime = Date.now();
+    let filePath: string | null = null;
     if (budget) {
       budget.claim('generateArtifact', 1);
     }
 
     try {
-      const publicDir = path.join(process.cwd(), 'public', 'artifacts');
-      if (!fs.existsSync(publicDir)) {
-        fs.mkdirSync(publicDir, { recursive: true });
+      const normalizedType = type === 'excel' ? 'xlsx' : type;
+      if (!Object.prototype.hasOwnProperty.call(ARTIFACT_MIME_TYPES, normalizedType)) {
+        throw new Error('ARTIFACT_TYPE_UNSUPPORTED: choose PDF, XLSX, CSV, or Markdown.');
       }
+
+      const artifactText = typeof content === 'string'
+        ? content
+        : JSON.stringify(content, null, 2);
+      if (typeof artifactText !== 'string' || !artifactText.trim()) {
+        throw new Error('ARTIFACT_CONTENT_EMPTY: no usable source content was provided.');
+      }
+
+      const requestedName = typeof fileName === 'string' ? path.basename(fileName.trim()) : '';
+      const nameWithoutExtension = requestedName.replace(/\.(pdf|csv|xlsx|xls|md|txt|doc|docx)$/i, '');
+      const safeStem = nameWithoutExtension
+        .replace(/[^a-z0-9_-]/gi, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 96);
+      if (!safeStem) {
+        throw new Error('ARTIFACT_FILENAME_INVALID: a descriptive file name is required.');
+      }
+
+      const safeFileName = `${safeStem}.${normalizedType}`;
+      const finalFileName = `${Date.now()}_${randomUUID()}_${safeFileName}`;
+      const publicDir = getArtifactStorageDirectory();
+      fs.mkdirSync(publicDir, { recursive: true });
+      filePath = resolveArtifactFilePath(finalFileName);
+      const publicUrl = `/artifacts/${encodeURIComponent(finalFileName)}`;
 
       // Dynamic Generative Color Theme Engine (Zero hard-coded theme presets)
       const hslToHex = (h: number, s: number, l: number): string => {
@@ -296,7 +354,7 @@ class SpecialistSwarmService {
         return `#${f(0)}${f(8)}${f(4)}`.toUpperCase();
       };
 
-      const fullText = (String(content) + ' ' + fileName + ' ' + (requestedTheme || '')).toLowerCase();
+      const fullText = (artifactText + ' ' + safeFileName + ' ' + (requestedTheme || '')).toLowerCase();
 
       // Compute dynamic base Hue (0-360) mathematically based on content semantics or string hash
       let hue = 215;
@@ -351,85 +409,54 @@ class SpecialistSwarmService {
         footerTextHex,
       };
 
-      const safeFileName = fileName.replace(/[^a-z0-9\._-]/gi, '_');
-      const timestamp = Date.now();
-      const finalFileName = `${timestamp}_${safeFileName}`;
-      const filePath = path.join(publicDir, finalFileName);
-      const publicUrl = `/artifacts/${finalFileName}`;
-
-      if (type === 'md') {
-        let mdText = String(content);
+      if (normalizedType === 'md') {
+        let mdText = artifactText;
         if (!mdText.startsWith('#')) {
           const rawTitle = safeFileName.replace(/_/g, ' ').replace(/\.md$/i, '').replace(/^[0-9]+_/, '');
           mdText = `# ${rawTitle}\n\n*Generated by TwinMind AI • Brand Theme: ${theme.name} • ${new Date().toLocaleString()}*\n\n---\n\n${mdText}`;
         }
         fs.writeFileSync(filePath, mdText);
-      } else if (type === 'csv') {
-        const csv = typeof content === 'string' ? content : json2csv(content);
-        fs.writeFileSync(filePath, csv);
-      } else if (type === 'xlsx' || type === 'excel') {
+      } else if (normalizedType === 'csv') {
+        const parsedTable = parseArtifactTableContent(content);
+        fs.writeFileSync(filePath, serializeArtifactCsv(parsedTable), 'utf8');
+      } else if (normalizedType === 'xlsx') {
         const workbook = new ExcelJS.Workbook();
         const sheet = workbook.addWorksheet('Analysis Report', {
-          views: [{ showGridLines: true }],
+          views: [{ showGridLines: false }],
         });
 
-        if (Array.isArray(content) && content.length > 0 && typeof content[0] === 'object') {
-          const keys = Object.keys(content[0]);
-          sheet.columns = keys.map((k) => ({
-            header: k.toUpperCase().replace(/_/g, ' '),
-            key: k,
-            width: Math.max(20, k.length + 6),
-          }));
-          sheet.addRows(content);
-        } else {
-          // Parse string/text/CSV/Markdown table content into structured rows
-          const lines = String(content)
-            .split('\n')
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0);
+        const parsedTable = parseArtifactTableContent(content);
+        const columnWidths = parsedTable.headers.map((header, columnIndex) => {
+          const largestValue = parsedTable.rows.reduce((maximum, row) => {
+            const value = row[columnIndex];
+            const length = value === null ? 0 : String(value).length;
+            return Math.max(maximum, length);
+          }, header.length);
+          return Math.min(48, Math.max(12, largestValue + 3));
+        });
 
-          const rows: string[][] = [];
-          for (const line of lines) {
-            // Skip markdown table divider rows like |---|---|
-            if (/^\|?\s*:?-+:?\s*\|/i.test(line) && line.includes('-')) continue;
+        sheet.columns = parsedTable.headers.map((header, index) => ({
+          header: header.replace(/_/g, ' ').toLocaleUpperCase(),
+          key: `source_column_${index}`,
+          width: columnWidths[index],
+        }));
 
-            if (line.includes('|')) {
-              const cells = line.split('|').map((c) => c.trim()).filter((c, idx, arr) => {
-                // Ignore empty outer elements from leading/trailing pipes
-                if ((idx === 0 || idx === arr.length - 1) && c === '') return false;
-                return true;
-              });
-              if (cells.length > 0) rows.push(cells);
-            } else if (line.includes('\t')) {
-              rows.push(line.split('\t').map((c) => c.trim().replace(/^["']|["']$/g, '')));
-            } else if (line.includes(',')) {
-              rows.push(line.split(',').map((c) => c.trim().replace(/^["']|["']$/g, '')));
-            } else if (!line.startsWith('#')) {
-              rows.push([line]);
-            }
-          }
-
-          if (rows.length > 0) {
-            const firstRow = rows[0];
-            const maxCols = Math.max(...rows.map((r) => r.length));
-            sheet.columns = Array.from({ length: maxCols }).map((_, i) => {
-              const colHeader = firstRow[i] ? firstRow[i].replace(/^#+\s*/, '') : `Column ${i + 1}`;
-              return {
-                header: colHeader.toUpperCase(),
-                key: `col_${i}`,
-                width: Math.max(22, colHeader.length + 6),
-              };
-            });
-
-            rows.slice(1).forEach((r) => {
-              const rowObj: Record<string, string> = {};
-              r.forEach((cellVal, idx) => {
-                rowObj[`col_${idx}`] = cellVal;
-              });
-              sheet.addRow(rowObj);
-            });
-          }
+        for (const values of parsedTable.rows) {
+          const row: Record<string, string | number | boolean | null> = {};
+          values.forEach((value, index) => {
+            row[`source_column_${index}`] = value;
+          });
+          sheet.addRow(row);
         }
+
+        if (sheet.rowCount < 2 || sheet.columnCount < 1) {
+          throw new Error('ARTIFACT_TABLE_DATA_REQUIRED: no usable source rows were materialized.');
+        }
+        sheet.views = [{ state: 'frozen', ySplit: 1, topLeftCell: 'A2', showGridLines: false }];
+        sheet.autoFilter = {
+          from: { row: 1, column: 1 },
+          to: { row: sheet.rowCount, column: sheet.columnCount },
+        };
 
         // Apply visual styling to Header Row matching Theme
         const headerRow = sheet.getRow(1);
@@ -467,7 +494,7 @@ class SpecialistSwarmService {
         });
 
         await workbook.xlsx.writeFile(filePath);
-      } else if (type === 'pdf') {
+      } else if (normalizedType === 'pdf') {
         const doc = new PDFDocument({ margin: 50, bufferPages: true });
         const stream = fs.createWriteStream(filePath);
         doc.pipe(stream);
@@ -488,7 +515,7 @@ class SpecialistSwarmService {
         doc.moveDown(1.0);
 
         // Render formatted content line by line
-        const lines = String(content).split('\n');
+        const lines = artifactText.split('\n');
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) {
@@ -542,21 +569,44 @@ class SpecialistSwarmService {
         });
       }
 
+      if (!filePath || !fs.existsSync(filePath)) {
+        throw new Error('ARTIFACT_OUTPUT_MISSING: generation completed without a file on disk.');
+      }
+      const stats = await fs.promises.stat(filePath);
+      if (!stats.isFile() || stats.size <= 0) {
+        throw new Error('ARTIFACT_OUTPUT_INVALID: the generated file is empty or is not a regular file.');
+      }
+      const sha256 = await sha256File(filePath);
+
       return {
         status: 'success',
         url: publicUrl,
         fileName: finalFileName,
-        type,
+        displayName: safeFileName,
+        type: normalizedType,
+        mimeType: ARTIFACT_MIME_TYPES[normalizedType as keyof typeof ARTIFACT_MIME_TYPES],
+        sizeBytes: stats.size,
+        sha256,
+        generatedAt: new Date().toISOString(),
+        storageScope: getArtifactStorageScope(),
         themeName: theme.name,
         durationMs: Date.now() - startTime,
       };
     } catch (err) {
+      if (filePath && fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {
+          console.error('[ArtifactArchitect] Failed to remove an incomplete artifact output.');
+        }
+      }
       return {
         status: 'error',
         url: '',
         fileName: '',
+        displayName: '',
         type,
-        error: err instanceof Error ? err.message : String(err),
+        error: err instanceof Error ? err.message : 'ARTIFACT_GENERATION_FAILED',
         durationMs: Date.now() - startTime,
       };
     }
