@@ -813,11 +813,11 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     const {
       messages,
       channel = 'web',
-      userName = 'Olalekan',
+      userName: requestedUserName,
       nickname = '',
       userContext, // User Context payload containing nickname, activeModel, and selectedVoice
-      provider = 'gemini',
-      model, // dynamic model ID selected directly by Olalekan
+      provider: requestedProvider,
+      model,
       threadId, // Persistent multi-thread conversation ID
       threadTitle, // Optional title for this thread
       customGroqKey,
@@ -839,6 +839,14 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel }).catch(() => {});
 
     const currentSettings = settingsManager.getSettings();
+    const userName = (typeof requestedUserName === 'string' && requestedUserName.trim())
+      ? requestedUserName.trim()
+      : (currentSettings.userName || '');
+    const provider = requestedProvider || currentSettings.activeProvider;
+    if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'PROVIDER_CONFIGURATION_REQUIRED', error: 'Configure an active AI provider in Settings.' });
+      return;
+    }
 
     // Resolve effective user configuration details for complete self-awareness
     const effectiveNickname = userContext?.nickname || nickname || currentSettings.nickname || '';
