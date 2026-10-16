@@ -1,4 +1,6 @@
 import test from 'node:test';
+import path from 'node:path';
+import { getArtifactStorageDirectory, getArtifactStorageScope, resolveArtifactFilePath } from '../server/utils/artifactStorage.ts';
 import assert from 'node:assert/strict';
 import {
   parseArtifactTableContent,
@@ -8,6 +10,7 @@ import {
   formatArtifactSize,
   normalizeGeneratedArtifacts,
   removeDuplicateArtifactDownloadLines,
+  removeUnverifiedArtifactSuccessClaims,
 } from '../src/utils/artifacts.ts';
 
 test('parses records using the union of keys actually present in source data', () => {
@@ -115,4 +118,64 @@ test('formats only actual file byte counts', () => {
   assert.equal(formatArtifactSize(0), 'Size unavailable');
   assert.equal(formatArtifactSize(undefined), 'Size unavailable');
   assert.equal(formatArtifactSize(2048), '2.0 KiB');
+});
+
+test('does not show unverified successful-generation claims when generation failed', () => {
+  const errors = [{
+    type: 'xlsx',
+    code: 'ARTIFACT_TABULAR_DATA_REQUIRED',
+    message: 'Structured spreadsheet data was unavailable.',
+  }];
+  const content = [
+    'The Excel file has been generated and formatted.',
+    'You can download it here: /artifacts/file.xlsx',
+    'The source notes still explain the intended columns.',
+  ].join('\\n');
+
+  assert.equal(
+    removeUnverifiedArtifactSuccessClaims(content, [], errors),
+    'The source notes still explain the intended columns.',
+  );
+});
+
+test('retains generation claims when an artifact is actually attached', () => {
+  const artifacts = normalizeGeneratedArtifacts([{
+    name: 'Prospects.xlsx',
+    url: '/artifacts/stored_Prospects.xlsx',
+    type: 'xlsx',
+  }]);
+  const errors = [{
+    type: 'xlsx',
+    code: 'ARTIFACT_TABULAR_DATA_REQUIRED',
+    message: 'Another file failed.',
+  }];
+  const content = 'The prospects workbook has been generated.';
+
+  assert.equal(removeUnverifiedArtifactSuccessClaims(content, artifacts, errors), content);
+});
+
+test('artifact storage scope is explicit and relative storage configuration fails closed', () => {
+  const previous = process.env.ARTIFACTS_DIR;
+  try {
+    delete process.env.ARTIFACTS_DIR;
+    assert.equal(getArtifactStorageScope(), 'instance-local');
+    assert.equal(
+      getArtifactStorageDirectory(),
+      path.resolve(process.cwd(), 'public', 'artifacts'),
+    );
+
+    process.env.ARTIFACTS_DIR = 'relative/artifacts';
+    assert.throws(
+      () => getArtifactStorageDirectory(),
+      /ARTIFACT_STORAGE_PATH_MUST_BE_ABSOLUTE/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.ARTIFACTS_DIR;
+    else process.env.ARTIFACTS_DIR = previous;
+  }
+});
+
+test('artifact file resolver rejects directory traversal', () => {
+  assert.throws(() => resolveArtifactFilePath('../secrets.env'), /INVALID_ARTIFACT_NAME/);
+  assert.throws(() => resolveArtifactFilePath('nested\\\\file.xlsx'), /INVALID_ARTIFACT_NAME/);
 });
