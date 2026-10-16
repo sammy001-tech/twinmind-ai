@@ -93,8 +93,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveName,
   isEmbedded = false,
 }) => {
-  const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral'>(
-    (activeProvider as 'gemini' | 'groq' | 'mistral') || 'gemini'
+  const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral' | ''>(
+    activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral'
+      ? activeProvider
+      : ''
   );
 
   const [modelsByProvider, setModelsByProvider] = useState<{
@@ -683,6 +685,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         } else if (selectedProviderTab === 'mistral' && (customMistralKey || mistralKeyInput)) {
           singleHeaders['x-api-key'] = customMistralKey || mistralKeyInput;
         }
+        if (!selectedProviderTab) throw new Error('Select a provider tab before requesting its individual catalogue.');
         const singleRes = await fetch(`/api/models/live?provider=${selectedProviderTab}`, {
           headers: singleHeaders,
         });
@@ -723,7 +726,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   useEffect(() => {
     // When tab changes, update custom input placeholder with current model of that provider
-    const currentModelForTab = providerModels[selectedProviderTab] || '';
+    const currentModelForTab = selectedProviderTab ? (providerModels[selectedProviderTab] || '') : '';
     setCustomModelInput(currentModelForTab);
     setSearchFilter('');
   }, [selectedProviderTab, providerModels]);
@@ -749,6 +752,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleApplyCustomModel = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selectedProviderTab) {
+      setErrorMsg('Select a provider tab before choosing a model.');
+      return;
+    }
     if (customModelInput.trim()) {
       handleSelectModel(selectedProviderTab, customModelInput.trim());
     }
@@ -955,7 +962,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return <Zap className="w-3.5 h-3.5 text-slate-400" />;
   };
 
-  const currentModelsList = modelsByProvider[selectedProviderTab] || [];
+  const currentModelsList = selectedProviderTab ? (modelsByProvider[selectedProviderTab] || []) : [];
 
   const filteredModels = currentModelsList.filter(
     (m) =>
@@ -1358,14 +1365,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               type="text"
               value={customModelInput}
               onChange={(e) => setCustomModelInput(e.target.value)}
-              placeholder={`Type or paste any model ID for ${selectedProviderTab.toUpperCase()}...`}
+              placeholder={selectedProviderTab ? `Search or select a live ${selectedProviderTab.toUpperCase()} model` : 'Select a provider tab first'}
               className="flex-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
             <button
               type="submit"
               className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shrink-0"
             >
-              Set for {selectedProviderTab.toUpperCase()}
+              Set for {selectedProviderTab ? selectedProviderTab.toUpperCase() : 'no selected provider'}
             </button>
           </form>
 
@@ -1376,7 +1383,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               type="text"
               value={searchFilter}
               onChange={(e) => setSearchFilter(e.target.value)}
-              placeholder={`Filter ${selectedProviderTab.toUpperCase()} models by name or keyword...`}
+              placeholder={selectedProviderTab ? `Filter ${selectedProviderTab.toUpperCase()} models by name or keyword...` : 'Select a provider tab to view its live catalogue'}
               className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
           </div>
@@ -1385,7 +1392,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {isLoading ? (
             <div className="p-8 text-center space-y-2 text-slate-500 dark:text-slate-400 text-xs">
               <RefreshCw className="w-5 h-5 animate-spin mx-auto text-amber-500 dark:text-amber-400" />
-              <p>Loading available models for {selectedProviderTab.toUpperCase()}...</p>
+              <p>Loading available models for {selectedProviderTab ? selectedProviderTab.toUpperCase() : 'the selected provider'}...</p>
             </div>
           ) : errorMsg ? (
             <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-200 text-xs flex items-start gap-2">
@@ -1400,9 +1407,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="text-[11px] text-slate-600 dark:text-slate-400 px-1 mb-1 flex items-center justify-between">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span>
-                    Available {selectedProviderTab.toUpperCase()} Models ({filteredModels.length}):
+                    Available {selectedProviderTab ? selectedProviderTab.toUpperCase() : 'provider'} Models ({filteredModels.length}):
                   </span>
-                  {liveStatus[selectedProviderTab] ? (
+                  {selectedProviderTab && liveStatus[selectedProviderTab] ? (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 inline-block animate-pulse" />
                       Live API
@@ -1418,13 +1425,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   )}
                 </div>
                 <span className="text-amber-600 dark:text-amber-400 text-[10px]">
-                  Current: <strong className="text-slate-900 dark:text-white font-mono">{providerModels[selectedProviderTab]}</strong>
+                  Current: <strong className="text-slate-900 dark:text-white font-mono">{selectedProviderTab ? providerModels[selectedProviderTab] : ''}</strong>
                 </span>
               </div>
 
               {filteredModels.length === 0 ? (
                 <div className="p-6 text-center space-y-2 text-slate-500 dark:text-slate-400 text-xs">
-                  {selectedProviderTab !== 'gemini' && !liveStatus[selectedProviderTab] ? (
+                  {selectedProviderTab && !liveStatus[selectedProviderTab] ? (
                     <div className="space-y-1.5 max-w-sm mx-auto">
                       <p className="font-semibold text-slate-700 dark:text-slate-300">
                         No live models loaded for {selectedProviderTab.toUpperCase()}
@@ -1442,13 +1449,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               ) : (
                 filteredModels.map((m) => {
-                  const isSelected = providerModels[selectedProviderTab] === m.id;
-                  const isOverallActive = activeProvider === selectedProviderTab && isSelected;
+                  const isSelected = selectedProviderTab ? providerModels[selectedProviderTab] === m.id : false;
+                  const isOverallActive = Boolean(selectedProviderTab && activeProvider === selectedProviderTab && isSelected);
 
                   return (
                     <div
                       key={m.id}
-                      onClick={() => handleSelectModel(selectedProviderTab, m.id)}
+                      onClick={() => { if (selectedProviderTab) if (selectedProviderTab) handleSelectModel(selectedProviderTab, m.id); }}
                       role="button"
                       tabIndex={0}
                       className={`p-3 rounded-xl border text-left cursor-pointer transition flex items-center justify-between gap-3 ${
