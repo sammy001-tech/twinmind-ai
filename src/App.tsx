@@ -617,7 +617,15 @@ export default function App() {
         return;
       }
 
-      if (isFollowingLatestRef.current) {
+      const savedScrollTop = activeThreadId
+        ? threadScrollPositionsRef.current.get(activeThreadId)
+        : undefined;
+      if (!isFollowingLatestRef.current && savedScrollTop !== undefined) {
+        container.scrollTop = Math.min(
+          savedScrollTop,
+          Math.max(0, container.scrollHeight - container.clientHeight),
+        );
+      } else if (isFollowingLatestRef.current) {
         container.scrollTop = container.scrollHeight;
       }
       handleMessagesScroll();
