@@ -95,6 +95,65 @@ function parseMarkdownTable(text: string): ParsedArtifactContent | null {
   };
 }
 
+function parseJsonTable(text: string): ParsedArtifactContent | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    // The tabular request validator reports malformed JSON before this renderer
+    // is reached. For document formats, unparseable text remains user content.
+    return null;
+  }
+
+  if (Array.isArray(parsed)) {
+    const objectTable = objectToTable(parsed);
+    if (objectTable) return objectTable;
+
+    if (parsed.length > 0 && parsed.every((row) => Array.isArray(row))) {
+      const [rawHeaders, ...rawRows] = parsed as unknown[][];
+      if (!rawHeaders.length || rawHeaders.some((header) => typeof header !== 'string' || !header.trim())) {
+        throw new Error('INVALID_TABLE_HEADER');
+      }
+      const headers = rawHeaders.map((header) => String(header).trim());
+      const rows = rawRows.map((row) => {
+        if (row.length !== headers.length) {
+          throw new Error('INCONSISTENT_TABLE_COLUMNS: expected ' + headers.length + ', received ' + row.length);
+        }
+        return row;
+      });
+      return { kind: 'table', headers, rows, preamble: [], postamble: [] };
+    }
+    return null;
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    const record = parsed as Record<string, unknown>;
+    if (Array.isArray(record.headers) && Array.isArray(record.rows)) {
+      const headers = record.headers.map((header) => typeof header === 'string' ? header.trim() : '');
+      if (!headers.length || headers.some((header) => !header)) throw new Error('INVALID_TABLE_HEADER');
+
+      const rows = record.rows.map((rawRow) => {
+        if (Array.isArray(rawRow)) {
+          if (rawRow.length !== headers.length) {
+            throw new Error('INCONSISTENT_TABLE_COLUMNS: expected ' + headers.length + ', received ' + rawRow.length);
+          }
+          return rawRow;
+        }
+        if (rawRow && typeof rawRow === 'object') {
+          const rowRecord = rawRow as Record<string, unknown>;
+          return headers.map((header) => rowRecord[header] ?? null);
+        }
+        throw new Error('INCONSISTENT_TABLE_COLUMNS: structured table rows must be arrays or objects');
+      });
+      return { kind: 'table', headers, rows, preamble: [], postamble: [] };
+    }
+  }
+  return null;
+}
+
 function parseDelimited(text: string, delimiter: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [], field = '', quoted = false;
@@ -155,7 +214,7 @@ export function parseArtifactContent(content: unknown): ParsedArtifactContent {
   if (typeof content !== 'string') throw new Error('UNSUPPORTED_ARTIFACT_CONTENT: supply non-empty text or structured table data');
   const text = content.replace(/\r\n?/g, '\n').trim();
   if (!text) throw new Error('ARTIFACT_CONTENT_REQUIRED');
-  return parseMarkdownTable(text) || detectDelimitedTable(text) || { kind: 'document', text };
+  return parseJsonTable(text) || parseMarkdownTable(text) || detectDelimitedTable(text) || { kind: 'document', text };
 }
 
 function displayValue(value: unknown): string {
