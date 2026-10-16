@@ -345,10 +345,10 @@ class SpecialistSwarmService {
       // Tabular formats require real structured rows and source-provided headers.
       // No conversion from arbitrary prose into fake one-column datasets.
       if (normalizedType === 'xlsx' || normalizedType === 'csv') {
-        const parsedTable = parseArtifactTableContent(content);
-        formatterContent = parsedTable.rows.map((row) =>
-          Object.fromEntries(parsedTable.headers.map((header, index) => [header, row[index]])),
-        );
+        // Validate that real tabular records exist, but pass the original content
+        // to the renderer so report context surrounding Markdown tables is retained.
+        parseArtifactTableContent(content);
+        formatterContent = content;
       }
 
       const generated = await generateArtifactBuffer(
