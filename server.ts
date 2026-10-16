@@ -22,7 +22,7 @@ import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
-import { getArtifactStorageDirectory, getArtifactStorageScope, resolveArtifactFilePath } from './server/utils/artifactStorage.ts';
+import { getArtifactStorageScope, resolveArtifactFilePath } from './server/utils/artifactStorage.ts';
 
 dotenv.config();
 
@@ -986,6 +986,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       // Store artifacts for the save step
       (req as any)._artifacts = artifacts;
+      (req as any)._artifactErrors = artifactErrors;
     } else {
       // Autonomous execution via multi-provider TwinAgentService (Gemini, Groq, Mistral)
       const turnResult = await twinAgentService.executeTurn({
@@ -1039,6 +1040,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       // Store artifacts for saving
       (req as any)._artifacts = artifacts;
+      (req as any)._artifactErrors = artifactErrors;
     }
 
     if (!fullReply.trim()) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no chat reply');
@@ -1072,7 +1074,10 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           content: fullReply,
           provider: targetProvider,
           model: targetModel,
-          metadata: { artifacts: (req as any)._artifacts || [] },
+          metadata: {
+            artifacts: (req as any)._artifacts || [],
+            artifactErrors: (req as any)._artifactErrors || [],
+          },
         });
       } catch (dbErr) {
         console.warn('[NeonDB] Save assistant msg error:', dbErr);
