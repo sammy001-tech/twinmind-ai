@@ -641,6 +641,17 @@ export default function App() {
               if (parsed.savedMeta) {
                 ensureAssistantMessage();
                 const { userDbId, assistantDbId } = parsed.savedMeta;
+                const persistence = parsed.savedMeta.persistence;
+                if (persistence) {
+                  const failedItems = Object.entries(persistence)
+                    .filter(([, status]) => status === 'failed')
+                    .map(([item]) => item);
+                  if (failedItems.length > 0) {
+                    setErrorMessage(
+                      `Reply received, but database persistence failed for: ${failedItems.join(', ')}. The current conversation may not be available after a refresh.`
+                    );
+                  }
+                }
                 setMessages((prev) =>
                   prev.map((msg) => {
                     if (msg.id === userMsg.id && userDbId) return { ...msg, dbId: userDbId };
@@ -776,6 +787,17 @@ export default function App() {
             if (parsed.savedMeta) {
               ensureAssistantMessage();
               const { userDbId, assistantDbId } = parsed.savedMeta;
+              const persistence = parsed.savedMeta.persistence;
+              if (persistence) {
+                const failedItems = Object.entries(persistence)
+                  .filter(([, status]) => status === 'failed')
+                  .map(([item]) => item);
+                if (failedItems.length > 0) {
+                  setErrorMessage(
+                    `Reply received, but database persistence failed for: ${failedItems.join(', ')}. The current conversation may not be available after a refresh.`
+                  );
+                }
+              }
               setMessages((prev) =>
                 prev.map((msg) => {
                   if (msg.id === userMsg.id && userDbId) return { ...msg, dbId: userDbId };
