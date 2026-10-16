@@ -88,6 +88,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
   const [reviewObservation, setReviewObservation] = useState('');
   const [reviewEvidenceSource, setReviewEvidenceSource] = useState('');
   const [reviewOutcome, setReviewOutcome] = useState('');
+  const [reviewCorrectionTarget, setReviewCorrectionTarget] = useState('');
   const [reviewOwnerConfirmed, setReviewOwnerConfirmed] = useState(false);
   const [reviewIdempotencyKey, setReviewIdempotencyKey] = useState(() => globalThis.crypto.randomUUID());
   const [reviewSubmitting, setReviewSubmitting] = useState(false);
@@ -227,6 +228,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
           actualOutcome: reviewOutcome,
           evidenceSource: reviewEvidenceSource.trim(),
           ownerConfirmed: reviewOwnerConfirmed,
+          ...(reviewCorrectionTarget ? { supersedesReviewId: Number(reviewCorrectionTarget) } : {}),
         }),
       });
 
@@ -238,6 +240,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
       setReviewMsg(data.message || 'Observation appended to immutable history.');
       setReviewObservation('');
       setReviewEvidenceSource('');
+      setReviewCorrectionTarget('');
       setReviewOwnerConfirmed(false);
       setReviewIdempotencyKey(globalThis.crypto.randomUUID());
       await fetchReviews(debateResult.decisionId);
@@ -958,6 +961,29 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                               <option value="Cancelled">Cancelled</option>
                             </select>
                           </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 mb-1">
+                            Correction of Prior Observation (Optional)
+                          </label>
+                          <select
+                            value={reviewCorrectionTarget}
+                            onChange={(e) => setReviewCorrectionTarget(e.target.value)}
+                            className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                          >
+                            <option value="">Record a new observation</option>
+                            {reviewHistory
+                              .filter((candidate) => !reviewHistory.some((review) => review.supersedes_review_id === candidate.id))
+                              .map((review) => (
+                                <option key={review.id} value={String(review.id)}>
+                                  #{review.id} · {review.actual_outcome || 'Pending Verification'} · {new Date(review.created_at).toLocaleString()}
+                                </option>
+                              ))}
+                          </select>
+                          <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                            A correction appends a new record linked to the prior one. The original observation is never overwritten.
+                          </p>
                         </div>
 
                         <div>
