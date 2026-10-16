@@ -711,9 +711,7 @@ class NeonDatabaseService {
       const result = await this.pool.query(
         `SELECT d.*
          FROM decisions d
-         WHERE d.confidence IS NOT NULL
-           AND d.confidence BETWEEN 0 AND 100
-           AND NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
+         WHERE NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
            AND NOT EXISTS (
              SELECT 1
              FROM twin_events e
@@ -760,9 +758,7 @@ class NeonDatabaseService {
       const result = await this.pool.query(
         `SELECT COUNT(*)::int AS pending_count
          FROM decisions d
-         WHERE d.confidence IS NOT NULL
-           AND d.confidence BETWEEN 0 AND 100
-           AND NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
+         WHERE NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
            AND NOT EXISTS (
              SELECT 1
              FROM twin_events e
