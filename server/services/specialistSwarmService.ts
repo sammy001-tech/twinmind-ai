@@ -219,12 +219,18 @@ class SpecialistSwarmService {
       );
 
       const items = Array.isArray(data.results)
-        ? data.results.map((r: any) => ({
-            title: r.title || 'Untitled',
-            url: r.url || '',
-            content: (r.content || '').slice(0, 1000),
-            score: typeof r.score === 'number' ? r.score : 1.0,
-          }))
+        ? data.results
+            .filter((r: any) =>
+              typeof r?.title === 'string' && r.title.trim() &&
+              typeof r?.url === 'string' && r.url.trim() &&
+              typeof r?.content === 'string' && r.content.trim()
+            )
+            .map((r: any) => ({
+              title: r.title,
+              url: r.url,
+              content: r.content.slice(0, 1000),
+              ...(typeof r.score === 'number' && Number.isFinite(r.score) ? { score: r.score } : {}),
+            }))
         : [];
 
       return {
