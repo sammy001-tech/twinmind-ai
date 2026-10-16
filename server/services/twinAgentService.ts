@@ -82,7 +82,7 @@ export const GEMINI_TWIN_TOOLS: any[] = [
   {
     name: 'generateArtifact',
     description:
-      'Generate a professional document or spreadsheet (PDF, Excel .xlsx, CSV, or Markdown) based on current conversation context or specific data provided.',
+      'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -184,7 +184,7 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
     function: {
       name: 'generateArtifact',
       description:
-        'Generate a professional document or spreadsheet (PDF, Excel .xlsx, CSV, or Markdown) based on current conversation context or specific data provided.',
+        'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
       parameters: {
         type: 'object',
         properties: {
@@ -959,28 +959,49 @@ Respond in valid JSON:
         result = await this.executeExecutiveSummary(args.timeframe ? String(args.timeframe) : undefined);
       } else if (name === 'generateArtifact') {
         const { specialistSwarmService } = await import('./specialistSwarmService.ts');
-        const userPromptLower = userPrompt.toLowerCase();
-        let targetType: 'pdf' | 'md' | 'csv' | 'xlsx' = (args.type as any) || 'md';
 
-        if (userPromptLower.includes('excel') || userPromptLower.includes('xlsx')) {
-          targetType = 'xlsx';
-        } else if (userPromptLower.includes('pdf')) {
-          targetType = 'pdf';
-        } else if (userPromptLower.includes('csv') || userPromptLower.includes('spreadsheet')) {
-          targetType = 'csv';
-        } else if (userPromptLower.includes('markdown') || userPromptLower.includes(' md ')) {
-          targetType = 'md';
+        const normalizeMentionedFormat = (value: string): 'pdf' | 'md' | 'csv' | 'xlsx' | null => {
+          const normalized = value.toLowerCase();
+          if (normalized === 'excel' || normalized === 'xlsx' || normalized === 'xls') return 'xlsx';
+          if (normalized === 'pdf') return 'pdf';
+          if (normalized === 'csv') return 'csv';
+          if (normalized === 'markdown' || normalized === 'md') return 'md';
+          return null;
+        };
+
+        const userPromptLower = userPrompt.toLowerCase();
+        const destinationMatch = userPromptLower.match(
+          /\b(?:to|into|as|in|formatted as|format as)\s+(?:an?\s+)?(excel|xlsx|xls|pdf|csv|markdown|md)\b/i
+        );
+        const requestedFileMatch = userPromptLower.match(
+          /\b(excel|xlsx|xls|pdf|csv|markdown|md)\s+(?:file|spreadsheet|workbook|document)\b/i
+        );
+        const promptFormat = normalizeMentionedFormat(
+          destinationMatch?.[1] || requestedFileMatch?.[1] || ''
+        );
+        const argumentFormat = normalizeMentionedFormat(typeof args.type === 'string' ? args.type : '');
+        const fileNameInput = typeof args.fileName === 'string' ? args.fileName.trim() : '';
+        const extensionMatch = fileNameInput.match(/\.(pdf|csv|xlsx|xls|md)$/i);
+        const filenameFormat = extensionMatch ? normalizeMentionedFormat(extensionMatch[1]) : null;
+        const targetType = promptFormat || argumentFormat || filenameFormat;
+
+        if (!targetType) {
+          throw new Error('ARTIFACT_FORMAT_REQUIRED: choose PDF, XLSX, CSV, or Markdown. No default format was substituted.');
+        }
+        if (!fileNameInput) {
+          throw new Error('ARTIFACT_FILENAME_REQUIRED: the generator needs a descriptive file name.');
+        }
+        if (typeof args.content !== 'string' || !args.content.trim()) {
+          throw new Error('ARTIFACT_CONTENT_REQUIRED: no usable content was supplied to the file generator.');
         }
 
-        let fileName = (args.fileName as string) || `Report_${Date.now()}`;
-        // Strip existing extension if any and append targetType
-        fileName = fileName.replace(/\.(pdf|csv|xlsx|xls|md|txt|doc|docx)$/i, '');
-        fileName = `${fileName}.${targetType}`;
+        const fileNameStem = fileNameInput.replace(/\.(pdf|csv|xlsx|xls|md)$/i, '');
+        if (!fileNameStem.trim()) throw new Error('ARTIFACT_FILENAME_REQUIRED');
 
         result = await specialistSwarmService.executeGenerateArtifact(
           targetType,
           args.content,
-          fileName
+          fileNameStem + '.' + targetType
         );
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };

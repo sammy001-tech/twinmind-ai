@@ -22,6 +22,7 @@ import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
+import { getArtifactStorageDirectory, getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 
 dotenv.config();
 
@@ -56,7 +57,7 @@ const isProduction = process.env.NODE_ENV === 'production';
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
 
 // Ensure local artifact storage directory exists
-const artifactsDir = path.join(process.cwd(), 'public', 'artifacts');
+const artifactsDir = getArtifactStorageDirectory();
 if (!fs.existsSync(artifactsDir)) {
   fs.mkdirSync(artifactsDir, { recursive: true });
 }
@@ -165,6 +166,66 @@ app.post('/api/auth/logout', (_req: Request, res: Response) => {
   res.json({ success: true });
 });
 
+// Expose storage durability state to the signed-in UI without returning an absolute server path.
+app.get('/api/artifacts/storage-status', (_req: Request, res: Response) => {
+  const status = getArtifactStorageStatus();
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({ success: true, ...status });
+});
+
+// Resolve a fresh, short-lived download path for a previously persisted artifact.
+// This protected route prevents old chat messages from keeping expired signed URLs.
+app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) => {
+  const fileName = req.params.filename || '';
+  if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
+    return;
+  }
+
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED' });
+    return;
+  }
+
+  const artifactsRoot = getArtifactStorageDirectory();
+  const filePath = path.resolve(artifactsRoot, fileName);
+  if (!filePath.startsWith(artifactsRoot + path.sep)) {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
+    return;
+  }
+
+  try {
+    const stats = await fs.promises.stat(filePath);
+    if (!stats.isFile() || stats.size <= 0) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+      return;
+    }
+
+    const url = artifactAccessService.createSignedPath(fileName);
+    const signed = new URL(url, 'https://artifact-link.invalid');
+    const expires = Number(signed.searchParams.get('expires'));
+    if (!Number.isSafeInteger(expires) || expires <= Math.floor(Date.now() / 1000)) {
+      res.status(500).json({ success: false, code: 'ARTIFACT_LINK_INVALID' });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ success: true, url, expiresAt: new Date(expires * 1000).toISOString() });
+  } catch (error: unknown) {
+    const code = error instanceof Error && error.message === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+      ? 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+      : 'ARTIFACT_ACCESS_UNAVAILABLE';
+    const status = code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING' ? 503 : 404;
+    res.status(status).json({
+      success: false,
+      code,
+      error: code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+        ? 'Artifact download signing is not configured.'
+        : 'The requested artifact is missing or cannot be accessed.',
+    });
+  }
+});
+
 // Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
 app.get('/artifacts/:filename', (req: Request, res: Response) => {
   const fileName = req.params.filename || '';
@@ -180,7 +241,7 @@ app.get('/artifacts/:filename', (req: Request, res: Response) => {
     return;
   }
 
-  const artifactsRoot = path.resolve(process.cwd(), 'public', 'artifacts');
+  const artifactsRoot = getArtifactStorageDirectory();
   const filePath = path.resolve(artifactsRoot, fileName);
   if (!filePath.startsWith(artifactsRoot + path.sep)) {
     res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
@@ -824,20 +885,53 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = swarmSession.synthesis || fullReply;
 
-      // Extract artifacts from session traces for persistence and client UI
-      const artifacts: any[] = [];
-      swarmSession.traces.forEach((trace) => {
-        trace.tools.forEach((tool) => {
-          if (tool.toolName === 'generateArtifact' && tool.status === 'success') {
-            const res = tool.output as any;
-            if (res.url) {
-              artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-            }
-          }
-        });
-      });
+      // Only expose artifacts when the generator confirms successful validation and durable file persistence.
+      const artifactToolResults = swarmSession.traces.flatMap((trace) =>
+        trace.tools
+          .filter((tool) => tool.toolName === 'generateArtifact')
+          .map((tool) => ({ traceStatus: tool.status, output: tool.output as Record<string, unknown> | null })),
+      );
+      const artifacts: Array<Record<string, unknown>> = [];
+      const artifactFailures: string[] = [];
 
-      // Pass artifacts to client via SSE for immediate display
+      for (const entry of artifactToolResults) {
+        const output = entry.output;
+        const valid = entry.traceStatus === 'success'
+          && output?.status === 'success'
+          && output.validationStatus === 'validated'
+          && typeof output.fileName === 'string'
+          && typeof output.displayName === 'string'
+          && typeof output.type === 'string'
+          && typeof output.url === 'string'
+          && output.url.startsWith('/artifacts/')
+          && typeof output.sizeBytes === 'number'
+          && output.sizeBytes > 0;
+        if (valid) {
+          artifacts.push({
+            name: output.fileName,
+            displayName: output.displayName,
+            url: output.url,
+            type: output.type,
+            mimeType: output.mimeType,
+            sizeBytes: output.sizeBytes,
+            generatedAt: output.generatedAt,
+            validationStatus: output.validationStatus,
+          });
+        } else {
+          artifactFailures.push(
+            typeof output?.error === 'string' && output.error.trim()
+              ? output.error
+              : 'Artifact output did not include verified, validated file metadata.',
+          );
+        }
+      }
+
+      if (artifactFailures.length > 0) {
+        const details = [...new Set(artifactFailures)].join('; ');
+        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+      }
+
+      // Pass only validated artifacts to the client via SSE for immediate display
       if (artifacts.length > 0) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
@@ -881,18 +975,50 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = turnResult.reply;
 
-      // Extract artifacts from executed tools for single-agent mode
-      const artifacts: any[] = [];
-      turnResult.toolsExecuted.forEach((tool) => {
-        if (tool.toolName === 'generateArtifact' && (tool.result as any)?.status === 'success') {
-          const res = tool.result as any;
-          if (res.url) {
-            artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-          }
-        }
-      });
+      // Only surface generated files that passed real format and saved-file validation.
+      const artifactToolResults = turnResult.toolsExecuted.filter((tool) => tool.toolName === 'generateArtifact');
+      const artifacts: Array<Record<string, unknown>> = [];
+      const artifactFailures: string[] = [];
 
-      // Pass artifacts to client via SSE
+      for (const tool of artifactToolResults) {
+        const output = tool.result && typeof tool.result === 'object'
+          ? tool.result as Record<string, unknown>
+          : null;
+        const valid = output?.status === 'success'
+          && output.validationStatus === 'validated'
+          && typeof output.fileName === 'string'
+          && typeof output.displayName === 'string'
+          && typeof output.type === 'string'
+          && typeof output.url === 'string'
+          && output.url.startsWith('/artifacts/')
+          && typeof output.sizeBytes === 'number'
+          && output.sizeBytes > 0;
+        if (valid) {
+          artifacts.push({
+            name: output.fileName,
+            displayName: output.displayName,
+            url: output.url,
+            type: output.type,
+            mimeType: output.mimeType,
+            sizeBytes: output.sizeBytes,
+            generatedAt: output.generatedAt,
+            validationStatus: output.validationStatus,
+          });
+        } else {
+          artifactFailures.push(
+            typeof output?.error === 'string' && output.error.trim()
+              ? output.error
+              : 'Artifact output did not include verified, validated file metadata.',
+          );
+        }
+      }
+
+      if (artifactFailures.length > 0) {
+        const details = [...new Set(artifactFailures)].join('; ');
+        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+      }
+
+      // Pass only validated artifacts to the client via SSE
       if (artifacts.length > 0) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
