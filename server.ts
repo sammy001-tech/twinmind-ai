@@ -193,7 +193,7 @@ app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) =
   try {
     const artifact = await neonDb.getArtifactMetadata(fileName);
     if (!artifact) {
-      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The requested artifact was not found.' });
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The artifact record or content was not found in the active Neon database. Files generated before database-backed storage was enabled were not automatically migrated; regenerate this file if it is an older artifact.' });
       return;
     }
 
@@ -241,7 +241,7 @@ app.get('/artifacts/:filename', async (req: Request, res: Response) => {
   try {
     const artifact = await neonDb.getArtifactContent(fileName);
     if (!artifact) {
-      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The requested artifact was not found.' });
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND', error: 'The artifact record or content was not found in the active Neon database. Files generated before database-backed storage was enabled were not automatically migrated; regenerate this file if it is an older artifact.' });
       return;
     }
     const safeDisplayName = artifact.displayName.replace(/[^a-z0-9._-]/gi, '_') || 'artifact';
@@ -512,9 +512,9 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   const userProvidedKey = isMasked(cleanKey) ? '' : cleanKey;
 
   if (provider === 'gemini') {
-    const sKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-    const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-    const effectiveKey = userProvidedKey || sKey || eKey;
+    const sKey = settingsManager.getSettings().customGeminiKey;
+    const eKey = process.env.GEMINI_API_KEY;
+    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Gemini API key (starting with AIza or AQ.) or configure GEMINI_API_KEY.' });
@@ -560,9 +560,9 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   }
 
   if (provider === 'groq') {
-    const sKey = (settingsManager.getSettings().customGroqKey || '').trim();
-    const eKey = (process.env.GROQ_API_KEY || '').trim();
-    const effectiveKey = userProvidedKey || sKey || eKey;
+    const sKey = settingsManager.getSettings().customGroqKey;
+    const eKey = process.env.GROQ_API_KEY;
+    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Groq API key to test (starting with gsk_).' });
@@ -597,9 +597,9 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   }
 
   if (provider === 'mistral') {
-    const sKey = (settingsManager.getSettings().customMistralKey || '').trim();
-    const eKey = (process.env.MISTRAL_API_KEY || '').trim();
-    const effectiveKey = userProvidedKey || sKey || eKey;
+    const sKey = settingsManager.getSettings().customMistralKey;
+    const eKey = process.env.MISTRAL_API_KEY;
+    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Mistral API key to test.' });
@@ -1551,9 +1551,11 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
-      normalizeProviderApiKey(req.get('x-api-key')) ||
-      resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey, req.body?.customGeminiKey).key;
+    const geminiKey = resolveProviderCredential(
+      process.env.GEMINI_API_KEY,
+      settings.customGeminiKey,
+      req.get('x-gemini-key') || req.get('x-api-key') || req.body?.customGeminiKey,
+    ).key;
     if (!geminiKey) {
       res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
       return;
