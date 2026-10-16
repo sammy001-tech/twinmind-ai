@@ -8,9 +8,9 @@ export interface DatabaseStatus {
   source: 'environment' | 'settings' | 'none';
   maskedUrl: string | null;
   tables: {
-    conversations: number;
-    decisions: number;
-    twin_events: number;
+    conversations: number | null;
+    decisions: number | null;
+    twin_events: number | null;
   };
   error: string | null;
 }
@@ -386,9 +386,9 @@ class NeonDatabaseService {
       source,
       maskedUrl: this.maskUrl(url),
       tables: {
-        conversations: 0,
-        decisions: 0,
-        twin_events: 0,
+        conversations: null,
+        decisions: null,
+        twin_events: null,
       },
       error: this.lastError,
     };
@@ -401,9 +401,17 @@ class NeonDatabaseService {
           this.pool.query('SELECT COUNT(*) FROM twin_events;'),
         ]);
 
-        status.tables.conversations = parseInt(convRes.rows[0]?.count || '0', 10);
-        status.tables.decisions = parseInt(decRes.rows[0]?.count || '0', 10);
-        status.tables.twin_events = parseInt(eventRes.rows[0]?.count || '0', 10);
+        const parseCount = (value: unknown): number | null => {
+          const count = typeof value === 'number'
+            ? value
+            : typeof value === 'string' && value.trim()
+              ? Number(value)
+              : NaN;
+          return Number.isSafeInteger(count) && count >= 0 ? count : null;
+        };
+        status.tables.conversations = parseCount(convRes.rows[0]?.count);
+        status.tables.decisions = parseCount(decRes.rows[0]?.count);
+        status.tables.twin_events = parseCount(eventRes.rows[0]?.count);
       } catch (err: unknown) {
         // Table count query error
         console.warn('[NeonDB] Error getting table counts:', err);
