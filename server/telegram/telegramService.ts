@@ -105,7 +105,6 @@ class TelegramBotManager {
 
   constructor() {
     this.config = loadConfig();
-    this.initAi();
     this.initCommandRegistry();
     this.log('info', 'Telegram service initialized with Zero Silent Failure policy');
   }
@@ -405,7 +404,7 @@ class TelegramBotManager {
         description: 'Synthesize twin response into a native Telegram audio voice note',
         usage: '/voice <topic or question>',
         category: 'voice',
-        isReady: () => Boolean(process.env.GEMINI_API_KEY || this.ai),
+        isReady: () => Boolean((process.env.GEMINI_API_KEY || settingsManager.getSettings().customGeminiKey) && settingsManager.getSettings().voice?.trim()),
         execute: async (ctx, args) => {
           if (!args) {
             await ctx.reply('🎙️ Use `/voice <message>` to generate a voice note. E.g.: `/voice what is our top priority this week?`');
