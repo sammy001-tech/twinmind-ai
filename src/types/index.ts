@@ -50,7 +50,7 @@ export interface ChatMessage {
   };
   reactions?: string[];
   swarmTrace?: SwarmSessionState;
-  artifacts?: { name: string; url: string; type: string }[];
+  artifacts?: GeneratedArtifact[];
 }
 
 export interface SwarmToolCall {
