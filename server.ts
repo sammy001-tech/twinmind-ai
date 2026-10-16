@@ -22,6 +22,7 @@ import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
+import { getArtifactStorageDirectory, getArtifactStorageScope, resolveArtifactFilePath } from './server/utils/artifactStorage.ts';
 
 dotenv.config();
 
@@ -39,6 +40,127 @@ function normalizeProviderApiKey(value: unknown): string {
   const key = value.trim().replace(/^["']|["']$/g, '');
   if (!key || key.includes('...') || key === '********') return '';
   return key;
+}
+
+interface ArtifactClientMetadata {
+  name: string;
+  url: string;
+  type: 'pdf' | 'xlsx' | 'csv' | 'md';
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  generatedAt: string;
+  storageScope: 'configured-directory' | 'instance-local';
+}
+
+interface ArtifactGenerationErrorMetadata {
+  type: string;
+  code: string;
+  message: string;
+}
+
+function collectArtifactToolOutput(value: unknown): {
+  artifact?: ArtifactClientMetadata;
+  error?: ArtifactGenerationErrorMetadata;
+} {
+  const result = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const type = typeof result?.type === 'string' ? result.type.toLowerCase() : 'unknown';
+  const allowedTypes = new Set(['pdf', 'xlsx', 'excel', 'csv', 'md']);
+  const validType = allowedTypes.has(type);
+  const displayType = type === 'excel' ? 'xlsx' : validType ? type : 'unknown';
+
+  const failure = (code: string, message: string): { error: ArtifactGenerationErrorMetadata } => ({
+    error: {
+      type: displayType,
+      code,
+      message,
+    },
+  });
+
+  if (!result) {
+    return failure('ARTIFACT_RESULT_INVALID', 'The file generator returned no structured result. No download is available.');
+  }
+
+  if (result.status === 'error') {
+    const rawError = typeof result.error === 'string' ? result.error.trim() : '';
+    const rawCode = rawError.split(':', 1)[0]?.split(/\s+/, 1)[0];
+    const code = rawCode && /^[A-Z][A-Z0-9_]{1,80}$/.test(rawCode)
+      ? rawCode
+      : 'ARTIFACT_GENERATION_FAILED';
+    const message = rawError.startsWith('ARTIFACT_')
+      ? rawError
+      : `File generation failed with diagnostic code ${code}. No download was published; check the configured artifact storage and generation inputs.`;
+    return failure(code, message);
+  }
+
+  if (result.status !== 'success') {
+    return failure('ARTIFACT_GENERATION_UNVERIFIED', 'The generator did not confirm successful file creation. No download is available.');
+  }
+
+  if (
+    !validType ||
+    typeof result.url !== 'string' ||
+    typeof result.fileName !== 'string' ||
+    typeof result.displayName !== 'string' ||
+    !result.displayName.trim() ||
+    typeof result.mimeType !== 'string' ||
+    !result.mimeType.trim() ||
+    typeof result.sizeBytes !== 'number' ||
+    !Number.isSafeInteger(result.sizeBytes) ||
+    result.sizeBytes <= 0 ||
+    typeof result.sha256 !== 'string' ||
+    !/^[a-f0-9]{64}$/i.test(result.sha256) ||
+    typeof result.generatedAt !== 'string' ||
+    Number.isNaN(Date.parse(result.generatedAt)) ||
+    (result.storageScope !== 'configured-directory' && result.storageScope !== 'instance-local')
+  ) {
+    return failure('ARTIFACT_METADATA_INVALID', 'The generator did not return complete, verifiable file metadata. No download is available.');
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(result.url, 'https://twinmind.invalid');
+  } catch {
+    return failure('ARTIFACT_URL_INVALID', 'The generator returned an invalid artifact URL. No download is available.');
+  }
+  if (parsedUrl.origin !== 'https://twinmind.invalid' || !parsedUrl.pathname.startsWith('/artifacts/')) {
+    return failure('ARTIFACT_URL_INVALID', 'The generator returned an unsupported artifact URL. No download is available.');
+  }
+
+  let storedName: string;
+  try {
+    storedName = decodeURIComponent(parsedUrl.pathname.slice('/artifacts/'.length));
+  } catch {
+    return failure('ARTIFACT_URL_INVALID', 'The generated artifact URL could not be validated. No download is available.');
+  }
+  if (!storedName || storedName !== result.fileName || storedName.includes('/') || storedName.includes('\\')) {
+    return failure('ARTIFACT_NAME_MISMATCH', 'The generated artifact name did not match its download path. No download is available.');
+  }
+
+  try {
+    const filePath = resolveArtifactFilePath(storedName);
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size <= 0 || stats.size !== result.sizeBytes) {
+      return failure('ARTIFACT_OUTPUT_CHANGED', 'The generated file failed its final integrity check. No download is available.');
+    }
+  } catch {
+    return failure('ARTIFACT_OUTPUT_MISSING', 'The generated file is not available in the configured storage directory. No download is available.');
+  }
+
+  return {
+    artifact: {
+      name: result.displayName.trim(),
+      url: `${parsedUrl.pathname}${parsedUrl.search}`,
+      type: displayType as ArtifactClientMetadata['type'],
+      mimeType: result.mimeType,
+      sizeBytes: result.sizeBytes,
+      sha256: result.sha256.toLowerCase(),
+      generatedAt: new Date(result.generatedAt).toISOString(),
+      storageScope: result.storageScope,
+    },
+  };
 }
 
 const app = express();
@@ -180,13 +302,26 @@ app.get('/artifacts/:filename', (req: Request, res: Response) => {
     return;
   }
 
-  const artifactsRoot = path.resolve(process.cwd(), 'public', 'artifacts');
-  const filePath = path.resolve(artifactsRoot, fileName);
-  if (!filePath.startsWith(artifactsRoot + path.sep)) {
+  let filePath: string;
+  try {
+    filePath = resolveArtifactFilePath(fileName);
+  } catch {
     res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
     return;
   }
 
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    res.status(404).json({
+      success: false,
+      code: 'ARTIFACT_NOT_FOUND',
+      error: 'The generated file is no longer available at the configured storage path.',
+      storageScope: getArtifactStorageScope(),
+    });
+    return;
+  }
+
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.sendFile(filePath, (err) => {
     if (err && !res.headersSent) {
       res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
@@ -824,22 +959,21 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = swarmSession.synthesis || fullReply;
 
-      // Extract artifacts from session traces for persistence and client UI
-      const artifacts: any[] = [];
+      // Publish only files whose output, size, checksum, and storage path have been verified.
+      const artifacts: ArtifactClientMetadata[] = [];
+      const artifactErrors: ArtifactGenerationErrorMetadata[] = [];
       swarmSession.traces.forEach((trace) => {
         trace.tools.forEach((tool) => {
-          if (tool.toolName === 'generateArtifact' && tool.status === 'success') {
-            const res = tool.output as any;
-            if (res.url) {
-              artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-            }
-          }
+          if (tool.toolName !== 'generateArtifact') return;
+          const checked = collectArtifactToolOutput(tool.output);
+          if (checked.artifact) artifacts.push(checked.artifact);
+          if (checked.error) artifactErrors.push(checked.error);
         });
       });
 
-      // Pass artifacts to client via SSE for immediate display
-      if (artifacts.length > 0) {
-        res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
+      // Empty or failed generation remains visible as an explicit error state.
+      if (artifacts.length > 0 || artifactErrors.length > 0) {
+        res.write(`data: ${JSON.stringify({ meta: { artifacts, artifactErrors } })}\n\n`);
       }
 
       const chunkSize = 28;
@@ -881,20 +1015,18 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = turnResult.reply;
 
-      // Extract artifacts from executed tools for single-agent mode
-      const artifacts: any[] = [];
+      // Publish only verified generated output, never a model-written success claim.
+      const artifacts: ArtifactClientMetadata[] = [];
+      const artifactErrors: ArtifactGenerationErrorMetadata[] = [];
       turnResult.toolsExecuted.forEach((tool) => {
-        if (tool.toolName === 'generateArtifact' && (tool.result as any)?.status === 'success') {
-          const res = tool.result as any;
-          if (res.url) {
-            artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-          }
-        }
+        if (tool.toolName !== 'generateArtifact') return;
+        const checked = collectArtifactToolOutput(tool.result);
+        if (checked.artifact) artifacts.push(checked.artifact);
+        if (checked.error) artifactErrors.push(checked.error);
       });
 
-      // Pass artifacts to client via SSE
-      if (artifacts.length > 0) {
-        res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
+      if (artifacts.length > 0 || artifactErrors.length > 0) {
+        res.write(`data: ${JSON.stringify({ meta: { artifacts, artifactErrors } })}\n\n`);
       }
 
       const chunkSize = 24;
