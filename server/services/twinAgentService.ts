@@ -92,7 +92,7 @@ export const GEMINI_TWIN_TOOLS: any[] = [
         },
         content: {
           type: Type.STRING,
-          description: 'The body content or tabular data to include in the document',
+          description: 'For XLSX/CSV, provide source-derived structured JSON rows, a Markdown table, or CSV/TSV with explicit headers and at least one actual data row. Do not invent missing values or return prose instead of tabular data. For PDF/Markdown, provide the actual requested document text.',
         },
         fileName: {
           type: Type.STRING,
@@ -194,7 +194,7 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
           },
           content: {
             type: 'string',
-            description: 'The body content or tabular data to include in the document',
+            description: 'For XLSX/CSV, provide source-derived structured JSON rows, a Markdown table, or CSV/TSV with explicit headers and at least one actual data row. Do not invent missing values or return prose instead of tabular data. For PDF/Markdown, provide the actual requested document text.',
           },
           fileName: {
             type: 'string',
