@@ -20,6 +20,7 @@ import {
   FileDown,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
+import { ArtifactCard } from './ArtifactCard.tsx';
 
 export interface GroupedMessages {
   groupId: string;
@@ -124,7 +125,7 @@ interface ChatMessageProps {
 export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   message,
   channel,
-  displayName = 'User',
+  displayName = '',
   onGenerateAudio,
   onEditMessage,
   onEditAndRegenerate,
@@ -401,22 +402,9 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         )}
         
         {message.artifacts && message.artifacts.length > 0 && !isEditing && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {message.artifacts.map((art, idx) => (
-              <a
-                key={idx}
-                href={art.url}
-                download={art.name}
-                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:border-amber-500 transition text-xs font-medium text-slate-700 dark:text-slate-200 group"
-              >
-                <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400">
-                  <FileDown className="w-4 h-4" />
-                </div>
-                <div className="flex flex-col">
-                  <span className="truncate max-w-[140px] font-semibold">{art.name}</span>
-                  <span className="text-[10px] text-slate-500 uppercase font-bold">{art.type} Artifact</span>
-                </div>
-              </a>
+          <div className="mt-3 w-full min-w-0 space-y-3">
+            {message.artifacts.map((artifact, index) => (
+              <ArtifactCard key={artifact.name + ':' + index} artifact={artifact} />
             ))}
           </div>
         )}
@@ -672,7 +660,7 @@ interface GroupedChatMessageListProps {
 export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   messages,
   channel,
-  displayName = 'User',
+  displayName = '',
   onGenerateAudio,
   onEditMessage,
   onEditAndRegenerate,

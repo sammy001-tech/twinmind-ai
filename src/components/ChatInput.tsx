@@ -203,7 +203,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   return (
-    <div className="w-full max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 sticky bottom-0 z-20">
+    <div className="w-full shrink-0 max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 relative z-20">
       {/* Hidden File Input supporting photos, images, and text documents */}
       <input
         type="file"
@@ -421,9 +421,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {/* Circular Amber Send Button */}
             <button
               type="submit"
-              disabled={!text.trim() || isLoading}
+              disabled={(!text.trim() && !selectedImage) || isLoading}
               className={`w-9 h-9 rounded-full flex items-center justify-center transition shadow-lg ${
-                text.trim() && !isLoading
+                (text.trim() || selectedImage) && !isLoading
                   ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold active:scale-95 shadow-amber-500/20'
                   : 'bg-slate-100 text-slate-400 border border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700/50 cursor-not-allowed'
               }`}

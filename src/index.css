@@ -22,6 +22,22 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.chat-messages-viewport {
+  overscroll-behavior-y: contain;
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-messages-viewport {
+    scroll-behavior: auto;
+  }
+}
+
 /* Print Styles for Executive Conversation Export */
 @media print {
   body {
