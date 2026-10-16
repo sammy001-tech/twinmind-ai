@@ -18,6 +18,23 @@ export interface ProviderStatus {
   selectedModel: string;
 }
 
+export interface GeneratedArtifact {
+  name: string;
+  url: string;
+  type: 'pdf' | 'xlsx' | 'excel' | 'csv' | 'md' | 'markdown';
+  mimeType?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  generatedAt?: string;
+  storageScope?: 'configured-directory' | 'instance-local';
+}
+
+export interface ArtifactGenerationError {
+  type: string;
+  code: string;
+  message: string;
+}
+
 export interface ChatMessage {
   id: string;
   dbId?: number;
@@ -37,7 +54,8 @@ export interface ChatMessage {
   };
   reactions?: string[];
   swarmTrace?: SwarmSessionState;
-  artifacts?: { name: string; url: string; type: string }[];
+  artifacts?: GeneratedArtifact[];
+  artifactErrors?: ArtifactGenerationError[];
 }
 
 export interface SwarmToolCall {
