@@ -264,28 +264,44 @@ app.all('/api/twilio/test', async (_req: Request, res: Response) => {
 app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<void> => {
   try {
     const config = twilioService.getResolvedConfig();
+    if (!config) {
+      res.status(503).json({ success: false, code: 'TWILIO_CONFIGURATION_MISSING' });
+      return;
+    }
 
-    // 1. Security Check: Validate X-Twilio-Signature
-    if (config?.enforceSignature) {
+    // Production inbound webhooks always require a valid signature against TWILIO_WEBHOOK_URL.
+    if (process.env.NODE_ENV === 'production' && !config.enforceSignature) {
+      res.status(503).json({ success: false, code: 'TWILIO_SIGNATURE_ENFORCEMENT_REQUIRED' });
+      return;
+    }
+    if (config.enforceSignature) {
       const isValidSig = twilioService.validateSignature(req);
       if (!isValidSig) {
-        console.warn('[Twilio Webhook] Rejected request with invalid X-Twilio-Signature header');
-        res.status(403).type('text/xml').send('<Response><Message>Forbidden: Invalid signature</Message></Response>');
+        console.warn('[Twilio Webhook] Rejected request with invalid or unverifiable signature.');
+        res.status(403).type('text/xml').send('<Response><Message>Forbidden: invalid webhook signature</Message></Response>');
         return;
       }
     }
 
+    if (!config.userPhoneNumber) {
+      res.status(503).json({ success: false, code: 'TWILIO_SENDER_ALLOWLIST_MISSING' });
+      return;
+    }
     const fromHeader = (req.body?.From || '').trim();
 
     // 2. Sender Auth: Verify From against authorized user phone
     const isAuthorized = twilioService.isAuthorizedSender(fromHeader);
     if (!isAuthorized) {
-      console.warn(`[Twilio Webhook] Rejected request from unauthorized sender: ${fromHeader}`);
+      console.warn('[Twilio Webhook] Rejected request from unauthorized sender.');
       res.status(401).type('text/xml').send('<Response><Message>Unauthorized sender</Message></Response>');
       return;
     }
 
-    const messageSid = (req.body?.MessageSid || `msg-${Date.now()}`).trim();
+    const messageSid = typeof req.body?.MessageSid === 'string' ? req.body.MessageSid.trim() : '';
+    if (!messageSid) {
+      res.status(400).json({ success: false, code: 'TWILIO_MESSAGE_SID_MISSING' });
+      return;
+    }
     const senderPhone = twilioService.normalizePhoneNumber(fromHeader);
 
     // 3. Atomic Persist: Record MessageSid & Job in Neon DB BEFORE returning ACK
