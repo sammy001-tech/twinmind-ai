@@ -72,9 +72,8 @@ test('neutralizes formula-like source strings when serializing CSV', () => {
   ]);
   const csv = serializeArtifactCsv(parsed);
   assert.ok(csv.includes("'=1+1"));
-  assert.ok(csv.includes("'@SUM(A1:A2)"));
-  assert.ok(csv.endsWith('\\r\\n@SUM(A1:A2),4') === false);
-  assert.ok(csv.includes(', -2') === false);
+  assert.ok(csv.includes("'=1+1,-2"));
+  assert.ok(csv.includes("'@SUM(A1:A2),4"));
 });
 
 test('rejects prose, malformed JSON, missing headers, and empty table data', () => {
