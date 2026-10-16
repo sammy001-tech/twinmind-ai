@@ -1058,10 +1058,40 @@ class SpecialistSwarmService {
           }
 
           const artifactType = goals.artifactType;
+          const isTabularArtifact = artifactType === 'csv' || artifactType === 'xlsx';
+          const tabularRows = specialistTraces.flatMap((trace) => {
+            const searchRows = trace.tools.flatMap((tool) => {
+              if (tool.toolName !== 'searchWeb') return [];
+              const output = tool.output as { status?: unknown; query?: unknown; results?: unknown } | null;
+              if (!output || output.status !== 'success' || !Array.isArray(output.results)) return [];
+
+              return output.results.flatMap((result) => {
+                if (!result || typeof result !== 'object' || Array.isArray(result)) return [];
+                const source = result as Record<string, unknown>;
+                const row: Record<string, unknown> = {};
+                if (typeof output.query === 'string' && output.query.trim()) row.query = output.query;
+                if (typeof source.title === 'string' && source.title.trim()) row.title = source.title;
+                if (typeof source.url === 'string' && source.url.trim()) row.url = source.url;
+                if (typeof source.content === 'string' && source.content.trim()) row.summary = source.content;
+                return Object.keys(row).length > 0 ? [row] : [];
+              });
+            });
+            if (searchRows.length > 0) return searchRows;
+            if (trace.specialist === 'ArtifactArchitect' || !trace.summary.trim()) return [];
+            return [{
+              specialist: trace.specialist,
+              role: trace.roleName,
+              task: trace.taskDescription,
+              status: trace.status,
+              summary: trace.summary,
+              durationMs: trace.durationMs,
+            }];
+          });
+          const artifactContent = isTabularArtifact ? tabularRows : docContent;
           const artifactRes = artifactType
             ? await this.executeGenerateArtifact(
                 artifactType,
-                docContent,
+                artifactContent,
                 `Report_${Date.now()}.${artifactType}`,
                 scope.budget,
               )
