@@ -7,6 +7,7 @@ import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
 import { memoryService } from './memoryService.ts';
 import { calibrationService } from './calibrationService.ts';
 import { modelCatalogService } from './modelCatalogService.ts';
+import { resolveArtifactFormat } from '../utils/artifactFormat.ts';
 
 const Type = {
   OBJECT: 'OBJECT',
@@ -959,29 +960,39 @@ Respond in valid JSON:
         result = await this.executeExecutiveSummary(args.timeframe ? String(args.timeframe) : undefined);
       } else if (name === 'generateArtifact') {
         const { specialistSwarmService } = await import('./specialistSwarmService.ts');
-        const userPromptLower = userPrompt.toLowerCase();
-        let targetType: 'pdf' | 'md' | 'csv' | 'xlsx' = (args.type as any) || 'md';
+        const formatResolution = resolveArtifactFormat(userPrompt, args.type);
+        const requestedFileName = typeof args.fileName === 'string' ? args.fileName.trim() : '';
 
-        if (userPromptLower.includes('excel') || userPromptLower.includes('xlsx')) {
-          targetType = 'xlsx';
-        } else if (userPromptLower.includes('pdf')) {
-          targetType = 'pdf';
-        } else if (userPromptLower.includes('csv') || userPromptLower.includes('spreadsheet')) {
-          targetType = 'csv';
-        } else if (userPromptLower.includes('markdown') || userPromptLower.includes(' md ')) {
-          targetType = 'md';
+        if ('error' in formatResolution) {
+          result = {
+            status: 'error',
+            type: typeof args.type === 'string' ? args.type : 'unknown',
+            fileName: '',
+            displayName: '',
+            url: '',
+            error: `${formatResolution.error}: ${formatResolution.message}`,
+            durationMs: 0,
+          };
+        } else if (!requestedFileName) {
+          result = {
+            status: 'error',
+            type: formatResolution.format,
+            fileName: '',
+            displayName: '',
+            url: '',
+            error: 'ARTIFACT_FILENAME_REQUIRED: provide a descriptive file name for the requested output.',
+            durationMs: 0,
+          };
+        } else {
+          const fileNameWithoutExtension = requestedFileName.replace(/\.(pdf|csv|xlsx|xls|md|txt|doc|docx)$/i, '');
+          const fileName = `${fileNameWithoutExtension}.${formatResolution.format}`;
+
+          result = await specialistSwarmService.executeGenerateArtifact(
+            formatResolution.format,
+            args.content,
+            fileName,
+          );
         }
-
-        let fileName = (args.fileName as string) || `Report_${Date.now()}`;
-        // Strip existing extension if any and append targetType
-        fileName = fileName.replace(/\.(pdf|csv|xlsx|xls|md|txt|doc|docx)$/i, '');
-        fileName = `${fileName}.${targetType}`;
-
-        result = await specialistSwarmService.executeGenerateArtifact(
-          targetType,
-          args.content,
-          fileName
-        );
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };
       }
