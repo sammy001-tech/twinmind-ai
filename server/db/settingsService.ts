@@ -6,15 +6,15 @@ import { neonDb } from './neonService.ts';
 const SETTINGS_FILE_PATH = path.join(process.cwd(), 'twin-settings.json');
 
 const DEFAULT_SETTINGS: AppSettings = {
-  brandName: process.env.APP_BRAND_NAME || process.env.VITE_APP_BRAND_NAME || 'TwinMind AI',
-  activeProvider: (process.env.ACTIVE_PROVIDER as 'gemini' | 'groq' | 'mistral') || 'gemini',
+  brandName: process.env.APP_BRAND_NAME || process.env.VITE_APP_BRAND_NAME || '',
+  activeProvider: (process.env.ACTIVE_PROVIDER as 'gemini' | 'groq' | 'mistral' | '') || '',
   activeModel: process.env.ACTIVE_MODEL || process.env.GEMINI_MODEL || '',
   providerModels: {
     gemini: process.env.GEMINI_MODEL || '',
     groq: process.env.GROQ_MODEL || '',
     mistral: process.env.MISTRAL_MODEL || '',
   },
-  voice: process.env.TTS_VOICE || 'Fenrir',
+  voice: process.env.TTS_VOICE || '',
   userName: process.env.USER_NAME || '',
   nickname: process.env.USER_NICKNAME || '',
   customGeminiKey: process.env.GEMINI_API_KEY || '',
@@ -31,7 +31,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   userPhoneNumber: process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '',
   enableWhatsAppAlerts: false,
   enforceTwilioSignature: true,
-  proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'whatsapp',
+  proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'none',
   themeMode: 'system',
 };
 
