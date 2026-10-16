@@ -57,7 +57,7 @@ class CalibrationService {
     const greeting = configuredName ? `${configuredName}, ` : '';
     const brand = s.brandName?.trim() || '';
     const alertTitle = brand ? `${brand} Calibration Alert` : 'Calibration Alert';
-    const message = `🚨 *${alertTitle}*\\n\\n${greeting}the target date for your decision "*${decision.title}*" has passed.\\n\\nTarget Metric: ${exp.target_metric}\\nBaseline: ${exp.baseline_metric}\\n\\nDid you meet the success threshold? Reply with the observed outcome so the decision history can be updated.`;
+    const message = `🚨 *${alertTitle}*\n\n${greeting}the target date for your decision "*${decision.title}*" has passed.\n\nTarget Metric: ${exp.target_metric}\nBaseline: ${exp.baseline_metric}\n\nDid you meet the success threshold? Reply with the observed outcome so the decision history can be updated.`;
 
     const channel = s.proactiveAlertChannel || 'none';
 
