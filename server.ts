@@ -850,29 +850,19 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
     // Resolve effective user configuration details for complete self-awareness
     const effectiveNickname = userContext?.nickname || nickname || currentSettings.nickname || '';
-    const effectiveUserName = userContext?.userName || userName || currentSettings.userName || 'Olalekan';
-    const effectiveVoice = userContext?.selectedVoice || currentSettings.voice || 'Fenrir';
+    const effectiveUserName = userContext?.userName || userName || currentSettings.userName || '';
+    const effectiveVoice = userContext?.selectedVoice || currentSettings.voice || '';
 
-    // Dynamic resolution of provider and model selected by user
-    let targetProvider = provider;
-    let targetModel = model;
-
-    if (!targetProvider || targetProvider === 'auto') {
-      targetProvider = currentSettings.activeProvider || 'gemini';
-      targetModel = model || currentSettings.activeModel;
-    }
+    // Never reuse a model identifier saved for a different provider or silently select another model.
+    const targetProvider = provider;
+    const targetModel = model || currentSettings.providerModels[targetProvider] ||
+      (currentSettings.activeProvider === targetProvider ? currentSettings.activeModel : '');
 
     if (!targetModel) {
-      targetModel = currentSettings.activeModel || (currentSettings.providerModels as Record<string, string>)[targetProvider];
-    }
-
-    if (!targetModel) {
-      targetModel = telegramBotManager.getConfig().activeModel;
-    }
-
-    if (!targetModel) {
-      res.status(400).json({
-        error: `No active model configured for provider "${targetProvider}". Please configure your model in Settings.`,
+      res.status(503).json({
+        success: false,
+        code: 'MODEL_CONFIGURATION_REQUIRED',
+        error: `Configure an explicit model for provider "${targetProvider}" before starting a chat.`,
       });
       return;
     }
@@ -1985,35 +1975,67 @@ app.post('/api/knowledge/categories/delete', async (req: Request, res: Response)
 app.get('/api/suggested-prompts', async (_req: Request, res: Response) => {
   try {
     const docs = await knowledgeService.listDocuments();
-    const settings = settingsManager.getSettings();
-    const brandName = settings.brandName || 'TwinMind AI';
-    const userName = settings.userName || 'User';
-    const docTitles = docs.map((d) => d.title).join(', ');
+    if (!docs.length) {
+      res.status(409).json({
+        success: false,
+        code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE',
+        error: 'No stored knowledge records are available to ground suggested prompts.',
+      });
+      return;
+    }
 
-    const promptText = `Generate 4 highly intelligent, context-aware, completely dynamic suggested chat prompts for ${brandName} (personal digital twin and thinking partner for ${userName}). 
-Knowledge base topics available: ${docTitles || 'General personal development, business strategy, technology, and decision frameworks'}.
-Return a JSON object with a "prompts" array containing exactly 4 objects. Each object must have:
-- "badge": short category name (e.g. "Strategy", "Reflections", "Decision", "Growth", "Insights")
-- "title": short title (max 5 words)
-- "prompt": the full detailed prompt text for the user to send to their digital twin
-- "description": brief subtitle explaining what the prompt explores`;
+    const settings = settingsManager.getSettings();
+    const provider = settings.activeProvider;
+    const model = settings.activeModel || (provider ? settings.providerModels?.[provider] : '');
+    if ((provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') || !model) {
+      res.status(503).json({
+        success: false,
+        code: 'MODEL_CONFIGURATION_REQUIRED',
+        error: 'Configure an active provider and explicit model to generate suggested prompts.',
+      });
+      return;
+    }
+
+    const docTitles = docs.map((doc) => doc.title).filter((title) => typeof title === 'string' && title.trim());
+    if (!docTitles.length) {
+      res.status(409).json({
+        success: false,
+        code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE',
+        error: 'Stored knowledge records have no usable titles to ground suggested prompts.',
+      });
+      return;
+    }
+
+    const identityContext = [settings.brandName?.trim(), settings.userName?.trim()]
+      .filter((value) => Boolean(value))
+      .join(' / ');
+    const promptText = `Generate 4 useful suggested chat prompts grounded strictly in the following stored knowledge record titles.
+${identityContext ? `Configured workspace identity: ${identityContext}.\\n` : ''}Knowledge record titles: ${JSON.stringify(docTitles)}.
+Do not invent facts about the user or assume details absent from these records. Return a JSON object with a "prompts" array of exactly 4 objects. Each object must contain "badge", "title", "prompt", and "description".`;
 
     const resText = await twinAgentService.generateCompletion({
       prompt: promptText,
-      provider: settings.activeProvider,
-      model: settings.activeModel,
+      provider,
+      model,
       jsonMode: true,
     });
 
-    const parsed = JSON.parse(resText || '{}');
-    if (parsed.prompts && Array.isArray(parsed.prompts) && parsed.prompts.length > 0) {
-      res.json({ success: true, prompts: parsed.prompts });
-      return;
+    if (!resText.trim()) throw new Error('AI_OUTPUT_EMPTY: suggested prompt model returned no usable content');
+    const parsed = JSON.parse(resText);
+    if (!Array.isArray(parsed.prompts) || parsed.prompts.length !== 4 ||
+        parsed.prompts.some((item: any) => !item || typeof item.badge !== 'string' ||
+          typeof item.title !== 'string' || typeof item.prompt !== 'string' ||
+          typeof item.description !== 'string')) {
+      throw new Error('AI_OUTPUT_SCHEMA_INVALID: suggested prompts response did not match the required schema');
     }
-    throw new Error('Invalid AI response structure for suggested prompts');
+
+    res.json({ success: true, prompts: parsed.prompts });
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : 'Suggested prompts generation failed';
-    res.status(500).json({ success: false, error: errorMsg });
+    res.status(502).json({
+      success: false,
+      code: 'SUGGESTED_PROMPTS_GENERATION_FAILED',
+      error: err instanceof Error ? err.message : 'Suggested prompts generation failed',
+    });
   }
 });
 
