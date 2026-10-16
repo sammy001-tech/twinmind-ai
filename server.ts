@@ -2365,7 +2365,7 @@ if (isProduction) {
 }
 
 app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`Olalekan Digital Twin server running on http://0.0.0.0:${PORT}`);
+  console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
   // Start background WhatsApp job worker and lease recovery daemon
   whatsAppWorker.startWorker();
 
