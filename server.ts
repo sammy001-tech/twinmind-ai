@@ -664,7 +664,6 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       threadTitle || (firstUserMsg?.content ? firstUserMsg.content.slice(0, 48) : 'New Conversation');
 
     // Ensure thread exists in Neon database
-    neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel }).catch(() => {});
 
     const currentSettings = settingsManager.getSettings();
     const userName = (typeof requestedUserName === 'string' && requestedUserName.trim())
@@ -905,7 +904,9 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       (req as any)._artifacts = artifacts;
     }
 
-    // Persist messages to Neon Postgres if configured
+    if (!fullReply.trim()) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no chat reply');
+
+    // Persist messages to Neon Postgres and report the result.
     let userDbId: number | undefined;
     let assistantDbId: number | undefined;
 
@@ -940,10 +941,15 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       }
     }
 
-    // Refresh thread record in chat_threads
-    neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel }).catch(() => {});
+    // Persist the thread record and surface the result; missing database state is not reported as saved.
+    let threadPersisted = false;
+    try {
+      threadPersisted = await neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel });
+    } catch (dbErr) {
+      console.warn('[NeonDB] Thread persistence failed:', dbErr instanceof Error ? dbErr.message : 'unknown error');
+    }
 
-    // Emit saved IDs so client can attach real database IDs immediately
+    // Emit saved IDs plus explicit persistence status so the UI cannot mistake an unavailable database for success.
     res.write(
       `data: ${JSON.stringify({
         savedMeta: {
@@ -951,6 +957,15 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           assistantDbId,
           threadId: effectiveThreadId,
           threadTitle: effectiveThreadTitle,
+          persistence: {
+            thread: threadPersisted ? 'persisted' : 'failed',
+            userMessage: lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData)
+              ? (userDbId !== undefined ? 'persisted' : 'failed')
+              : 'not_required',
+            assistantMessage: fullReply
+              ? (assistantDbId !== undefined ? 'persisted' : 'failed')
+              : 'empty_output',
+          },
         },
       })}\n\n`
     );
