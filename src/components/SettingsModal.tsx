@@ -173,7 +173,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     connected: boolean;
     source: 'environment' | 'settings' | 'none';
     maskedUrl: string | null;
-    tables: { conversations: number; decisions: number; twin_events: number };
+    tables: { conversations: number | null; decisions: number | null; twin_events: number | null };
     error: string | null;
   } | null>(null);
   const [dbUrlInput, setDbUrlInput] = useState('');
@@ -1883,9 +1883,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </span>
               </div>
               <div className="flex items-center gap-4 text-[10px] text-slate-600 dark:text-slate-400 pt-1 border-t border-emerald-200 dark:border-emerald-900/40">
-                <span>💬 Messages: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.conversations}</strong></span>
-                <span>⚖️ Decisions: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.decisions}</strong></span>
-                <span>📡 Events: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.twin_events}</strong></span>
+                <span>💬 Messages: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.conversations ?? 'Unavailable'}</strong></span>
+                <span>⚖️ Decisions: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.decisions ?? 'Unavailable'}</strong></span>
+                <span>📡 Events: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.twin_events ?? 'Unavailable'}</strong></span>
               </div>
             </div>
           )}
