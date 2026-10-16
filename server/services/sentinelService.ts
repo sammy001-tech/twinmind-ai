@@ -5,6 +5,7 @@ import { twilioService } from './twilioService.ts';
 import { telegramBotManager } from '../telegram/telegramService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { GoogleGenAI } from '@google/genai';
+import { modelCatalogService } from './modelCatalogService.ts';
 
 export interface SentinelFinding {
   decisionId: number;
@@ -75,7 +76,7 @@ class AdversarialSentinelService {
 
       // 2. Use LLM to find the "Blind Spot"
       const genAI = new GoogleGenAI({ apiKey });
-      const modelId = s.providerModels?.gemini || s.activeModel;
+      const modelId = await modelCatalogService.resolveModelForProvider('gemini', s.providerModels?.gemini || s.activeModel, apiKey);
 
       const auditPrompt = `
         You are the ADVERSARIAL SENTINEL for Lekzy's Digital Twin. 

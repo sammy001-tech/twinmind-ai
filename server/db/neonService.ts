@@ -547,6 +547,17 @@ class NeonDatabaseService {
     }
   }
 
+  public async clearAllThreads(): Promise<void> {
+    if (this.pool && this.isConnected) {
+      try {
+        await this.pool.query('DELETE FROM conversations;');
+        await this.pool.query('DELETE FROM chat_threads;');
+      } catch (err) {
+        console.error('[NeonDB] Error clearing all threads from DB:', err);
+      }
+    }
+  }
+
   /**
    * Get all messages for a specific thread
    */

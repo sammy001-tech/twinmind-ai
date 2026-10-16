@@ -116,6 +116,8 @@ interface ChatMessageProps {
   hasMultipleInGroup?: boolean;
   searchQuery?: string;
   autoPlayVoice?: boolean;
+  voiceSpeed?: number;
+  onVoiceSpeedChange?: (speed: number) => void;
   isDark?: boolean;
 }
 
@@ -133,6 +135,8 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   hasMultipleInGroup = false,
   searchQuery = '',
   autoPlayVoice = false,
+  voiceSpeed = 1,
+  onVoiceSpeedChange,
   isDark = true,
 }) => {
   const isUser = message.role === 'user';
@@ -142,6 +146,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   const [isDeleting, setIsDeleting] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -254,29 +259,29 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     if (isUser) {
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-[#eeffde] text-slate-900 border border-[#b2e59e] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[85%] sm:max-w-[78%]'
-          : 'bg-[#2b5278] text-white border border-[#3b6794]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-sm max-w-[85%] sm:max-w-[78%]';
+          ? 'bg-[#eeffde] text-slate-900 border border-[#b2e59e] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]'
+          : 'bg-[#2b5278] text-white border border-[#3b6794]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-sm max-w-[95%] sm:max-w-[85%]';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[85%] sm:max-w-[78%]'
-          : 'bg-[#005c4b] text-[#e9edef] border border-[#007a64]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[85%] sm:max-w-[78%]';
+          ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]'
+          : 'bg-[#005c4b] text-[#e9edef] border border-[#007a64]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]';
       }
       // Web Canvas
       return !isDark
-        ? 'bg-slate-900 text-white rounded-[22px] px-4 py-2.5 text-sm md:text-[15px] shadow-sm max-w-[85%] sm:max-w-[78%]'
-        : 'bg-[#1b2a47] sm:bg-[#162238] text-white rounded-[22px] px-4 py-2.5 text-sm md:text-[15px] border border-slate-700/60 max-w-[85%] sm:max-w-[78%]';
+        ? 'bg-slate-900 text-white rounded-[22px] px-4 py-2.5 text-sm md:text-[15px] shadow-sm max-w-[95%] sm:max-w-[85%]'
+        : 'bg-[#1b2a47] sm:bg-[#162238] text-white rounded-[22px] px-4 py-2.5 text-sm md:text-[15px] border border-slate-700/60 max-w-[95%] sm:max-w-[85%]';
     } else {
       // Assistant
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[90%] sm:max-w-[82%]'
-          : 'bg-[#182533] text-slate-100 border border-slate-700/60 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[90%] sm:max-w-[82%]';
+          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[98%] sm:max-w-[90%]'
+          : 'bg-[#182533] text-slate-100 border border-slate-700/60 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-white text-[#111b21] border border-slate-200/80 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[90%] sm:max-w-[82%]'
-          : 'bg-[#202c33] text-[#d1d7db] border border-slate-700/50 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[90%] sm:max-w-[82%]';
+          ? 'bg-white text-[#111b21] border border-slate-200/80 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[98%] sm:max-w-[90%]'
+          : 'bg-[#202c33] text-[#d1d7db] border border-slate-700/50 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
       // Web Canvas - borderless canvas typography
       return 'bg-transparent border-0 shadow-none px-0 py-0.5 text-slate-900 dark:text-slate-100 text-sm md:text-[15px] leading-relaxed w-full';
@@ -286,7 +291,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   return (
     <div
       id={`message-${message.id}`}
-      className={`w-full flex flex-col relative ${isUser ? 'items-end' : 'items-start'} ${isLastInGroup ? 'mb-3' : 'mb-1'}`}
+      className={`w-full flex flex-col relative break-words overflow-hidden ${isUser ? 'items-end' : 'items-start'} ${isLastInGroup ? 'mb-3' : 'mb-1'}`}
     >
       {/* Message Bubble Container */}
       <div
@@ -342,14 +347,56 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
                 <span className="text-xs font-medium tracking-wide animate-pulse">TwinMind AI is thinking...</span>
               </div>
             ) : (
-              renderFormattedMarkdown(message.content)
+              <>
+                {isUser && message.content.length > 320 && !isExpanded ? (
+                  <div className="relative">
+                    <div className="max-h-[120px] overflow-hidden mask-fade-bottom">
+                      {renderFormattedMarkdown(message.content.slice(0, 300) + '...')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsExpanded(true);
+                      }}
+                      className="mt-1 text-[11px] font-bold text-amber-500 hover:text-amber-400 flex items-center gap-1 transition-all"
+                    >
+                      <span>Show more</span>
+                      <RefreshCw className="w-2.5 h-2.5 rotate-90" />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    {renderFormattedMarkdown(message.content)}
+                    {isUser && message.content.length > 320 && isExpanded && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setIsExpanded(false);
+                        }}
+                        className="mt-2 text-[11px] font-bold text-slate-400 hover:text-slate-300 flex items-center gap-1 transition-all"
+                      >
+                        <span>Show less</span>
+                        <RefreshCw className="w-2.5 h-2.5 -rotate-90" />
+                      </button>
+                    )}
+                  </>
+                )}
+              </>
             )}
           </div>
         )}
 
         {message.audioUrl && !isEditing && (
           <div className="mt-2">
-            <VoicePlayer audioUrl={message.audioUrl} theme={channel} autoPlay={autoPlayVoice} />
+            <VoicePlayer
+              audioUrl={message.audioUrl}
+              theme={channel}
+              autoPlay={autoPlayVoice}
+              voiceSpeed={voiceSpeed}
+              onSpeedChange={onVoiceSpeedChange}
+            />
           </div>
         )}
         
@@ -617,6 +664,8 @@ interface GroupedChatMessageListProps {
   onRetryMessage?: (messageId: string) => void;
   searchQuery?: string;
   autoPlayVoice?: boolean;
+  voiceSpeed?: number;
+  onVoiceSpeedChange?: (speed: number) => void;
   isDark?: boolean;
 }
 
@@ -631,12 +680,14 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   onRetryMessage,
   searchQuery = '',
   autoPlayVoice = false,
+  voiceSpeed = 1,
+  onVoiceSpeedChange,
   isDark = true,
 }) => {
   const groups = groupMessagesBySender(messages, 5 * 60 * 1000);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 w-full overflow-x-hidden">
       {groups.map((group) => {
         const isUser = group.role === 'user';
         const hasMultiple = group.messages.length > 1;
@@ -644,19 +695,16 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
         return (
           <div
             key={group.groupId}
-            className={`flex gap-2.5 sm:gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}
+            className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}
           >
-            {/* Assistant Avatar */}
-            {!isUser && (
-              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-gradient-to-tr from-amber-500 to-indigo-600 flex items-center justify-center text-white font-bold text-xs shadow-sm shrink-0 mt-0.5">
-                <Brain className="w-3.5 h-3.5 text-white" />
-              </div>
-            )}
-
             <div
-              className={`max-w-[88%] md:max-w-[82%] flex flex-col ${
-                isUser ? 'items-end' : 'items-start'
-              }`}
+              className={`${
+                isUser 
+                  ? 'max-w-[92%] md:max-w-[85%] items-end' 
+                  : channel === 'web' 
+                    ? 'max-w-full items-start' 
+                    : 'max-w-[92%] md:max-w-[85%] items-start'
+              } flex flex-col w-full`}
             >
               {/* Stacked Group Messages */}
               <div className="w-full space-y-1">
@@ -676,18 +724,13 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
                     hasMultipleInGroup={hasMultiple}
                     searchQuery={searchQuery}
                     autoPlayVoice={autoPlayVoice}
+                    voiceSpeed={voiceSpeed}
+                    onVoiceSpeedChange={onVoiceSpeedChange}
                     isDark={isDark}
                   />
                 ))}
               </div>
             </div>
-
-            {/* User Avatar - subtle indicator */}
-            {isUser && (
-              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg border flex items-center justify-center font-bold text-xs shrink-0 bg-slate-800 text-slate-200 border-slate-700 shrink-0 mt-0.5">
-                {(displayName.trim() || 'O').charAt(0).toUpperCase()}
-              </div>
-            )}
           </div>
         );
       })}

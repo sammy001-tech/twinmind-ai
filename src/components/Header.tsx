@@ -116,7 +116,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={onOpenThreadDrawer}
-              className="w-9 h-9 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-900/90 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200/80 dark:border-slate-800/80 transition-all flex items-center justify-center shadow-xs active:scale-95"
+              className="w-9 h-9 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-900/90 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200/80 dark:border-slate-800/80 transition-all flex items-center justify-center shadow-xs active:scale-95 lg:hidden"
               title="Open conversation history drawer"
             >
               <Menu className="w-4 h-4" />
@@ -158,7 +158,7 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     <div className="flex items-center gap-2">
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Gemini 2.5 Flash</span>
+                      <span>Google Gemini</span>
                     </div>
                     {activeProvider === 'gemini' && <Check className="w-3.5 h-3.5 text-amber-400" />}
                   </button>
@@ -177,7 +177,7 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     <div className="flex items-center gap-2">
                       <Cpu className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Groq Llama 3.3</span>
+                      <span>Groq LPUs</span>
                     </div>
                     {activeProvider === 'groq' && <Check className="w-3.5 h-3.5 text-amber-400" />}
                   </button>
@@ -196,7 +196,7 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     <div className="flex items-center gap-2">
                       <Brain className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Mistral Large</span>
+                      <span>Mistral AI</span>
                     </div>
                     {activeProvider === 'mistral' && <Check className="w-3.5 h-3.5 text-amber-400" />}
                   </button>

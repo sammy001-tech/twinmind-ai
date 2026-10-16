@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { neonDb } from './neonService.ts';
+import { modelCatalogService } from '../services/modelCatalogService.ts';
 
 export interface KnowledgeDoc {
   id: string | number;
@@ -42,8 +43,9 @@ class KnowledgeService {
 
     try {
       const ai = this.getAiClient();
+      const model = await modelCatalogService.resolveSpecializedModel('embedding');
       const res = await ai.models.embedContent({
-        model: 'gemini-embedding-001',
+        model,
         contents: text.slice(0, 8000),
         config: { outputDimensionality: 768 },
       });
@@ -211,7 +213,7 @@ class KnowledgeService {
       neonConnected: dbStatus.connected,
       pgvectorActive: dbStats.pgvectorActive,
       dimension: 768,
-      model: 'gemini-embedding-001',
+      model: await modelCatalogService.resolveSpecializedModel('embedding'),
     };
   }
 }

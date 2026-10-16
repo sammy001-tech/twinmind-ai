@@ -3,23 +3,13 @@ import { useState, useEffect } from 'react';
 export type ThemeMode = 'dark' | 'light' | 'system';
 
 export function useTheme() {
-  const [themeMode, setThemeModeState] = useState<ThemeMode>(() => {
-    const saved = localStorage.getItem('twin_theme') as ThemeMode | null;
-    if (saved === 'dark' || saved === 'light' || saved === 'system') {
-      return saved;
-    }
-    // Default to 'system' so it dynamically follows the user's OS preference (light or dark)
-    return 'system';
-  });
+  const [themeMode, setThemeModeState] = useState<ThemeMode>('system');
 
   const [effectiveTheme, setEffectiveTheme] = useState<'dark' | 'light'>(() => {
     if (typeof document !== 'undefined') {
       if (document.documentElement.classList.contains('light')) return 'light';
       if (document.documentElement.classList.contains('dark')) return 'dark';
     }
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('twin_theme') : null;
-    if (saved === 'light') return 'light';
-    if (saved === 'dark') return 'dark';
     if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
       return 'dark';
     }
@@ -61,7 +51,6 @@ export function useTheme() {
 
   const setThemeMode = (mode: ThemeMode) => {
     setThemeModeState(mode);
-    localStorage.setItem('twin_theme', mode);
   };
 
   return {

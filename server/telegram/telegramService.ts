@@ -8,6 +8,7 @@ import { settingsManager } from '../db/settingsService.ts';
 import { knowledgeService } from '../db/knowledgeService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
+import { modelCatalogService } from '../services/modelCatalogService.ts';
 
 export interface TelegramConfig {
   token: string;
@@ -1337,8 +1338,9 @@ class TelegramBotManager {
         .replace(/[*_#>-]/g, ' ')
         .slice(0, 1000);
 
+      const model = await modelCatalogService.resolveSpecializedModel('tts');
       const response = await this.ai.models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
+        model,
         contents: [{ role: 'user', parts: [{ text: cleanText }] }],
         config: {
           responseModalities: ['AUDIO'],

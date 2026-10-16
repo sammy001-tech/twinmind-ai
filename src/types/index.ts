@@ -128,6 +128,14 @@ export interface PromptTemplate {
   desc?: string;
 }
 
+export interface KeyTestResult {
+  status: 'idle' | 'testing' | 'success' | 'error';
+  message?: string;
+  testedAt?: string;
+}
+
+export type KeyTestStatusMap = Record<string, KeyTestResult>;
+
 export interface AppSettings {
   brandName?: string;
   activeProvider: 'gemini' | 'groq' | 'mistral';
@@ -155,4 +163,7 @@ export interface AppSettings {
   enableWhatsAppAlerts?: boolean;
   enforceTwilioSignature?: boolean;
   proactiveAlertChannel?: 'whatsapp' | 'telegram' | 'none';
+  keyTestStatuses?: KeyTestStatusMap;
+  themeMode?: 'dark' | 'light' | 'system';
 }
+

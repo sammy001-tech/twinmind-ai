@@ -5,19 +5,19 @@ export const renderInlineMarkdown = (str: string): React.ReactNode => {
   const parts = str.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`)/g);
   return parts.map((part, i) => {
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={i} className="font-semibold text-slate-900 dark:text-white">{part.slice(2, -2)}</strong>;
+      return <strong key={i} className="font-semibold text-slate-900 dark:text-white break-words">{part.slice(2, -2)}</strong>;
     }
     if (part.startsWith('*') && part.endsWith('*')) {
-      return <em key={i} className="italic text-slate-800 dark:text-slate-200">{part.slice(1, -1)}</em>;
+      return <em key={i} className="italic text-slate-800 dark:text-slate-200 break-words">{part.slice(1, -1)}</em>;
     }
     if (part.startsWith('`') && part.endsWith('`')) {
       return (
-        <code key={i} className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-black/30 font-mono text-xs text-amber-700 dark:text-amber-300">
+        <code key={i} className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-black/30 font-mono text-xs text-amber-700 dark:text-amber-300 break-all whitespace-pre-wrap">
           {part.slice(1, -1)}
         </code>
       );
     }
-    return part;
+    return <span key={i} className="break-words">{part}</span>;
   });
 };
 
@@ -62,7 +62,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
               {lang}
             </div>
           )}
-          <pre className="p-3 overflow-x-auto text-slate-800 dark:text-amber-200/90 leading-relaxed font-mono text-[12px]">
+          <pre className="p-3 whitespace-pre-wrap break-all text-slate-800 dark:text-amber-200/90 leading-relaxed font-mono text-[12px]">
             <code>{codeLines.join('\n')}</code>
           </pre>
         </div>
@@ -161,7 +161,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     // 3. Headings
     if (trimmed.startsWith('### ')) {
       elements.push(
-        <h4 key={`h4-${i}`} className="text-xs sm:text-sm font-bold text-amber-600 dark:text-amber-300 mt-2.5 mb-1 tracking-wide">
+        <h4 key={`h4-${i}`} className="text-xs sm:text-sm font-bold text-amber-600 dark:text-amber-300 mt-2.5 mb-1 tracking-wide break-words">
           {renderInlineMarkdown(trimmed.slice(4))}
         </h4>
       );
@@ -170,7 +170,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     }
     if (trimmed.startsWith('## ')) {
       elements.push(
-        <h3 key={`h3-${i}`} className="text-sm sm:text-base font-bold text-slate-900 dark:text-white mt-3 mb-1.5 tracking-tight border-b border-slate-200 dark:border-slate-800 pb-1">
+        <h3 key={`h3-${i}`} className="text-sm sm:text-base font-bold text-slate-900 dark:text-white mt-3 mb-1.5 tracking-tight border-b border-slate-200 dark:border-slate-800 pb-1 break-words">
           {renderInlineMarkdown(trimmed.slice(3))}
         </h3>
       );
@@ -179,7 +179,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     }
     if (trimmed.startsWith('# ')) {
       elements.push(
-        <h2 key={`h2-${i}`} className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mt-3.5 mb-1.5 tracking-tight">
+        <h2 key={`h2-${i}`} className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mt-3.5 mb-1.5 tracking-tight break-words">
           {renderInlineMarkdown(trimmed.slice(2))}
         </h2>
       );
@@ -190,7 +190,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     // 4. Bullet list items
     if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
       elements.push(
-        <li key={`li-${i}`} className="ml-4 list-disc my-0.5 leading-relaxed text-inherit">
+        <li key={`li-${i}`} className="ml-4 list-disc my-0.5 leading-relaxed text-inherit break-words">
           {renderInlineMarkdown(trimmed.slice(2))}
         </li>
       );
@@ -201,7 +201,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     // 5. Numbered list items
     if (/^\d+\.\s/.test(trimmed)) {
       elements.push(
-        <li key={`ol-${i}`} className="ml-4 list-decimal my-0.5 leading-relaxed text-inherit">
+        <li key={`ol-${i}`} className="ml-4 list-decimal my-0.5 leading-relaxed text-inherit break-words">
           {renderInlineMarkdown(trimmed.replace(/^\d+\.\s/, ''))}
         </li>
       );
@@ -218,7 +218,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
 
     // 7. Normal paragraphs
     elements.push(
-      <p key={`p-${i}`} className="my-1 leading-relaxed text-inherit">
+      <p key={`p-${i}`} className="my-1 leading-relaxed text-inherit break-words">
         {renderInlineMarkdown(line)}
       </p>
     );

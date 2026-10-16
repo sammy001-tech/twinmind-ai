@@ -118,11 +118,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [geminiKeyInput, setGeminiKeyInput] = useState(customGeminiKey);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [groqKeyInput, setGroqKeyInput] = useState(customGroqKey);
+  const [showGroqKey, setShowGroqKey] = useState(false);
   const [mistralKeyInput, setMistralKeyInput] = useState(customMistralKey);
+  const [showMistralKey, setShowMistralKey] = useState(false);
   const [tavilyKeyInput, setTavilyKeyInput] = useState(customTavilyKey);
   const [showTavilyKey, setShowTavilyKey] = useState(false);
+  const [showTwilioSid, setShowTwilioSid] = useState(false);
   const [isTestingTavily, setIsTestingTavily] = useState(false);
   const [tavilyFeedback, setTavilyFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Dynamic Key Test Status State (dynamically loaded and persisted via Neon DB /api/settings)
+  const [keyTestMap, setKeyTestMap] = useState<Record<string, {
+    status: 'idle' | 'testing' | 'success' | 'error';
+    message: string;
+    testedAt: string;
+  }>>({});
+
+  const updateKeyTestStatus = (keyId: string, result: {
+    status: 'idle' | 'testing' | 'success' | 'error';
+    message: string;
+    testedAt: string;
+  }) => {
+    setKeyTestMap((prev) => {
+      const next = { ...prev, [keyId]: result };
+      fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyTestStatuses: next }),
+      }).catch((err) => {
+        console.warn('Failed to sync key test status to database:', err);
+      });
+      return next;
+    });
+  };
+
   const [tavilyStatus, setTavilyStatus] = useState<{
     configured: boolean;
     source: string;
@@ -134,6 +163,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     groq: boolean;
     mistral: boolean;
   }>({ gemini: true, groq: false, mistral: false });
+
 
   // Neon PostgreSQL Database State
   const [dbStatus, setDbStatus] = useState<{
@@ -212,6 +242,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           setEnforceTwilioSignature(data.settings.enforceTwilioSignature !== false);
           setTwilioTokenConfigured(Boolean(data.settings.twilioTokenConfigured));
           setProactiveAlertChannel(data.settings.proactiveAlertChannel || 'whatsapp');
+          if (data.settings.keyTestStatuses && typeof data.settings.keyTestStatuses === 'object') {
+            setKeyTestMap(data.settings.keyTestStatuses);
+          }
         }
       }
     } catch (err) {
@@ -222,23 +255,60 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleRunTwilioDiagnostic = async () => {
     setIsTestingTwilio(true);
     setTwilioFeedback(null);
+    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    updateKeyTestStatus('twilio', {
+      status: 'testing',
+      message: 'Running 3-stage Twilio WhatsApp diagnostic...',
+      testedAt: nowTime,
+    });
     try {
       const res = await fetch('/api/twilio/test');
       const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (data.success && data.diagnostic) {
         setTwilioDiagnostic(data.diagnostic);
         if (data.diagnostic.stage3DeliverySuccess) {
-          setTwilioFeedback({ type: 'success', text: 'All 3 Diagnostic Stages Passed! WhatsApp connection fully verified.' });
+          const msg = 'All 3 Diagnostic Stages Passed! WhatsApp connection fully verified.';
+          setTwilioFeedback({ type: 'success', text: msg });
+          updateKeyTestStatus('twilio', {
+            status: 'success',
+            message: msg,
+            testedAt: timeStr,
+          });
         } else if (data.diagnostic.stage2AuthSuccess) {
-          setTwilioFeedback({ type: 'success', text: `Stage 2 Verified (Account: ${data.diagnostic.details.accountName}). Add target User Phone Number to test outbound delivery.` });
+          const msg = `Stage 2 Verified (Account: ${data.diagnostic.details.accountName}). Outbound ready.`;
+          setTwilioFeedback({ type: 'success', text: msg });
+          updateKeyTestStatus('twilio', {
+            status: 'success',
+            message: msg,
+            testedAt: timeStr,
+          });
         } else {
-          setTwilioFeedback({ type: 'error', text: data.diagnostic.details.error || 'Twilio verification failed.' });
+          const msg = data.diagnostic.details.error || 'Twilio verification failed.';
+          setTwilioFeedback({ type: 'error', text: msg });
+          updateKeyTestStatus('twilio', {
+            status: 'error',
+            message: msg,
+            testedAt: timeStr,
+          });
         }
       } else {
-        setTwilioFeedback({ type: 'error', text: data.error || 'Diagnostic check failed.' });
+        const msg = data.error || 'Diagnostic check failed.';
+        setTwilioFeedback({ type: 'error', text: msg });
+        updateKeyTestStatus('twilio', {
+          status: 'error',
+          message: msg,
+          testedAt: timeStr,
+        });
       }
     } catch (err: unknown) {
-      setTwilioFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Diagnostic network error' });
+      const msg = err instanceof Error ? err.message : 'Diagnostic network error';
+      setTwilioFeedback({ type: 'error', text: msg });
+      updateKeyTestStatus('twilio', {
+        status: 'error',
+        message: msg,
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
     } finally {
       setIsTestingTwilio(false);
     }
@@ -303,10 +373,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     const tokenToTest = tgTokenInput.trim();
     if (!tokenToTest) {
       setTgFeedback({ type: 'error', text: 'Please enter a Telegram bot token to test.' });
+      updateKeyTestStatus('telegram', {
+        status: 'error',
+        message: 'Please enter a Telegram bot token to test.',
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
       return;
     }
     setIsTestingTgToken(true);
     setTgFeedback(null);
+    updateKeyTestStatus('telegram', {
+      status: 'testing',
+      message: 'Connecting to Telegram Bot API (@BotFather)...',
+      testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
     try {
       const res = await fetch('/api/telegram/test-token', {
         method: 'POST',
@@ -314,16 +394,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         body: JSON.stringify({ token: tokenToTest }),
       });
       const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (data.ok) {
+        const msg = `Verified: @${data.botInfo?.username} (${data.botInfo?.first_name || 'Bot'})`;
         setTgFeedback({
           type: 'success',
-          text: `Verified: @${data.botInfo?.username} (${data.botInfo?.first_name || 'Bot'})`,
+          text: msg,
+        });
+        updateKeyTestStatus('telegram', {
+          status: 'success',
+          message: msg,
+          testedAt: timeStr,
         });
       } else {
-        setTgFeedback({ type: 'error', text: data.error || 'Token test failed.' });
+        const msg = data.error || 'Token test failed.';
+        setTgFeedback({ type: 'error', text: msg });
+        updateKeyTestStatus('telegram', {
+          status: 'error',
+          message: msg,
+          testedAt: timeStr,
+        });
       }
     } catch (err: unknown) {
-      setTgFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Network error testing token' });
+      const msg = err instanceof Error ? err.message : 'Network error testing token';
+      setTgFeedback({ type: 'error', text: msg });
+      updateKeyTestStatus('telegram', {
+        status: 'error',
+        message: msg,
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
     } finally {
       setIsTestingTgToken(false);
     }
@@ -403,11 +502,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleTestTavily = async () => {
     const keyToTest = tavilyKeyInput.trim() || customTavilyKey;
     if (!keyToTest) {
-      setTavilyFeedback({ type: 'error', text: 'Please enter a Tavily API key first (e.g. tvly-...).' });
+      const msg = 'Please enter a Tavily API key first (e.g. tvly-...).';
+      setTavilyFeedback({ type: 'error', text: msg });
+      updateKeyTestStatus('tavily', {
+        status: 'error',
+        message: msg,
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
       return;
     }
     setIsTestingTavily(true);
     setTavilyFeedback(null);
+    updateKeyTestStatus('tavily', {
+      status: 'testing',
+      message: 'Connecting to Tavily AI Search API...',
+      testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
     try {
       const res = await fetch('/api/tavily/test', {
         method: 'POST',
@@ -415,15 +525,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         body: JSON.stringify({ apiKey: keyToTest }),
       });
       const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (data.success) {
         setTavilyFeedback({ type: 'success', text: data.message });
+        updateKeyTestStatus('tavily', {
+          status: 'success',
+          message: data.message,
+          testedAt: timeStr,
+        });
       } else {
-        setTavilyFeedback({ type: 'error', text: data.error || 'Verification failed.' });
+        const msg = data.error || 'Verification failed.';
+        setTavilyFeedback({ type: 'error', text: msg });
+        updateKeyTestStatus('tavily', {
+          status: 'error',
+          message: msg,
+          testedAt: timeStr,
+        });
       }
     } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network test error';
       setTavilyFeedback({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Network test error',
+        text: msg,
+      });
+      updateKeyTestStatus('tavily', {
+        status: 'error',
+        message: msg,
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       });
     } finally {
       setIsTestingTavily(false);
@@ -464,11 +592,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const handleTestDb = async () => {
     if (!dbUrlInput.trim()) {
-      setDbFeedback({ type: 'error', text: 'Please enter a PostgreSQL connection string first.' });
+      const msg = 'Please enter a PostgreSQL connection string first.';
+      setDbFeedback({ type: 'error', text: msg });
+      updateKeyTestStatus('neon_db', {
+        status: 'error',
+        message: msg,
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
       return;
     }
     setIsTestingDb(true);
     setDbFeedback(null);
+    updateKeyTestStatus('neon_db', {
+      status: 'testing',
+      message: 'Connecting to Neon PostgreSQL serverless database...',
+      testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
     try {
       const res = await fetch('/api/db/test', {
         method: 'POST',
@@ -476,15 +615,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         body: JSON.stringify({ databaseUrl: dbUrlInput.trim() }),
       });
       const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (data.success) {
         setDbFeedback({ type: 'success', text: data.message });
+        updateKeyTestStatus('neon_db', {
+          status: 'success',
+          message: data.message,
+          testedAt: timeStr,
+        });
       } else {
-        setDbFeedback({ type: 'error', text: data.message });
+        const msg = data.message || 'Database test failed.';
+        setDbFeedback({ type: 'error', text: msg });
+        updateKeyTestStatus('neon_db', {
+          status: 'error',
+          message: msg,
+          testedAt: timeStr,
+        });
       }
     } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network test error';
       setDbFeedback({
         type: 'error',
-        text: err instanceof Error ? err.message : 'Network test error',
+        text: msg,
+      });
+      updateKeyTestStatus('neon_db', {
+        status: 'error',
+        message: msg,
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       });
     } finally {
       setIsTestingDb(false);
@@ -654,7 +811,196 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     loadAllModels();
   };
 
+  const handleTestGemini = async () => {
+    const keyToTest = geminiKeyInput.trim() || customGeminiKey;
+    updateKeyTestStatus('gemini', {
+      status: 'testing',
+      message: 'Connecting to Google GenAI with Gemini API key...',
+      testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+    try {
+      const res = await fetch('/api/keys/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'gemini', apiKey: keyToTest }),
+      });
+      const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (res.ok && data.success) {
+        updateKeyTestStatus('gemini', {
+          status: 'success',
+          message: data.message || 'Gemini API key verified successfully! Connected to Google GenAI.',
+          testedAt: timeStr,
+        });
+        setFeedbackToast('Gemini API key verified successfully');
+        setTimeout(() => setFeedbackToast(null), 3000);
+      } else {
+        updateKeyTestStatus('gemini', {
+          status: 'error',
+          message: data.error || 'Gemini API authentication failed.',
+          testedAt: timeStr,
+        });
+      }
+    } catch (err: unknown) {
+      updateKeyTestStatus('gemini', {
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Network error testing Gemini key',
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+    }
+  };
+
+  const handleTestGroq = async () => {
+    const keyToTest = groqKeyInput.trim() || customGroqKey;
+    if (!keyToTest) {
+      updateKeyTestStatus('groq', {
+        status: 'error',
+        message: 'Please enter a Groq API key to test (starting with gsk_).',
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      return;
+    }
+    updateKeyTestStatus('groq', {
+      status: 'testing',
+      message: 'Connecting to Groq API endpoint...',
+      testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+    try {
+      const res = await fetch('/api/keys/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'groq', apiKey: keyToTest }),
+      });
+      const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (res.ok && data.success) {
+        updateKeyTestStatus('groq', {
+          status: 'success',
+          message: data.message || 'Groq API key verified! Access confirmed.',
+          testedAt: timeStr,
+        });
+        setFeedbackToast('Groq API key verified successfully');
+        setTimeout(() => setFeedbackToast(null), 3000);
+      } else {
+        updateKeyTestStatus('groq', {
+          status: 'error',
+          message: data.error || 'Groq API verification failed.',
+          testedAt: timeStr,
+        });
+      }
+    } catch (err: unknown) {
+      updateKeyTestStatus('groq', {
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Network error testing Groq key',
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+    }
+  };
+
+  const handleTestMistral = async () => {
+    const keyToTest = mistralKeyInput.trim() || customMistralKey;
+    if (!keyToTest) {
+      updateKeyTestStatus('mistral', {
+        status: 'error',
+        message: 'Please enter a Mistral API key to test.',
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      return;
+    }
+    updateKeyTestStatus('mistral', {
+      status: 'testing',
+      message: 'Connecting to Mistral AI endpoint...',
+      testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    });
+    try {
+      const res = await fetch('/api/keys/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'mistral', apiKey: keyToTest }),
+      });
+      const data = await res.json();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      if (res.ok && data.success) {
+        updateKeyTestStatus('mistral', {
+          status: 'success',
+          message: data.message || 'Mistral API key verified! Access confirmed.',
+          testedAt: timeStr,
+        });
+        setFeedbackToast('Mistral API key verified successfully');
+        setTimeout(() => setFeedbackToast(null), 3000);
+      } else {
+        updateKeyTestStatus('mistral', {
+          status: 'error',
+          message: data.error || 'Mistral API verification failed.',
+          testedAt: timeStr,
+        });
+      }
+    } catch (err: unknown) {
+      updateKeyTestStatus('mistral', {
+        status: 'error',
+        message: err instanceof Error ? err.message : 'Network error testing Mistral key',
+        testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+    }
+  };
+
+  const renderKeyStatusBadge = (keyId: string, customTesting?: boolean) => {
+    const item = keyTestMap[keyId];
+    const isTesting = customTesting || item?.status === 'testing';
+
+    if (isTesting) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+          <RefreshCw className="w-3 h-3 animate-spin text-amber-500" />
+          <span>Testing...</span>
+        </span>
+      );
+    }
+
+    if (item?.status === 'success') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
+          <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
+          <span>Verified{item.testedAt ? ` · ${item.testedAt}` : ''}</span>
+        </span>
+      );
+    }
+
+    if (item?.status === 'error') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30">
+          <AlertCircle className="w-3 h-3 text-rose-600 dark:text-rose-400 shrink-0" />
+          <span>Failed{item.testedAt ? ` · ${item.testedAt}` : ''}</span>
+        </span>
+      );
+    }
+
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-medium bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
+        <Key className="w-3 h-3 text-slate-400" />
+        <span>Untested</span>
+      </span>
+    );
+  };
+
+  const renderKeyTestButtonIcon = (keyId: string, customTesting?: boolean) => {
+    const item = keyTestMap[keyId];
+    const isTesting = customTesting || item?.status === 'testing';
+
+    if (isTesting) {
+      return <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-500" />;
+    }
+    if (item?.status === 'success') {
+      return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />;
+    }
+    if (item?.status === 'error') {
+      return <AlertCircle className="w-3.5 h-3.5 text-rose-500" />;
+    }
+    return <Zap className="w-3.5 h-3.5 text-slate-400" />;
+  };
+
   const currentModelsList = modelsByProvider[selectedProviderTab] || [];
+
   const filteredModels = currentModelsList.filter(
     (m) =>
       m.id.toLowerCase().includes(searchFilter.toLowerCase()) ||
@@ -1221,63 +1567,237 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         </div>
 
         {/* Provider API Credentials */}
-        <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3">
-          <div className="flex items-center gap-2">
-            <Key className="w-4 h-4 text-amber-500 dark:text-amber-400" />
-            <h3 className="text-xs font-semibold text-slate-900 dark:text-white">
-              API Keys (Gemini / Groq / Mistral)
-            </h3>
+        <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Key className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+              <h3 className="text-xs font-semibold text-slate-900 dark:text-white">
+                API Credentials (Gemini / Groq / Mistral)
+              </h3>
+            </div>
+            <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
+              Zero-Fallback Live Verified
+            </span>
           </div>
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Configure your custom Gemini API key (or use AI Studio pre-configured key), along with optional Groq or Mistral API keys.
+            Configure your custom Gemini API key (or use AI Studio pre-configured key), along with optional Groq or Mistral API keys. Click <strong>Test Connection</strong> to verify live authentication; verified status persists across page refreshes.
           </p>
 
-          <form onSubmit={handleSaveKeys} className="space-y-2.5">
-            <div>
-              <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Gemini API Key (Optional Override)
-              </label>
-              <input
-                type="password"
-                value={geminiKeyInput}
-                onChange={(e) => setGeminiKeyInput(e.target.value)}
-                placeholder="AIzaSy..."
-                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
-              />
+          <form onSubmit={handleSaveKeys} className="space-y-4">
+            {/* Gemini Key */}
+            <div className="p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <span>Google Gemini API Key (Core Brain)</span>
+                  <span className="text-[10px] text-slate-400">(Optional override)</span>
+                </label>
+                {renderKeyStatusBadge("gemini")}
+              </div>
+
+              <div className="relative">
+                <input
+                  type={showGeminiKey ? "text" : "password"}
+                  value={geminiKeyInput}
+                  onChange={(e) => setGeminiKeyInput(e.target.value)}
+                  placeholder="AQ... or AIzaSy..."
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGeminiKey(!showGeminiKey)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                  title={showGeminiKey ? "Hide key" : "Show key"}
+                >
+                  {showGeminiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+
+              {keyTestMap["gemini"]?.message && (
+                <div
+                  className={`p-2 rounded-lg text-xs flex items-start gap-2 ${
+                    keyTestMap["gemini"].status === "success"
+                      ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300"
+                      : keyTestMap["gemini"].status === "error"
+                      ? "bg-rose-500/10 border border-rose-500/30 text-rose-800 dark:text-rose-300"
+                      : "bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300"
+                  }`}
+                >
+                  {keyTestMap["gemini"].status === "success" ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                  ) : keyTestMap["gemini"].status === "error" ? (
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 animate-spin shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="leading-snug">{keyTestMap["gemini"].message}</p>
+                    {keyTestMap["gemini"].testedAt && (
+                      <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                        Verified at: {keyTestMap["gemini"].testedAt}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end pt-0.5">
+                <button
+                  type="button"
+                  onClick={handleTestGemini}
+                  disabled={keyTestMap["gemini"]?.status === "testing"}
+                  className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {renderKeyTestButtonIcon("gemini")}
+                  <span>{keyTestMap["gemini"]?.status === "testing" ? "Testing Key..." : "Test Connection"}</span>
+                </button>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Groq API Key (Optional)
-              </label>
-              <input
-                type="password"
-                value={groqKeyInput}
-                onChange={(e) => setGroqKeyInput(e.target.value)}
-                placeholder="gsk_..."
-                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
-              />
+            {/* Groq Key */}
+            <div className="p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <span>Groq API Key (Fast Reflex LPUs)</span>
+                  <span className="text-[10px] text-slate-400">(Optional)</span>
+                </label>
+                {renderKeyStatusBadge("groq")}
+              </div>
+
+              <div className="relative">
+                <input
+                  type={showGroqKey ? "text" : "password"}
+                  value={groqKeyInput}
+                  onChange={(e) => setGroqKeyInput(e.target.value)}
+                  placeholder="gsk_..."
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGroqKey(!showGroqKey)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                  title={showGroqKey ? "Hide key" : "Show key"}
+                >
+                  {showGroqKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+
+              {keyTestMap["groq"]?.message && (
+                <div
+                  className={`p-2 rounded-lg text-xs flex items-start gap-2 ${
+                    keyTestMap["groq"].status === "success"
+                      ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300"
+                      : keyTestMap["groq"].status === "error"
+                      ? "bg-rose-500/10 border border-rose-500/30 text-rose-800 dark:text-rose-300"
+                      : "bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300"
+                  }`}
+                >
+                  {keyTestMap["groq"].status === "success" ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                  ) : keyTestMap["groq"].status === "error" ? (
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 animate-spin shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="leading-snug">{keyTestMap["groq"].message}</p>
+                    {keyTestMap["groq"].testedAt && (
+                      <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                        Verified at: {keyTestMap["groq"].testedAt}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end pt-0.5">
+                <button
+                  type="button"
+                  onClick={handleTestGroq}
+                  disabled={keyTestMap["groq"]?.status === "testing"}
+                  className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {renderKeyTestButtonIcon("groq")}
+                  <span>{keyTestMap["groq"]?.status === "testing" ? "Testing Key..." : "Test Connection"}</span>
+                </button>
+              </div>
             </div>
 
-            <div>
-              <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Mistral API Key (Optional)
-              </label>
-              <input
-                type="password"
-                value={mistralKeyInput}
-                onChange={(e) => setMistralKeyInput(e.target.value)}
-                placeholder="mis_..."
-                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
-              />
+            {/* Mistral Key */}
+            <div className="p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <span>Mistral API Key (Challenger &amp; Debates)</span>
+                  <span className="text-[10px] text-slate-400">(Optional)</span>
+                </label>
+                {renderKeyStatusBadge("mistral")}
+              </div>
+
+              <div className="relative">
+                <input
+                  type={showMistralKey ? "text" : "password"}
+                  value={mistralKeyInput}
+                  onChange={(e) => setMistralKeyInput(e.target.value)}
+                  placeholder="mis_..."
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowMistralKey(!showMistralKey)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                  title={showMistralKey ? "Hide key" : "Show key"}
+                >
+                  {showMistralKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+
+              {keyTestMap["mistral"]?.message && (
+                <div
+                  className={`p-2 rounded-lg text-xs flex items-start gap-2 ${
+                    keyTestMap["mistral"].status === "success"
+                      ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300"
+                      : keyTestMap["mistral"].status === "error"
+                      ? "bg-rose-500/10 border border-rose-500/30 text-rose-800 dark:text-rose-300"
+                      : "bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-300"
+                  }`}
+                >
+                  {keyTestMap["mistral"].status === "success" ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                  ) : keyTestMap["mistral"].status === "error" ? (
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                  ) : (
+                    <RefreshCw className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 animate-spin shrink-0 mt-0.5" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="leading-snug">{keyTestMap["mistral"].message}</p>
+                    {keyTestMap["mistral"].testedAt && (
+                      <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                        Verified at: {keyTestMap["mistral"].testedAt}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex justify-end pt-0.5">
+                <button
+                  type="button"
+                  onClick={handleTestMistral}
+                  disabled={keyTestMap["mistral"]?.status === "testing"}
+                  className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {renderKeyTestButtonIcon("mistral")}
+                  <span>{keyTestMap["mistral"]?.status === "testing" ? "Testing Key..." : "Test Connection"}</span>
+                </button>
+              </div>
             </div>
 
-            <div className="flex justify-end pt-1">
+            <div className="flex justify-end pt-2">
               <button
                 type="submit"
-                className="px-4 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-amber-300 text-xs font-semibold border border-slate-300 dark:border-slate-700 transition"
+                className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-xs flex items-center gap-1.5"
               >
-                Save API Keys &amp; Refresh
+                <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>Save API Keys &amp; Refresh</span>
               </button>
             </div>
           </form>
@@ -1292,15 +1812,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 Tavily AI Real-Time Search &amp; Web Scraper
               </h3>
             </div>
-            <span
-              className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium ${
-                tavilyStatus?.configured || customTavilyKey || tavilyKeyInput
-                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30'
-                  : 'bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30'
-              }`}
-            >
-              {tavilyStatus?.configured || customTavilyKey || tavilyKeyInput ? 'Ready & Active' : 'Key Needed'}
-            </span>
+            {renderKeyStatusBadge("tavily", isTestingTavily)}
           </div>
 
           <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
@@ -1340,20 +1852,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
 
-            {tavilyFeedback && (
+            {(tavilyFeedback || keyTestMap["tavily"]?.message) && (
               <div
                 className={`p-2.5 rounded-lg text-xs flex items-start gap-2 ${
-                  tavilyFeedback.type === 'success'
+                  (tavilyFeedback ? tavilyFeedback.type === 'success' : keyTestMap["tavily"]?.status === 'success')
                     ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300'
                     : 'bg-rose-500/10 border border-rose-500/30 text-rose-800 dark:text-rose-300'
                 }`}
               >
-                {tavilyFeedback.type === 'success' ? (
+                {(tavilyFeedback ? tavilyFeedback.type === 'success' : keyTestMap["tavily"]?.status === 'success') ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
                 ) : (
                   <AlertCircle className="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
                 )}
-                <span>{tavilyFeedback.text}</span>
+                <div className="flex-1 min-w-0">
+                  <span className="leading-snug">{tavilyFeedback?.text || keyTestMap["tavily"]?.message}</span>
+                  {keyTestMap["tavily"]?.testedAt && !tavilyFeedback && (
+                    <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                      Last verified at: {keyTestMap["tavily"].testedAt}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1364,8 +1883,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 disabled={isTestingTavily}
                 className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
               >
-                {isTestingTavily && <RefreshCw className="w-3 h-3 animate-spin text-sky-500" />}
-                <span>Test Connection</span>
+                {renderKeyTestButtonIcon("tavily", isTestingTavily)}
+                <span>{isTestingTavily ? "Testing Key..." : "Test Connection"}</span>
               </button>
 
               <button
@@ -1387,16 +1906,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 Database Persistence (Neon PostgreSQL)
               </h3>
             </div>
-            {dbStatus?.connected ? (
-              <span className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
-                Connected ({dbStatus.source === 'environment' ? '.env' : 'Settings'})
-              </span>
-            ) : (
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-300 dark:border-slate-700">
-                Not Configured
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {dbStatus?.connected && (
+                <span className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
+                  Connected ({dbStatus.source === 'environment' ? '.env' : 'Settings'})
+                </span>
+              )}
+              {renderKeyStatusBadge("neon_db", isTestingDb)}
+            </div>
           </div>
 
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
@@ -1419,20 +1937,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {dbFeedback && (
+          {(dbFeedback || keyTestMap["neon_db"]?.message) && (
             <div
-              className={`p-2 rounded-lg text-xs flex items-center gap-2 ${
-                dbFeedback.type === 'success'
+              className={`p-2.5 rounded-lg text-xs flex items-start gap-2 ${
+                (dbFeedback ? dbFeedback.type === 'success' : keyTestMap["neon_db"]?.status === 'success')
                   ? 'bg-emerald-500/10 border border-emerald-500/40 text-emerald-800 dark:text-emerald-300'
                   : 'bg-rose-500/10 border border-rose-500/40 text-rose-800 dark:text-rose-300'
               }`}
             >
-              {dbFeedback.type === 'success' ? (
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              {(dbFeedback ? dbFeedback.type === 'success' : keyTestMap["neon_db"]?.status === 'success') ? (
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
               ) : (
-                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400 mt-0.5" />
               )}
-              <span>{dbFeedback.text}</span>
+              <div className="flex-1 min-w-0">
+                <span className="leading-snug">{dbFeedback?.text || keyTestMap["neon_db"]?.message}</span>
+                {keyTestMap["neon_db"]?.testedAt && !dbFeedback && (
+                  <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                    Last verified at: {keyTestMap["neon_db"].testedAt}
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
@@ -1483,9 +2008,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type="button"
                   onClick={handleTestDb}
                   disabled={isTestingDb || !dbUrlInput.trim()}
-                  className="px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition disabled:opacity-50"
+                  className="px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  {isTestingDb ? 'Testing...' : 'Test Connection'}
+                  {renderKeyTestButtonIcon("neon_db", isTestingDb)}
+                  <span>{isTestingDb ? "Testing..." : "Test Connection"}</span>
                 </button>
                 <button
                   type="submit"
@@ -1542,28 +2068,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {tgFeedback && (
+          {(tgFeedback || keyTestMap["telegram"]?.message) && (
             <div
-              className={`p-2 rounded-lg text-xs flex items-center gap-2 ${
-                tgFeedback.type === 'success'
+              className={`p-2.5 rounded-lg text-xs flex items-start gap-2 ${
+                (tgFeedback ? tgFeedback.type === 'success' : keyTestMap["telegram"]?.status === 'success')
                   ? 'bg-emerald-500/10 border border-emerald-500/40 text-emerald-800 dark:text-emerald-300'
                   : 'bg-rose-500/10 border border-rose-500/40 text-rose-800 dark:text-rose-300'
               }`}
             >
-              {tgFeedback.type === 'success' ? (
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              {(tgFeedback ? tgFeedback.type === 'success' : keyTestMap["telegram"]?.status === 'success') ? (
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
               ) : (
-                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400 mt-0.5" />
               )}
-              <span>{tgFeedback.text}</span>
+              <div className="flex-1 min-w-0">
+                <span className="leading-snug">{tgFeedback?.text || keyTestMap["telegram"]?.message}</span>
+                {keyTestMap["telegram"]?.testedAt && !tgFeedback && (
+                  <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                    Last verified at: {keyTestMap["telegram"].testedAt}
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
           <form onSubmit={handleSaveTelegram} className="space-y-3">
             <div>
-              <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
-                Telegram Bot Token (from @BotFather)
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300">
+                  Telegram Bot Token (from @BotFather)
+                </label>
+                {renderKeyStatusBadge("telegram", isTestingTgToken)}
+              </div>
               <div className="relative">
                 <input
                   type={showTgToken ? 'text' : 'password'}
@@ -1633,9 +2169,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type="button"
                   onClick={handleTestTgToken}
                   disabled={isTestingTgToken || (!tgTokenInput.trim() && !telegramStatus?.hasToken)}
-                  className="px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition disabled:opacity-50"
+                  className="px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  {isTestingTgToken ? 'Testing...' : 'Test Token'}
+                  {renderKeyTestButtonIcon("telegram", isTestingTgToken)}
+                  <span>{isTestingTgToken ? "Testing..." : "Test Token"}</span>
                 </button>
                 <button
                   type="submit"
@@ -1655,6 +2192,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="flex items-center gap-2">
               <Globe className="w-4 h-4 text-emerald-500" />
               <h3 className="text-xs font-semibold text-slate-900 dark:text-white">Twilio WhatsApp Integration</h3>
+              {renderKeyStatusBadge("twilio", isTestingTwilio)}
             </div>
             {twilioTokenConfigured && twilioAccountSid ? (
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold flex items-center gap-1">
@@ -1714,20 +2252,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {twilioFeedback && (
+          {(twilioFeedback || keyTestMap["twilio"]?.message) && (
             <div
-              className={`p-2 rounded-lg text-xs flex items-center gap-2 ${
-                twilioFeedback.type === 'success'
+              className={`p-2.5 rounded-lg text-xs flex items-start gap-2 ${
+                (twilioFeedback ? twilioFeedback.type === 'success' : keyTestMap["twilio"]?.status === 'success')
                   ? 'bg-emerald-500/10 border border-emerald-500/40 text-emerald-800 dark:text-emerald-300'
                   : 'bg-rose-500/10 border border-rose-500/40 text-rose-800 dark:text-rose-300'
               }`}
             >
-              {twilioFeedback.type === 'success' ? (
-                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              {(twilioFeedback ? twilioFeedback.type === 'success' : keyTestMap["twilio"]?.status === 'success') ? (
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400 mt-0.5" />
               ) : (
-                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400 mt-0.5" />
               )}
-              <span>{twilioFeedback.text}</span>
+              <div className="flex-1 min-w-0">
+                <span className="leading-snug">{twilioFeedback?.text || keyTestMap["twilio"]?.message}</span>
+                {keyTestMap["twilio"]?.testedAt && !twilioFeedback && (
+                  <span className="text-[10px] opacity-75 font-mono block mt-0.5">
+                    Last verified at: {keyTestMap["twilio"].testedAt}
+                  </span>
+                )}
+              </div>
             </div>
           )}
 
@@ -1737,13 +2282,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
                   Twilio Account SID
                 </label>
-                <input
-                  type="text"
-                  value={twilioAccountSid}
-                  onChange={(e) => setTwilioAccountSid(e.target.value)}
-                  placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                  className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                />
+                <div className="relative">
+                  <input
+                    type={showTwilioSid ? "text" : "password"}
+                    value={twilioAccountSid}
+                    onChange={(e) => setTwilioAccountSid(e.target.value)}
+                    placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg pl-2.5 pr-9 py-1.5 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowTwilioSid(!showTwilioSid)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 dark:hover:text-slate-300"
+                    title={showTwilioSid ? "Hide SID" : "Show SID"}
+                  >
+                    {showTwilioSid ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
               </div>
 
               <div>
@@ -1845,9 +2400,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 type="button"
                 onClick={handleRunTwilioDiagnostic}
                 disabled={isTestingTwilio}
-                className="px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition disabled:opacity-50"
+                className="px-3 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-medium border border-slate-300 dark:border-slate-700 transition flex items-center gap-1.5 disabled:opacity-50"
               >
-                {isTestingTwilio ? 'Running Diagnostic...' : '3-Stage Diagnostic Test'}
+                {renderKeyTestButtonIcon("twilio", isTestingTwilio)}
+                <span>{isTestingTwilio ? "Running Diagnostic..." : "3-Stage Diagnostic Test"}</span>
               </button>
               <button
                 type="submit"

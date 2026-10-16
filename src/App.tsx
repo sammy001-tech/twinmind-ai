@@ -18,7 +18,7 @@ import { ChatSearchInput } from './components/ChatSearchInput.tsx';
 import { CustomPromptModal } from './components/CustomPromptModal.tsx';
 import { EmptyState } from './components/EmptyState.tsx';
 import { VoiceRecorderModal } from './components/VoiceRecorderModal.tsx';
-import { useTheme } from './hooks/useTheme.ts';
+import { useTheme, ThemeMode } from './hooks/useTheme.ts';
 import {
   Sparkles,
   Target,
@@ -60,50 +60,36 @@ export default function App() {
     fetchPrompts();
   }, [messages.length]);
 
-  // Helper to load cached settings immediately to prevent flash of empty states on reload
-  const getCachedSettings = (): Partial<AppSettings> => {
-    try {
-      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('twin_cached_settings') : null;
-      return raw ? JSON.parse(raw) : {};
-    } catch {
-      return {};
-    }
-  };
-
-  const initialCached = getCachedSettings();
-
   // Multi-Thread Conversations State (Database Persisted)
   const [threads, setThreads] = useState<ChatThread[]>([]);
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(initialCached.activeThreadId || null);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [isThreadDrawerOpen, setIsThreadDrawerOpen] = useState(false);
 
-  // App Brand Name & User Identity (Hydrated immediately from local cache, synced with database)
-  const [brandName, setBrandName] = useState<string>(initialCached.brandName || 'TwinMind AI');
-  const [userName, setUserName] = useState<string>(initialCached.userName || '');
-  const [nickname, setNickname] = useState<string>(initialCached.nickname || '');
+  // App Brand Name & User Identity (Dynamically loaded directly from database)
+  const [brandName, setBrandName] = useState<string>('TwinMind AI');
+  const [userName, setUserName] = useState<string>('');
+  const [nickname, setNickname] = useState<string>('');
 
-  // Multi-Model Brain: Per-provider Model Selection
-  const [activeProvider, setActiveProvider] = useState<string>(initialCached.activeProvider || 'gemini');
+  // Multi-Model Brain: Per-provider Model Selection (Dynamically loaded from database)
+  const [activeProvider, setActiveProvider] = useState<string>('gemini');
 
   const [providerModels, setProviderModels] = useState<{
     gemini: string;
     groq: string;
     mistral: string;
-  }>(
-    initialCached.providerModels || {
-      gemini: 'gemini-1.5-flash',
-      groq: 'llama-3.3-70b-versatile',
-      mistral: 'mistral-large-latest',
-    }
-  );
+  }>({
+    gemini: '',
+    groq: '',
+    mistral: '',
+  });
 
   const activeModel = providerModels[activeProvider as keyof typeof providerModels] || '';
 
-  const [voice, setVoice] = useState<string>(initialCached.voice || 'Zephyr');
-  const [customGeminiKey, setCustomGeminiKey] = useState<string>(initialCached.customGeminiKey || '');
-  const [customGroqKey, setCustomGroqKey] = useState<string>(initialCached.customGroqKey || '');
-  const [customMistralKey, setCustomMistralKey] = useState<string>(initialCached.customMistralKey || '');
-  const [customTavilyKey, setCustomTavilyKey] = useState<string>(initialCached.customTavilyKey || '');
+  const [voice, setVoice] = useState<string>('Fenrir');
+  const [customGeminiKey, setCustomGeminiKey] = useState<string>('');
+  const [customGroqKey, setCustomGroqKey] = useState<string>('');
+  const [customMistralKey, setCustomMistralKey] = useState<string>('');
+  const [customTavilyKey, setCustomTavilyKey] = useState<string>('');
 
   // Theme hook (Dark, Light, System)
   const { themeMode, setThemeMode, isDark } = useTheme();
@@ -165,12 +151,8 @@ export default function App() {
     isPaired: boolean;
   }>({ isRunning: false, hasToken: false, isPaired: false });
 
-  // Synchronize any setting change to server-side twin-settings.json, Neon DB, and localStorage
+  // Synchronize any setting change directly to Neon PostgreSQL database via /api/settings
   const syncSettingsToServer = async (patch: Partial<AppSettings>) => {
-    try {
-      const prev = getCachedSettings();
-      localStorage.setItem('twin_cached_settings', JSON.stringify({ ...prev, ...patch }));
-    } catch {}
     try {
       await fetch('/api/settings', {
         method: 'POST',
@@ -178,12 +160,25 @@ export default function App() {
         body: JSON.stringify(patch),
       });
     } catch (err) {
-      console.warn('Failed to sync settings to server:', err);
+      console.warn('Failed to sync settings to database:', err);
     }
   };
 
-  // Load server-persisted unified settings on mount (zero loss on restart, strictly Database)
+  const handleThemeModeChange = (mode: ThemeMode) => {
+    setThemeMode(mode);
+    syncSettingsToServer({ themeMode: mode });
+  };
+
+  // Load server-persisted unified settings dynamically from Database on mount (no stale local storage)
   useEffect(() => {
+    // Proactively purge any legacy stale local storage
+    try {
+      localStorage.removeItem('twin_cached_settings');
+      localStorage.removeItem('twinmind_key_test_statuses_v2');
+      localStorage.removeItem('twin_voice_speed');
+      localStorage.removeItem('twin_theme');
+    } catch {}
+
     const loadSettings = async () => {
       try {
         const res = await fetch('/api/settings');
@@ -191,9 +186,6 @@ export default function App() {
           const data = await res.json();
           if (data.settings) {
             const s: AppSettings = data.settings;
-            try {
-              localStorage.setItem('twin_cached_settings', JSON.stringify(s));
-            } catch {}
             if (s.brandName) setBrandName(s.brandName);
             if (s.userName !== undefined) setUserName(s.userName);
             if (s.nickname !== undefined) setNickname(s.nickname);
@@ -208,10 +200,11 @@ export default function App() {
             if (s.voiceSpeed !== undefined) setVoiceSpeed(Number(s.voiceSpeed));
             if (s.customPrompts && Array.isArray(s.customPrompts)) setCustomPrompts(s.customPrompts);
             if (s.activeThreadId) setActiveThreadId(s.activeThreadId);
+            if (s.themeMode) setThemeMode(s.themeMode);
           }
         }
       } catch (err) {
-        console.warn('Could not load unified settings from server:', err);
+        console.warn('Could not dynamically load unified settings from database:', err);
       }
     };
 
@@ -324,6 +317,19 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to delete thread:', err);
+    }
+  };
+
+  const handleClearAllThreads = async () => {
+    try {
+      const res = await fetch('/api/threads', { method: 'DELETE' });
+      if (res.ok) {
+        setThreads([]);
+        setMessages([]);
+        handleNewThread();
+      }
+    } catch (err) {
+      console.error('Failed to clear all threads:', err);
     }
   };
 
@@ -812,7 +818,7 @@ export default function App() {
     }
   };
 
-  // Generate Voice Note via gemini-3.8-flash-lite-tts
+  // Generate Voice Note via dynamic TTS model resolution
   const handleGenerateAudio = async (messageId: string, text: string) => {
     setMessages((prev) =>
       prev.map((m) => (m.id === messageId ? { ...m, isGeneratingAudio: true } : m))
@@ -923,19 +929,43 @@ export default function App() {
         onExportChat={handleExportChat}
         messageCount={messages.length}
         activeTab={activeTab}
-        onOpenThreadDrawer={() => setIsThreadDrawerOpen(true)}
+        onOpenThreadDrawer={() => {
+          loadThreads();
+          setIsThreadDrawerOpen(true);
+        }}
         onNewThread={handleNewThread}
         activeThreadTitle={activeThread?.title}
         onToggleSearch={() => setIsSearchOpen((prev) => !prev)}
         isSearchOpen={isSearchOpen}
         themeMode={themeMode}
-        onThemeModeChange={setThemeMode}
+        onThemeModeChange={handleThemeModeChange}
         onProviderChange={handleProviderChange}
         onOpenVoiceModal={() => setIsVoiceModalOpen(true)}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+      <div className="flex-1 flex flex-row min-h-0 overflow-hidden relative">
+        {/* Desktop Persistent Sidebar (Optimized) */}
+        <div className="hidden lg:flex w-72 h-full border-r border-slate-200/80 dark:border-slate-800/80 bg-white dark:bg-slate-950 flex-col shrink-0">
+          <ThreadDrawer
+            isOpen={true}
+            onClose={() => {}}
+            threads={threads}
+            activeThreadId={activeThreadId}
+            onSelectThread={handleSelectThread}
+            onNewThread={handleNewThread}
+            onRenameThread={handleRenameThread}
+            onDeleteThread={handleDeleteThread}
+            onRefreshThreads={loadThreads}
+            onClearAllThreads={handleClearAllThreads}
+            userName={userName}
+            nickname={nickname}
+            onOpenSettings={() => setActiveTab('settings')}
+            isPersistent={true}
+          />
+        </div>
+
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
         {/* Tab 1: Dedicated Home Dashboard */}
         {activeTab === 'home' && (
           <HomeView
@@ -956,7 +986,10 @@ export default function App() {
             messageCount={messages.length}
             threads={threads}
             onSelectThread={handleSelectThread}
-            onOpenThreadDrawer={() => setIsThreadDrawerOpen(true)}
+            onOpenThreadDrawer={() => {
+              loadThreads();
+              setIsThreadDrawerOpen(true);
+            }}
             onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
             customPrompts={customPrompts}
             dynamicPrompts={promptTemplates}
@@ -1012,7 +1045,7 @@ export default function App() {
             )}
 
             {/* Messages Feed or Concept-Matched Empty State */}
-            <div className="flex-1 overflow-y-auto px-3 sm:px-4 py-3 space-y-1 flex flex-col">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-3 space-y-1 flex flex-col">
               {messages.length === 0 ? (
                 <EmptyState
                   displayName={displayName}
@@ -1033,6 +1066,8 @@ export default function App() {
                     onRetryMessage={handleRetryMessage}
                     searchQuery={searchQuery}
                     autoPlayVoice={autoPlayVoice}
+                    voiceSpeed={voiceSpeed}
+                    onVoiceSpeedChange={handleVoiceSpeedChange}
                     isDark={isDark}
                   />
 
@@ -1128,7 +1163,7 @@ export default function App() {
             customTavilyKey={customTavilyKey}
             onSaveTavilyKey={handleSaveTavilyKey}
             themeMode={themeMode}
-            onThemeModeChange={setThemeMode}
+            onThemeModeChange={handleThemeModeChange}
             autoPlayVoice={autoPlayVoice}
             onAutoPlayVoiceChange={handleAutoPlayVoiceChange}
             voiceSpeed={voiceSpeed}
@@ -1136,6 +1171,7 @@ export default function App() {
           />
         )}
       </div>
+    </div>
 
       {/* Mobile-First Categorized Bottom Navigation */}
       <BottomNav
@@ -1163,32 +1199,27 @@ export default function App() {
           handleSendMessage(text);
         }}
         themeMode={themeMode}
-        onThemeModeChange={setThemeMode}
+        onThemeModeChange={handleThemeModeChange}
       />
 
-      {/* Real Telegram Bot Integration & Pairing Modal */}
-      <TelegramModal
-        isOpen={isTelegramModalOpen}
-        onClose={() => setIsTelegramModalOpen(false)}
-        brandName={brandName}
-        userName={userName}
-        nickname={nickname}
-      />
-
-      {/* Multi-thread Conversations Drawer */}
-      <ThreadDrawer
-        isOpen={isThreadDrawerOpen}
-        onClose={() => setIsThreadDrawerOpen(false)}
-        threads={threads}
-        activeThreadId={activeThreadId}
-        onSelectThread={handleSelectThread}
-        onNewThread={handleNewThread}
-        onRenameThread={handleRenameThread}
-        onDeleteThread={handleDeleteThread}
-        userName={userName}
-        nickname={nickname}
-        onOpenSettings={() => setActiveTab('settings')}
-      />
+      {/* Mobile Thread Drawer (Sliding removed, now just appearing) */}
+      <div className="lg:hidden">
+        <ThreadDrawer
+          isOpen={isThreadDrawerOpen}
+          onClose={() => setIsThreadDrawerOpen(false)}
+          threads={threads}
+          activeThreadId={activeThreadId}
+          onSelectThread={handleSelectThread}
+          onNewThread={handleNewThread}
+          onRenameThread={handleRenameThread}
+          onDeleteThread={handleDeleteThread}
+          onRefreshThreads={loadThreads}
+          onClearAllThreads={handleClearAllThreads}
+          userName={userName}
+          nickname={nickname}
+          onOpenSettings={() => setActiveTab('settings')}
+        />
+      </div>
 
       {/* Enhanced Conversation Export Modal (Markdown, PDF, JSON) */}
       <ChatExportModal

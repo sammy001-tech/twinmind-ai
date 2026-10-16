@@ -72,7 +72,7 @@ export const SwarmTraceFeed: React.FC<SwarmTraceFeedProps> = ({ trace }) => {
   };
 
   return (
-    <div className="my-2.5 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-900/40 text-slate-800 dark:text-slate-200 overflow-hidden text-xs shadow-xs transition-all">
+    <div className="w-full my-2.5 rounded-xl border border-slate-200 dark:border-slate-700/60 bg-white/90 dark:bg-slate-900/40 text-slate-800 dark:text-slate-200 overflow-hidden text-xs shadow-xs transition-all">
       {/* Collapsible Header Banner */}
       <button
         type="button"
@@ -217,7 +217,7 @@ export const SwarmTraceFeed: React.FC<SwarmTraceFeedProps> = ({ trace }) => {
                                   <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wider mb-0.5">
                                     Input Arguments:
                                   </div>
-                                  <pre className="p-1.5 rounded bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[10px] overflow-x-auto whitespace-pre-wrap">
+                                  <pre className="p-1.5 rounded bg-slate-900 border border-slate-800 text-slate-300 font-mono text-[10px] whitespace-pre-wrap break-all">
                                     {JSON.stringify(tool.input, null, 2)}
                                   </pre>
                                 </div>
@@ -248,7 +248,7 @@ export const SwarmTraceFeed: React.FC<SwarmTraceFeedProps> = ({ trace }) => {
                                       )}
                                     </button>
                                   </div>
-                                  <pre className="p-1.5 rounded bg-slate-900 border border-slate-800 text-emerald-300 font-mono text-[10px] overflow-x-auto max-h-40 whitespace-pre-wrap">
+                                  <pre className="p-1.5 rounded bg-slate-900 border border-slate-800 text-emerald-300 font-mono text-[10px] max-h-40 whitespace-pre-wrap break-all">
                                     {JSON.stringify(tool.result, null, 2)}
                                   </pre>
                                 </div>

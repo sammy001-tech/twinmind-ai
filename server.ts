@@ -18,6 +18,7 @@ import { jobQueueService } from './server/services/jobQueueService.ts';
 import { whatsAppWorker } from './server/services/whatsappWorker.ts';
 import { calibrationService } from './server/services/calibrationService.ts';
 import { sentinelService } from './server/services/sentinelService.ts';
+import { modelCatalogService } from './server/services/modelCatalogService.ts';
 
 dotenv.config();
 
@@ -99,18 +100,18 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
-// Settings GET endpoint with token sanitization
-app.get('/api/settings', (req: Request, res: Response) => {
-  const current = settingsManager.getSettings();
-  const sanitized = twilioService.sanitizeSettingsForClient(current);
+// Settings GET endpoint with dynamic database synchronization and comprehensive secret sanitization
+app.get('/api/settings', async (_req: Request, res: Response) => {
+  await settingsManager.syncFromDatabase();
+  const sanitized = settingsManager.getSanitizedSettings();
   res.json({ success: true, settings: sanitized });
 });
 
 // Settings POST endpoint
 app.post('/api/settings', async (req: Request, res: Response) => {
   try {
-    const updated = await settingsManager.updateSettings(req.body);
-    const sanitized = twilioService.sanitizeSettingsForClient(updated);
+    await settingsManager.updateSettings(req.body);
+    const sanitized = settingsManager.getSanitizedSettings();
     res.json({ success: true, settings: sanitized });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to update settings' });
@@ -209,6 +210,178 @@ app.get('/api/models/status', (req: Request, res: Response) => {
   });
 });
 
+// Diagnostic endpoint to verify Environment Key format and basic connectivity
+app.get('/api/keys/verify-env', async (_req: Request, res: Response) => {
+  const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+  if (!envKey) {
+    return res.json({ success: false, error: 'GEMINI_API_KEY is not set in environment.' });
+  }
+
+  const format = envKey.startsWith('AQ.') ? 'Modern (AQ.)' : envKey.startsWith('AIza') ? 'Legacy (AIza)' : 'Unknown';
+  const display = `${envKey.slice(0, 4)}...${envKey.slice(-4)}`;
+
+  try {
+    const client = new GoogleGenAI({ apiKey: envKey });
+    const model = await modelCatalogService.resolveModelForProvider('gemini', undefined, envKey);
+    // Quick probe using the new SDK patterns
+    await client.models.generateContent({
+      model,
+      contents: 'ping'
+    });
+    
+    res.json({
+      success: true,
+      format,
+      display,
+      message: `Environment key (${format}) is valid and connected successfully.`
+    });
+  } catch (err: any) {
+    res.json({
+      success: false,
+      format,
+      display,
+      error: err?.message || 'Verification failed.'
+    });
+  }
+});
+
+// Real-Time Live API Key Verification Endpoint (Strict Zero-Fallback Policy)
+app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> => {
+  const { provider, apiKey } = req.body;
+  if (!provider) {
+    res.status(400).json({ success: false, error: 'Provider is required' });
+    return;
+  }
+
+  const cleanKey = (typeof apiKey === 'string' ? apiKey : '').trim().replace(/^["']|["']$/g, '');
+  const isMasked = (val?: string) => typeof val === 'string' && (val.includes('...') || val === '********');
+  const userProvidedKey = isMasked(cleanKey) ? '' : cleanKey;
+
+  if (provider === 'gemini') {
+    const sKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
+    const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const effectiveKey = userProvidedKey || sKey || eKey;
+
+    if (!effectiveKey) {
+      res.status(400).json({ success: false, error: 'Please enter a Gemini API key (starting with AIza or AQ.) or configure GEMINI_API_KEY.' });
+      return;
+    }
+
+    try {
+      const startTime = Date.now();
+      const testClient = new GoogleGenAI({
+        apiKey: effectiveKey,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+      });
+      // Verify live access with Google GenAI
+      const pager = await testClient.models.list();
+      let count = 0;
+      for await (const m of pager) {
+        if (m.name) count++;
+        if (count >= 3) break;
+      }
+      const latencyMs = Date.now() - startTime;
+      res.json({
+        success: true,
+        message: `Gemini API key verified in ${latencyMs}ms! Connected to Google GenAI.`,
+        latencyMs,
+      });
+    } catch (err: any) {
+      console.warn('Gemini test key error:', err);
+      let errorMsg = err?.message || 'Gemini API authentication failed.';
+      
+      // Try to parse clean message from raw Google RPC JSON if present
+      try {
+        if (errorMsg.includes('{')) {
+          const parsed = JSON.parse(errorMsg.substring(errorMsg.indexOf('{')));
+          if (parsed.error?.message) {
+            errorMsg = parsed.error.message;
+          }
+        }
+      } catch {}
+
+      res.status(401).json({ success: false, error: errorMsg });
+    }
+    return;
+  }
+
+  if (provider === 'groq') {
+    const sKey = (settingsManager.getSettings().customGroqKey || '').trim();
+    const eKey = (process.env.GROQ_API_KEY || '').trim();
+    const effectiveKey = userProvidedKey || sKey || eKey;
+
+    if (!effectiveKey) {
+      res.status(400).json({ success: false, error: 'Please enter a Groq API key to test (starting with gsk_).' });
+      return;
+    }
+
+    try {
+      const startTime = Date.now();
+      const gRes = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { Authorization: `Bearer ${effectiveKey}` },
+      });
+      const latencyMs = Date.now() - startTime;
+      if (gRes.ok) {
+        const data = await gRes.json();
+        const modelCount = Array.isArray(data.data) ? data.data.length : 0;
+        res.json({
+          success: true,
+          message: `Groq API key verified in ${latencyMs}ms! Connected to Groq LPUs (${modelCount} models available).`,
+          latencyMs,
+        });
+      } else {
+        const errData = await gRes.json().catch(() => ({}));
+        res.status(gRes.status).json({
+          success: false,
+          error: errData.error?.message || `Groq API verification failed (HTTP ${gRes.status}).`,
+        });
+      }
+    } catch (err: any) {
+      res.status(502).json({ success: false, error: err?.message || 'Failed to connect to Groq API endpoint.' });
+    }
+    return;
+  }
+
+  if (provider === 'mistral') {
+    const sKey = (settingsManager.getSettings().customMistralKey || '').trim();
+    const eKey = (process.env.MISTRAL_API_KEY || '').trim();
+    const effectiveKey = userProvidedKey || sKey || eKey;
+
+    if (!effectiveKey) {
+      res.status(400).json({ success: false, error: 'Please enter a Mistral API key to test.' });
+      return;
+    }
+
+    try {
+      const startTime = Date.now();
+      const mRes = await fetch('https://api.mistral.ai/v1/models', {
+        headers: { Authorization: `Bearer ${effectiveKey}` },
+      });
+      const latencyMs = Date.now() - startTime;
+      if (mRes.ok) {
+        const data = await mRes.json();
+        const modelCount = Array.isArray(data.data) ? data.data.length : 0;
+        res.json({
+          success: true,
+          message: `Mistral API key verified in ${latencyMs}ms! Connected to Mistral AI (${modelCount} models available).`,
+          latencyMs,
+        });
+      } else {
+        const errData = await mRes.json().catch(() => ({}));
+        res.status(mRes.status).json({
+          success: false,
+          error: errData.message || `Mistral API verification failed (HTTP ${mRes.status}).`,
+        });
+      }
+    } catch (err: any) {
+      res.status(502).json({ success: false, error: err?.message || 'Failed to connect to Mistral AI endpoint.' });
+    }
+    return;
+  }
+
+  res.status(400).json({ success: false, error: `Unknown provider: ${provider}` });
+});
+
 import { 
   GEMINI_CATALOG_MODELS
 } from './src/config/models.ts';
@@ -233,7 +406,7 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
           const client = getAiClient(req);
           // Only attempt live fetch if key looks valid (standard AI Studio keys start with AIza)
           const currentKey = sKey || eKey || cKey;
-          if (currentKey.startsWith('AIza') || currentKey.length > 30) {
+          if (currentKey.startsWith('AIza') || currentKey.startsWith('AQ.') || currentKey.length > 30) {
             const pager = await client.models.list();
             const models: { id: string; displayName: string; description?: string }[] = [];
             for await (const m of pager) {
@@ -389,7 +562,7 @@ app.get('/api/models/all', async (req: Request, res: Response): Promise<void> =>
       try {
         const currentKey = sKey || eKey || hKey;
         // Only attempt live fetch if key looks valid
-        if (currentKey.startsWith('AIza') || currentKey.length > 30) {
+        if (currentKey.startsWith('AIza') || currentKey.startsWith('AQ.') || currentKey.length > 30) {
           const pager = await getAiClient(req).models.list();
           const liveModels: { id: string; displayName: string; description?: string }[] = [];
           for await (const m of pager) {
@@ -690,6 +863,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       for (let i = 0; i < fullReply.length; i += chunkSize) {
         const slice = fullReply.slice(i, i + chunkSize);
         res.write(`data: ${JSON.stringify({ text: slice })}\n\n`);
+        // Add a small delay for the "screaming" (streaming) effect
+        await new Promise((resolve) => setTimeout(resolve, 15));
       }
 
       // Store artifacts for the save step
@@ -742,6 +917,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       for (let i = 0; i < fullReply.length; i += chunkSize) {
         const slice = fullReply.slice(i, i + chunkSize);
         res.write(`data: ${JSON.stringify({ text: slice })}\n\n`);
+        // Add a small delay for the "screaming" (streaming) effect
+        await new Promise((resolve) => setTimeout(resolve, 12));
       }
 
       // Store artifacts for saving
@@ -900,7 +1077,17 @@ app.put('/api/threads/:id/title', async (req: Request, res: Response): Promise<v
   }
 });
 
-// Delete a thread and all associated messages
+// Clear all conversation threads and messages
+app.delete('/api/threads', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    await neonDb.clearAllThreads();
+    res.json({ success: true, message: 'All conversation threads cleared from database.' });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to clear all threads' });
+  }
+});
+
+// Delete a single thread and its messages
 app.delete('/api/threads/:id', async (req: Request, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
@@ -1058,7 +1245,7 @@ Respond in valid JSON:
               Authorization: `Bearer ${effectiveMistralKey}`,
             },
             body: JSON.stringify({
-              model: currentSettings.providerModels?.mistral || 'ministral-14b-latest',
+              model: await modelCatalogService.resolveModelForProvider('mistral', currentSettings.providerModels?.mistral, effectiveMistralKey),
               messages: [{ role: 'user', content: challengerPrompt }],
               response_format: { type: 'json_object' },
             }),
@@ -1125,7 +1312,7 @@ Respond in valid JSON:
   }
 });
 
-// Text-to-Speech (Voice Note generation) using gemini-3.8-flash-lite-tts
+// Text-to-Speech (Voice Note generation) using dynamic model resolution
 app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
   try {
     const { text, voice = 'Fenrir' } = req.body;
@@ -1149,9 +1336,10 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
     // Fully dynamic output token budget based on real-time message length
     const dynamicOutputTokens = Math.min(8192, Math.max(1024, Math.ceil(text.length * 2.5)));
 
-    const response = await callWithRetry(() =>
-      getAiClient(req).models.generateContent({
-        model: 'gemini-3.8-flash-lite-tts',
+    const response = await callWithRetry(async () => {
+      const model = await modelCatalogService.resolveSpecializedModel('tts');
+      return getAiClient(req).models.generateContent({
+        model,
         contents: [
           {
             role: 'user',
@@ -1167,8 +1355,8 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
             },
           },
         },
-      })
-    );
+      });
+    });
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) {
@@ -1937,12 +2125,14 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
   }
   try {
     const s = settingsManager.getSettings();
-    const geminiModel = s.providerModels.gemini || 'gemini-3.8-flash';
-    const groqModel = s.providerModels.groq || 'openai/gpt-oss-120b';
-    const mistralModel = s.providerModels.mistral || 'ministral-14b-latest';
-
     const effectiveMistralKey = req.body.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY;
     const effectiveGroqKey = req.body.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY;
+
+    const [geminiModel, groqModel, mistralModel] = await Promise.all([
+      modelCatalogService.resolveModelForProvider('gemini', s.providerModels.gemini),
+      modelCatalogService.resolveModelForProvider('groq', s.providerModels.groq, effectiveGroqKey),
+      modelCatalogService.resolveModelForProvider('mistral', s.providerModels.mistral, effectiveMistralKey),
+    ]);
 
     // Pass 1: Search Knowledge Vault for verified evidence
     let knowledgeDocs: Array<{ id?: string | number; title: string; content: string }> = [];

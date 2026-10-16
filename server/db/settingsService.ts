@@ -8,11 +8,11 @@ const SETTINGS_FILE_PATH = path.join(process.cwd(), 'twin-settings.json');
 const DEFAULT_SETTINGS: AppSettings = {
   brandName: process.env.APP_BRAND_NAME || process.env.VITE_APP_BRAND_NAME || 'TwinMind AI',
   activeProvider: (process.env.ACTIVE_PROVIDER as 'gemini' | 'groq' | 'mistral') || 'gemini',
-  activeModel: process.env.ACTIVE_MODEL || process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+  activeModel: process.env.ACTIVE_MODEL || process.env.GEMINI_MODEL || '',
   providerModels: {
-    gemini: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
-    groq: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
-    mistral: process.env.MISTRAL_MODEL || 'mistral-large-latest',
+    gemini: process.env.GEMINI_MODEL || '',
+    groq: process.env.GROQ_MODEL || '',
+    mistral: process.env.MISTRAL_MODEL || '',
   },
   voice: process.env.TTS_VOICE || 'Fenrir',
   userName: process.env.USER_NAME || '',
@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   enableWhatsAppAlerts: false,
   enforceTwilioSignature: true,
   proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'whatsapp',
+  themeMode: 'system',
 };
 
 class SettingsManager {
@@ -75,10 +76,20 @@ class SettingsManager {
 
   /**
    * Save current settings synchronously to local disk file
+   * Excludes sensitive API keys to prevent exposure in local files
    */
   private saveToDisk() {
     try {
-      fs.writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(this.currentSettings, null, 2), 'utf-8');
+      const { 
+        customGeminiKey, 
+        customGroqKey, 
+        customMistralKey, 
+        customTavilyKey, 
+        twilioAuthToken,
+        ...safeSettings 
+      } = this.currentSettings;
+
+      fs.writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(safeSettings, null, 2), 'utf-8');
     } catch (err) {
       console.warn('[SettingsManager] Failed to save settings to disk:', err);
     }
@@ -147,9 +158,19 @@ class SettingsManager {
       }
     }
 
+    // Security: Filter out masked placeholders from the patch to avoid overwriting real keys
+    const filteredPatch = { ...patch };
+    const isMasked = (val?: string) => typeof val === 'string' && (val.includes('...') || val === '********');
+
+    if (isMasked(filteredPatch.customGeminiKey)) delete filteredPatch.customGeminiKey;
+    if (isMasked(filteredPatch.customGroqKey)) delete filteredPatch.customGroqKey;
+    if (isMasked(filteredPatch.customMistralKey)) delete filteredPatch.customMistralKey;
+    if (isMasked(filteredPatch.customTavilyKey)) delete filteredPatch.customTavilyKey;
+    if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
+
     this.currentSettings = {
       ...this.currentSettings,
-      ...patch,
+      ...filteredPatch,
       activeModel,
       providerModels: updatedProviderModels,
     };
@@ -157,12 +178,49 @@ class SettingsManager {
     // Save to Disk immediately
     this.saveToDisk();
 
-    // Save to Neon PostgreSQL if connected
-    neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>).catch((err) => {
-      console.warn('[SettingsManager] Background Neon DB save error:', err);
-    });
+    // Save to Neon PostgreSQL if connected (synchronously persisted)
+    try {
+      await neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>);
+    } catch (err) {
+      console.warn('[SettingsManager] Neon DB save error:', err);
+    }
 
     return this.getSettings();
+  }
+
+  /**
+   * Return sanitized settings for client-side use (masks sensitive keys)
+   * Includes environment variable fallbacks for display in UI when settings are empty.
+   */
+  public getSanitizedSettings(overrides: Partial<AppSettings> = {}) {
+    const s = { ...this.getSettings(), ...overrides };
+    
+    const mask = (key?: string) => {
+      if (!key || key.length < 8) return key ? '********' : '';
+      return `${key.slice(0, 4)}...${key.slice(-4)}`;
+    };
+
+    return {
+      ...s,
+      // Mask sensitive keys
+      customGeminiKey: s.customGeminiKey ? mask(s.customGeminiKey) : '',
+      customGroqKey: s.customGroqKey ? mask(s.customGroqKey) : '',
+      customMistralKey: s.customMistralKey ? mask(s.customMistralKey) : '',
+      customTavilyKey: s.customTavilyKey ? mask(s.customTavilyKey) : '',
+      twilioAuthToken: s.twilioAuthToken ? '********' : '',
+
+      // Include env-resolved values for display if settings are empty
+      twilioAccountSid: s.twilioAccountSid || process.env.TWILIO_ACCOUNT_SID || '',
+      twilioWhatsAppNumber: s.twilioWhatsAppNumber || process.env.TWILIO_WHATSAPP_NUMBER || '',
+      userPhoneNumber: s.userPhoneNumber || process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '',
+
+      // Connectivity Flags (Strict Zero-Fallback Policy)
+      hasGeminiKey: Boolean(s.customGeminiKey || process.env.GEMINI_API_KEY),
+      hasGroqKey: Boolean(s.customGroqKey || process.env.GROQ_API_KEY),
+      hasMistralKey: Boolean(s.customMistralKey || process.env.MISTRAL_API_KEY),
+      hasTavilyKey: Boolean(s.customTavilyKey || process.env.TAVILY_API_KEY),
+      twilioTokenConfigured: Boolean(s.twilioAuthToken || process.env.TWILIO_AUTH_TOKEN),
+    };
   }
 }
 

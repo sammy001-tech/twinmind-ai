@@ -15,8 +15,11 @@ html.dark {
 }
 
 html, body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
   overflow-x: hidden;
   max-width: 100vw;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* Print Styles for Executive Conversation Export */

@@ -6,6 +6,7 @@ import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
 import { memoryService } from './memoryService.ts';
 import { calibrationService } from './calibrationService.ts';
+import { modelCatalogService } from './modelCatalogService.ts';
 
 const Type = {
   OBJECT: 'OBJECT',
@@ -293,7 +294,7 @@ class TwinAgentService {
     if (effectiveProvider === 'groq') {
       const key = options.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY;
       if (key) {
-        const model = options.model || s.providerModels.groq || 'llama-3.3-70b-versatile';
+        const model = await modelCatalogService.resolveModelForProvider('groq', options.model || s.providerModels.groq, key);
         const messages: any[] = [];
         if (options.systemInstruction) {
           messages.push({ role: 'system', content: options.systemInstruction });
@@ -336,7 +337,7 @@ class TwinAgentService {
     if (effectiveProvider === 'mistral') {
       const key = options.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY;
       if (key) {
-        const model = options.model || s.providerModels.mistral || 'mistral-large-latest';
+        const model = await modelCatalogService.resolveModelForProvider('mistral', options.model || s.providerModels.mistral, key);
         const messages: any[] = [];
         if (options.systemInstruction) {
           messages.push({ role: 'system', content: options.systemInstruction });
@@ -385,7 +386,11 @@ class TwinAgentService {
       apiKey: geminiKey,
       httpOptions: { headers: { 'User-Agent': 'aistudio-build-twinagent' } },
     });
-    const model = options.model || s.activeModel || s.providerModels.gemini || 'gemini-2.5-flash';
+    const model = await modelCatalogService.resolveModelForProvider(
+      'gemini',
+      options.model || s.activeModel || s.providerModels.gemini,
+      geminiKey
+    );
 
     const config: any = { temperature };
     if (options.systemInstruction) {
@@ -875,11 +880,13 @@ Respond in valid JSON:
 
     // DYNAMIC RESOLUTION - NO HARDCODING OF ANY PRIMARY PROVIDER OR MODEL
     const provider = providerOverride || s.activeProvider || 'gemini';
-    const model =
+    const model = await modelCatalogService.resolveModelForProvider(
+      provider as any,
       modelOverride ||
-      (provider === 'gemini' ? s.providerModels?.gemini || s.activeModel :
-       provider === 'groq' ? s.providerModels?.groq || s.activeModel :
-       s.providerModels?.mistral || s.activeModel) || '';
+        (provider === 'gemini' ? s.providerModels?.gemini || s.activeModel :
+         provider === 'groq' ? s.providerModels?.groq || s.activeModel :
+         s.providerModels?.mistral || s.activeModel)
+    );
 
     if (!model) {
       throw new Error(`No model configured for provider "${provider}". Please check Brain Settings.`);

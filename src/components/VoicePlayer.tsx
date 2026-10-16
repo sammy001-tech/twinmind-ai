@@ -5,18 +5,31 @@ interface VoicePlayerProps {
   audioUrl: string;
   theme?: 'web' | 'telegram' | 'whatsapp';
   autoPlay?: boolean;
+  voiceSpeed?: number;
+  onSpeedChange?: (speed: number) => void;
 }
 
-export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, theme = 'web', autoPlay = false }) => {
+export const VoicePlayer: React.FC<VoicePlayerProps> = ({
+  audioUrl,
+  theme = 'web',
+  autoPlay = false,
+  voiceSpeed = 1,
+  onSpeedChange,
+}) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [playbackRate, setPlaybackRate] = useState<number>(() => {
-    const saved = localStorage.getItem('twin_voice_speed');
-    const parsed = saved ? parseFloat(saved) : 1;
-    return [0.75, 1, 1.25, 1.5, 2].includes(parsed) ? parsed : 1;
-  });
+  const [playbackRate, setPlaybackRate] = useState<number>(voiceSpeed);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    if (voiceSpeed && [0.75, 1, 1.25, 1.5, 2].includes(voiceSpeed)) {
+      setPlaybackRate(voiceSpeed);
+      if (audioRef.current) {
+        audioRef.current.playbackRate = voiceSpeed;
+      }
+    }
+  }, [voiceSpeed]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -47,7 +60,7 @@ export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, theme = 'web
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('ended', handleEnded);
     };
-  }, [audioUrl, autoPlay]);
+  }, [audioUrl, autoPlay, playbackRate]);
 
   const togglePlay = () => {
     if (!audioRef.current) return;
@@ -68,7 +81,9 @@ export const VoicePlayer: React.FC<VoicePlayerProps> = ({ audioUrl, theme = 'web
       audioRef.current.playbackRate = nextRate;
     }
     setPlaybackRate(nextRate);
-    localStorage.setItem('twin_voice_speed', String(nextRate));
+    if (onSpeedChange) {
+      onSpeedChange(nextRate);
+    }
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
