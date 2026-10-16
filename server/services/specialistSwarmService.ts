@@ -131,9 +131,9 @@ class SpecialistSwarmService {
     }
 
     const tavilyKey =
-      customTavilyKey ||
       process.env.TAVILY_API_KEY ||
-      settingsManager.getSettings().customTavilyKey;
+      settingsManager.getSettings().customTavilyKey ||
+      customTavilyKey;
 
     if (!tavilyKey) {
       return {
@@ -507,10 +507,10 @@ class SpecialistSwarmService {
     }
 
     const providerApiKey = effectiveProvider === 'gemini'
-      ? (options.customGeminiKey || settings.customGeminiKey || process.env.GEMINI_API_KEY)
+      ? (process.env.GEMINI_API_KEY || settings.customGeminiKey || options.customGeminiKey)
       : effectiveProvider === 'groq'
-        ? (options.customGroqKey || settings.customGroqKey || process.env.GROQ_API_KEY)
-        : (options.customMistralKey || settings.customMistralKey || process.env.MISTRAL_API_KEY);
+        ? (process.env.GROQ_API_KEY || settings.customGroqKey || options.customGroqKey)
+        : (process.env.MISTRAL_API_KEY || settings.customMistralKey || options.customMistralKey);
     if (!providerApiKey) throw new Error('PROVIDER_CREDENTIALS_MISSING:' + effectiveProvider);
 
     // Verify live provider availability before running search, analysis, or artifact side effects.
