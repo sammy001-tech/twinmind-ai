@@ -10,13 +10,14 @@
  * 7. Immediate discard of late results after termination.
  */
 
-import { GoogleGenAI } from '@google/genai';
+import { randomUUID } from 'node:crypto';
 import { evaluateMathExpression, type CalculateMathResult } from '../utils/mathEvaluator.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { settingsManager } from '../db/settingsService.ts';
 import { neonDb } from '../db/neonService.ts';
 import { codeAuditorService, CodeAuditReport } from './codeAuditorService.ts';
 import { twinAgentService } from './twinAgentService.ts';
+import { modelCatalogService } from './modelCatalogService.ts';
 import {
   swarmSessionRegistry,
   circuitBreakers,
@@ -97,34 +98,6 @@ export interface SwarmExecutionOptions {
 }
 
 class SpecialistSwarmService {
-  private ai: GoogleGenAI | null = null;
-
-  constructor() {
-    this.initAi();
-  }
-
-  private initAi() {
-    if (process.env.GEMINI_API_KEY) {
-      this.ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-specialist-swarm',
-          },
-        },
-      });
-    }
-  }
-
-  private getActiveModel(override?: string): string {
-    const settings = settingsManager.getSettings();
-    const model = override || settings.providerModels?.gemini || settings.activeModel;
-    if (!model) {
-      throw new Error('No active model configured for Specialist Swarm. Please check Brain Settings.');
-    }
-    return model;
-  }
-
   /**
    * Deterministic Deep Researcher Tool: Live Tavily Web Search with Budget & Circuit Breaker
    */
@@ -693,8 +666,8 @@ class SpecialistSwarmService {
     const {
       userPrompt,
       channel = 'web',
-      userId = 'default_user',
-      tenantId = 'default_tenant',
+      userId,
+      tenantId,
       customTavilyKey,
       modelOverride,
       signal: externalSignal,
@@ -703,8 +676,33 @@ class SpecialistSwarmService {
     } = options;
 
     const overallStart = Date.now();
-    const sessionId = `swarm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const effectiveModel = this.getActiveModel(modelOverride);
+    const settings = settingsManager.getSettings();
+    const effectiveProvider = options.provider || options.providerOverride || settings.activeProvider;
+    if (effectiveProvider !== 'gemini' && effectiveProvider !== 'groq' && effectiveProvider !== 'mistral') {
+      throw new Error('PROVIDER_CONFIGURATION_REQUIRED: select a supported provider before running the specialist swarm');
+    }
+
+    const configuredModel = options.model || modelOverride || settings.providerModels?.[effectiveProvider] ||
+      (settings.activeProvider === effectiveProvider ? settings.activeModel : '');
+    if (!configuredModel) {
+      throw new Error('MODEL_CONFIGURATION_REQUIRED: select an explicit model for the specialist swarm provider');
+    }
+
+    const providerApiKey = effectiveProvider === 'gemini'
+      ? (options.customGeminiKey || settings.customGeminiKey || process.env.GEMINI_API_KEY)
+      : effectiveProvider === 'groq'
+        ? (options.customGroqKey || settings.customGroqKey || process.env.GROQ_API_KEY)
+        : (options.customMistralKey || settings.customMistralKey || process.env.MISTRAL_API_KEY);
+    if (!providerApiKey) throw new Error('PROVIDER_CREDENTIALS_MISSING:' + effectiveProvider);
+
+    // Verify live provider availability before running search, analysis, or artifact side effects.
+    const effectiveModel = await modelCatalogService.resolveModelForProvider(
+      effectiveProvider,
+      configuredModel,
+      providerApiKey
+    );
+    const sessionId = 'swarm-' + randomUUID();
+
 
     // Initialize session scope with combined AbortSignal.any() and budget
     const scope: SwarmSessionExecutionScope = swarmSessionRegistry.createSessionScope({
@@ -1355,9 +1353,6 @@ RULES FOR SYNTHESIS:
    - **Verified Analysis & Data Breakdown** (citing numbers, locations, or sources)
    - **Next Concrete Actions**`;
 
-      const effectiveProvider = options.provider || options.providerOverride || settingsManager.getSettings().activeProvider || 'gemini';
-      const effectiveModel = options.model || options.modelOverride || settingsManager.getSettings().activeModel;
-
       synthesisText = await twinAgentService.generateCompletion({
         prompt: synthesisPrompt,
         provider: effectiveProvider,
@@ -1367,11 +1362,12 @@ RULES FOR SYNTHESIS:
         customGeminiKey: options.customGeminiKey,
       });
 
-      if (!synthesisText) {
-        synthesisText = 'No synthesis returned from selected provider model.';
+      if (typeof synthesisText !== 'string' || !synthesisText.trim()) {
+        throw new Error('AI_OUTPUT_EMPTY: selected provider returned no synthesis');
       }
       synthSuccess = true;
     } catch (synthErr: unknown) {
+      synthSuccess = false;
       synthesisText = `**Chief-of-Staff Arbiter Notice**: Could not complete AI synthesis due to an error: ${
         synthErr instanceof Error ? synthErr.message : String(synthErr)
       }. Please verify your API key and model selection in Settings. Specialist traces above display the raw verified tool results.`;
@@ -1410,17 +1406,17 @@ RULES FOR SYNTHESIS:
     }
 
     if (neonDb) {
-      neonDb
-        .logEvent('swarm_session_completed', {
-          sessionId,
-          goal: userPrompt.slice(0, 100),
-          specialists: specialistsInvolved,
-          durationMs: totalDurationMs,
-          tracesCount: specialistTraces.length,
-          status: overallStatus,
-          budgetUsed: scope.budget.getUsed(),
-        })
-        .catch(() => {});
+      void neonDb.logEvent('swarm_session_completed', {
+        sessionId,
+        goal: userPrompt.slice(0, 100),
+        specialists: specialistsInvolved,
+        durationMs: totalDurationMs,
+        tracesCount: specialistTraces.length,
+        status: overallStatus,
+        budgetUsed: scope.budget.getUsed(),
+      }).catch((error: unknown) => {
+        console.warn('[NeonDB] Unable to persist specialist-swarm telemetry:', error instanceof Error ? error.message : 'unknown error');
+      });
     }
 
     return session;
