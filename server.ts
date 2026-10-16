@@ -19,6 +19,8 @@ import { whatsAppWorker } from './server/services/whatsappWorker.ts';
 import { calibrationService } from './server/services/calibrationService.ts';
 import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
+import { ownerAuthService } from './server/services/authService.ts';
+import { artifactAccessService } from './server/services/artifactAccessService.ts';
 
 dotenv.config();
 
@@ -26,7 +28,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.set('trust proxy', true);
+// Trust forwarded headers only when the deployment explicitly states its trusted proxy hop count.
+const configuredProxyHops = process.env.TRUST_PROXY_HOPS?.trim();
+if (configuredProxyHops) {
+  const proxyHops = Number(configuredProxyHops);
+  if (!Number.isSafeInteger(proxyHops) || proxyHops < 0) {
+    throw new Error('INVALID_TRUST_PROXY_HOPS: set TRUST_PROXY_HOPS to a non-negative integer or leave it unset');
+  }
+  app.set('trust proxy', proxyHops);
+}
 const isProduction = process.env.NODE_ENV === 'production';
 // In development, the dev server must always listen on port 3000; in production, use PORT provided by host (e.g. Render)
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
@@ -39,7 +49,132 @@ if (!fs.existsSync(artifactsDir)) {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/artifacts', express.static(path.join(process.cwd(), 'public', 'artifacts')));
+
+// Owner-only API boundary. Signed webhooks are validated by their individual handlers.
+const publicApiPaths = new Set([
+  '/health',
+  '/auth/session',
+  '/auth/login',
+  '/auth/logout',
+  '/twilio/whatsapp',
+  '/telegram/webhook',
+]);
+app.use('/api', (req: Request, res: Response, next) => {
+  if (publicApiPaths.has(req.path)) {
+    next();
+    return;
+  }
+
+  if (!ownerAuthService.isConfigured()) {
+    res.status(503).json({
+      success: false,
+      code: 'AUTH_CONFIGURATION_MISSING',
+      error: 'Owner authentication is not configured.',
+      requiredEnvironment: ownerAuthService.missingConfiguration(),
+    });
+    return;
+  }
+
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'AUTHORIZATION_REQUIRED', error: 'Owner sign-in is required.' });
+    return;
+  }
+
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const origin = req.get('origin');
+    const host = req.get('host');
+    if (origin && host) {
+      try {
+        if (new URL(origin).host.toLowerCase() !== host.toLowerCase()) {
+          res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
+          return;
+        }
+      } catch {
+        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Invalid request origin.' });
+        return;
+      }
+    }
+  }
+
+  next();
+});
+
+// Authentication endpoints are intentionally public; protected APIs require the signed HttpOnly session cookie.
+app.get('/api/auth/session', (req: Request, res: Response) => {
+  res.json({ configured: ownerAuthService.isConfigured(), authenticated: ownerAuthService.isAuthenticated(req) });
+});
+
+const loginAttempts = new Map<string, { windowStartedAt: number; count: number; blockedUntil: number }>();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  if (!ownerAuthService.isConfigured()) {
+    res.status(503).json({
+      success: false,
+      code: 'AUTH_CONFIGURATION_MISSING',
+      error: 'Owner authentication is not configured.',
+      requiredEnvironment: ownerAuthService.missingConfiguration(),
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const ipKey = req.ip || 'unknown';
+  let attempt = loginAttempts.get(ipKey);
+  if (!attempt || now - attempt.windowStartedAt >= LOGIN_WINDOW_MS) {
+    attempt = { windowStartedAt: now, count: 0, blockedUntil: 0 };
+    loginAttempts.set(ipKey, attempt);
+  }
+  if (attempt.blockedUntil > now) {
+    res.status(429).json({ success: false, code: 'LOGIN_RATE_LIMITED', error: 'Too many sign-in attempts. Try again later.' });
+    return;
+  }
+
+  if (!ownerAuthService.verifyPassword(req.body?.password)) {
+    attempt.count += 1;
+    if (attempt.count >= LOGIN_MAX_ATTEMPTS) attempt.blockedUntil = now + LOGIN_WINDOW_MS;
+    res.status(401).json({ success: false, code: 'INVALID_CREDENTIALS', error: 'The owner password was not accepted.' });
+    return;
+  }
+
+  loginAttempts.delete(ipKey);
+  ownerAuthService.setSessionCookie(res);
+  res.json({ success: true, expiresInSeconds: 12 * 60 * 60 });
+});
+
+app.post('/api/auth/logout', (_req: Request, res: Response) => {
+  ownerAuthService.clearSessionCookie(res);
+  res.json({ success: true });
+});
+
+// Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
+app.get('/artifacts/:filename', (req: Request, res: Response) => {
+  const fileName = req.params.filename || '';
+  if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
+    return;
+  }
+
+  const isOwner = ownerAuthService.isAuthenticated(req);
+  const isSigned = artifactAccessService.verifySignedRequest(fileName, req.query.expires, req.query.signature);
+  if (!isOwner && !isSigned) {
+    res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED' });
+    return;
+  }
+
+  const artifactsRoot = path.resolve(process.cwd(), 'public', 'artifacts');
+  const filePath = path.resolve(artifactsRoot, fileName);
+  if (!filePath.startsWith(artifactsRoot + path.sep)) {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
+    return;
+  }
+
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+    }
+  });
+});
 
 // Shared server-side dynamic Gemini client supporting customGeminiKey override
 function getAiClient(req?: Request): GoogleGenAI {
@@ -92,12 +227,8 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDel
 }
 
 // Health check endpoint
-app.get('/api/health', (req: Request, res: Response) => {
-  res.json({
-    status: 'ok',
-    identity: 'Olalekan Digital Twin',
-    hasKey: Boolean(process.env.GEMINI_API_KEY),
-  });
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', authConfigured: ownerAuthService.isConfigured() });
 });
 
 // Settings GET endpoint with dynamic database synchronization and comprehensive secret sanitization
@@ -1377,26 +1508,7 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
 // =========================================================================
 // Unified App Settings Persistence (Zero hardcoding, survives restarts & Neon)
 // =========================================================================
-app.get('/api/settings', async (req: Request, res: Response) => {
-  const settings = await settingsManager.syncFromDatabase();
-  res.json({ success: true, settings });
-});
-
-app.post('/api/settings', async (req: Request, res: Response) => {
-  try {
-    const updated = await settingsManager.updateSettings(req.body);
-    // Keep Telegram bot in sync with provider & activeModel
-    if (req.body.activeProvider || req.body.activeModel) {
-      telegramBotManager.updateConfig({
-        ...(req.body.activeProvider ? { activeProvider: req.body.activeProvider } : {}),
-        ...(req.body.activeModel ? { activeModel: req.body.activeModel } : {}),
-      }).catch(() => {});
-    }
-    res.json({ success: true, settings: updated });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to update settings' });
-  }
-});
+// The canonical settings GET/POST handlers are defined near the top of this file.
 
 // Voice Note Audio Transcription & Executive Summary Generation
 app.post('/api/audio/transcribe-and-summarize', async (req: Request, res: Response): Promise<void> => {
@@ -1730,101 +1842,7 @@ app.get('/api/experiments', async (req: Request, res: Response): Promise<void> =
   }
 });
 
-// Admin-Authenticated Isolated 10-Point Negative Matrix Test Runner Endpoint
-app.post('/api/admin/test/negative-matrix', async (req: Request, res: Response): Promise<void> => {
-  const adminToken = req.headers['x-admin-token'] as string;
-  const isDevEnvironment = process.env.NODE_ENV !== 'production' || req.hostname === 'localhost' || req.hostname === '127.0.0.1';
-
-  if (!isDevEnvironment && adminToken !== process.env.ADMIN_TOKEN) {
-    res.status(403).json({
-      success: false,
-      error: '403 Forbidden: Negative test matrix runner requires valid x-admin-token header in production.',
-    });
-    return;
-  }
-
-  // Execute deterministic assertion matrix against isolated mock handlers & real DB methods
-  const testResults = [
-    {
-      testId: 1,
-      title: 'Unsupported Numerical Claim',
-      status: 'Passed',
-      assertion: 'Server downgrades unbacked numerical claims from [Verified] to [Hypothesis - Source Unverified].',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 2,
-      title: 'Missing Knowledge Vault Context',
-      status: 'Passed',
-      assertion: 'Explicitly returns contextStatus: "unavailable" when vector search yields 0 matches; zero metrics fabricated.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 3,
-      title: 'Conflicting Project Records',
-      status: 'Passed',
-      assertion: 'Flagged conflicts trigger Evidence Sufficiency score downgrade.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 4,
-      title: 'Missing Baseline Metric',
-      status: 'Passed',
-      assertion: 'Recommendations lacking baseline metrics default to unmeasured Hypothesis status.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 5,
-      title: 'Provider Outage (503 / 429)',
-      status: 'Passed',
-      assertion: 'Transparent failure states returned without substituting mock model data.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 6,
-      title: 'Mismatched JSON Schema Repair',
-      status: 'Passed',
-      assertion: 'JSON extraction fallback safely extracts structured payloads without fabricating evidence.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 7,
-      title: 'Session User Authorization Boundary',
-      status: 'Passed',
-      assertion: 'Endpoints require valid x-user-email header and reject unauthenticated reviews.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 8,
-      title: 'Duplicate Review Idempotency Guard',
-      status: 'Passed',
-      assertion: 'Idempotency key re-use with different payload returns 409 Conflict.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 9,
-      title: 'Append-Only History Immutability',
-      status: 'Passed',
-      assertion: 'New outcome observations append to decision_reviews without mutating original decision or prior reviews.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 10,
-      title: 'Historical Calibration Score Gating',
-      status: 'Passed',
-      assertion: 'Brier calibration score requires >= 5 eligible observations; sampleSizeSufficient enforced.',
-      verifiedAt: new Date().toISOString(),
-    },
-  ];
-
-  res.json({
-    success: true,
-    totalTests: testResults.length,
-    passedCount: testResults.filter((t) => t.status === 'Passed').length,
-    failedCount: 0,
-    results: testResults,
-  });
-});
+// Automated checks live in the test runner and CI; no endpoint reports unexecuted checks as passed.
 
 // =========================================================================
 // Vector-Based Knowledge Storage Endpoints (Neon pgvector & Gemini Embedding)
