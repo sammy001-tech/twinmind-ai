@@ -22,7 +22,7 @@ import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
-import { getArtifactStorageDirectory } from './server/services/artifactStorageService.ts';
+import { getArtifactStorageDirectory, getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 
 dotenv.config();
 
@@ -164,6 +164,13 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
 app.post('/api/auth/logout', (_req: Request, res: Response) => {
   ownerAuthService.clearSessionCookie(res);
   res.json({ success: true });
+});
+
+// Expose storage durability state to the signed-in UI without returning an absolute server path.
+app.get('/api/artifacts/storage-status', (_req: Request, res: Response) => {
+  const status = getArtifactStorageStatus();
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({ success: true, ...status });
 });
 
 // Resolve a fresh, short-lived download path for a previously persisted artifact.
