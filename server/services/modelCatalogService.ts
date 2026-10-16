@@ -38,7 +38,9 @@ export function resolveConfiguredLiveModel(
 
 class ModelCatalogService {
   private normalizeKey(value?: string): string {
-    return (value || '').trim().replace(/^["']|["']$/g, '');
+    const key = (value || '').trim().replace(/^["']|["']$/g, '');
+    if (!key || key.includes('...') || key === '********') return '';
+    return key;
   }
 
   /**
