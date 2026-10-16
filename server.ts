@@ -193,15 +193,13 @@ function getAiClient(req?: Request): GoogleGenAI {
 
   const settingsKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
   const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-
   const apiKey = customKey || settingsKey || envKey;
 
+  if (!apiKey) throw new Error('PROVIDER_CREDENTIALS_MISSING:gemini');
   return new GoogleGenAI({
-    apiKey: apiKey || '',
+    apiKey,
     httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
+      headers: { 'User-Agent': 'aistudio-build' },
     },
   });
 }
@@ -1346,44 +1344,54 @@ Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreemen
 // Text-to-Speech (Voice Note generation) using dynamic model resolution
 app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { text, voice = 'Fenrir' } = req.body;
-    if (!text || typeof text !== 'string') {
-      res.status(400).json({ error: 'Text string is required.' });
+    const { text, voice: requestedVoice } = req.body;
+    if (typeof text !== 'string' || !text.trim()) {
+      res.status(400).json({ success: false, code: 'INVALID_TTS_INPUT', error: 'Text is required.' });
       return;
     }
 
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
+    const settings = settingsManager.getSettings();
+    const voice = (typeof requestedVoice === 'string' ? requestedVoice : settings.voice || '').trim();
+    if (!voice) {
+      res.status(503).json({ success: false, code: 'VOICE_CONFIGURATION_REQUIRED', error: 'Select a supported speech voice before requesting audio.' });
       return;
     }
 
-    // Clean markdown symbols for smooth reading and process real-time message dynamically
+    const geminiKey = (
+      req.get('x-gemini-key') ||
+      req.get('x-api-key') ||
+      req.body?.customGeminiKey ||
+      settings.customGeminiKey ||
+      process.env.GEMINI_API_KEY ||
+      ''
+    ).trim().replace(/^["']|["']$/g, '');
+    if (!geminiKey) {
+      res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
+      return;
+    }
+
     const cleanText = text
-      .replace(/```[\s\S]*?```/g, ' code block snippet ')
+      .replace(/```[\s\S]*?```/g, ' ')
       .replace(/`([^`]+)`/g, '$1')
       .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-      .replace(/[*_#>-]/g, ' ');
+      .replace(/[*_#>-]/g, ' ')
+      .trim();
+    if (!cleanText) {
+      res.status(400).json({ success: false, code: 'TTS_TEXT_EMPTY_AFTER_CLEANING' });
+      return;
+    }
 
-    // Fully dynamic output token budget based on real-time message length
-    const dynamicOutputTokens = Math.min(8192, Math.max(1024, Math.ceil(text.length * 2.5)));
-
+    const dynamicOutputTokens = Math.ceil(cleanText.length * 2.5);
     const response = await callWithRetry(async () => {
-      const model = await modelCatalogService.resolveSpecializedModel('tts');
+      const model = await modelCatalogService.resolveSpecializedModel('tts', geminiKey);
       return getAiClient(req).models.generateContent({
         model,
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: cleanText }],
-          },
-        ],
+        contents: [{ role: 'user', parts: [{ text: cleanText }] }],
         config: {
           responseModalities: ['AUDIO'],
           maxOutputTokens: dynamicOutputTokens,
           speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voice }, // 'Fenrir', 'Puck', 'Charon', 'Kore', 'Zephyr'
-            },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
           },
         },
       });
@@ -1391,17 +1399,15 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) {
-      res.status(500).json({ error: 'No audio returned from speech model.' });
+      res.status(502).json({ success: false, code: 'TTS_OUTPUT_UNAVAILABLE', error: 'The selected model returned no audio data.' });
       return;
     }
 
-    res.json({
-      audioDataUrl: `data:audio/wav;base64,${base64Audio}`,
-    });
+    res.json({ success: true, audioDataUrl: `data:audio/wav;base64,${base64Audio}` });
   } catch (err: unknown) {
-    console.error('TTS error:', err);
-    const errorMessage = err instanceof Error ? err.message : 'Speech synthesis failed.';
-    res.status(500).json({ error: errorMessage });
+    const message = err instanceof Error ? err.message : 'Speech synthesis failed.';
+    console.error('[TTS] Request failed:', message);
+    res.status(502).json({ success: false, code: message.split(':')[0] || 'TTS_FAILED', error: message });
   }
 });
 
