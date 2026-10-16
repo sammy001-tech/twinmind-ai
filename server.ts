@@ -605,9 +605,9 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
 app.get('/api/models/all', async (req: Request, res: Response): Promise<void> => {
   const settings = settingsManager.getSettings();
   const keys = {
-    gemini: (req.get('x-gemini-key') || req.get('x-api-key') || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
-    groq: (req.get('x-groq-key') || req.get('x-api-key') || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
-    mistral: (req.get('x-mistral-key') || req.get('x-api-key') || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+    gemini: (req.get('x-gemini-key') || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
+    groq: (req.get('x-groq-key') || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
+    mistral: (req.get('x-mistral-key') || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
   };
 
   const [gemini, groq, mistral] = await Promise.all([
