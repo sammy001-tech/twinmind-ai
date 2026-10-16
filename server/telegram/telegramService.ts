@@ -1045,7 +1045,7 @@ class TelegramBotManager {
         if (turnResult.suggestedActions && turnResult.suggestedActions.length > 0) {
           keyboard = new InlineKeyboard();
           for (const act of turnResult.suggestedActions) {
-            const callbackId = `dyn_act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+            const callbackId = `dyn_act_${randomUUID()}`;
             this.dynamicActionCallbacks.set(callbackId, {
               payload: act.payload,
               action: act.action,
@@ -1295,7 +1295,7 @@ class TelegramBotManager {
 
   private recordSyncedMessage(sender: 'user' | 'assistant', text: string, isVoice = false) {
     this.syncedMessages.unshift({
-      id: `tg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: `tg-${randomUUID()}`,
       sender,
       text,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
