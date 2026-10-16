@@ -1,4 +1,4 @@
-import type { GeneratedArtifact } from '../types/index.ts';
+import type { ArtifactGenerationError, GeneratedArtifact } from '../types/index.ts';
 
 const allowedTypes = new Set(['pdf', 'xlsx', 'excel', 'csv', 'md', 'markdown']);
 
@@ -104,6 +104,27 @@ export function removeDuplicateArtifactDownloadLines(
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+export function normalizeArtifactGenerationErrors(value: unknown): ArtifactGenerationError[] {
+  if (!Array.isArray(value)) return [];
+
+  const errors: ArtifactGenerationError[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.code !== 'string' || !/^[A-Z][A-Z0-9_]{1,80}$/.test(record.code)) continue;
+    if (typeof record.message !== 'string' || !record.message.trim()) continue;
+
+    errors.push({
+      type: typeof record.type === 'string' && record.type.trim()
+        ? record.type.trim().slice(0, 20)
+        : 'unknown',
+      code: record.code,
+      message: record.message.trim().slice(0, 1500),
+    });
+  }
+  return errors;
 }
 
 export function formatArtifactSize(sizeBytes: number | undefined): string {
