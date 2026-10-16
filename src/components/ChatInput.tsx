@@ -423,7 +423,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               type="submit"
               disabled={(!text.trim() && !selectedImage) || isLoading}
               className={`w-9 h-9 rounded-full flex items-center justify-center transition shadow-lg ${
-                text.trim() && !isLoading
+                (text.trim() || selectedImage) && !isLoading
                   ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold active:scale-95 shadow-amber-500/20'
                   : 'bg-slate-100 text-slate-400 border border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700/50 cursor-not-allowed'
               }`}
