@@ -22,6 +22,7 @@ import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
+import { getArtifactStorageDirectory } from './server/services/artifactStorageService.ts';
 
 dotenv.config();
 
@@ -56,7 +57,7 @@ const isProduction = process.env.NODE_ENV === 'production';
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
 
 // Ensure local artifact storage directory exists
-const artifactsDir = path.join(process.cwd(), 'public', 'artifacts');
+const artifactsDir = getArtifactStorageDirectory();
 if (!fs.existsSync(artifactsDir)) {
   fs.mkdirSync(artifactsDir, { recursive: true });
 }
@@ -179,7 +180,7 @@ app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) =
     return;
   }
 
-  const artifactsRoot = path.resolve(process.cwd(), 'public', 'artifacts');
+  const artifactsRoot = getArtifactStorageDirectory();
   const filePath = path.resolve(artifactsRoot, fileName);
   if (!filePath.startsWith(artifactsRoot + path.sep)) {
     res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
@@ -233,7 +234,7 @@ app.get('/artifacts/:filename', (req: Request, res: Response) => {
     return;
   }
 
-  const artifactsRoot = path.resolve(process.cwd(), 'public', 'artifacts');
+  const artifactsRoot = getArtifactStorageDirectory();
   const filePath = path.resolve(artifactsRoot, fileName);
   if (!filePath.startsWith(artifactsRoot + path.sep)) {
     res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
