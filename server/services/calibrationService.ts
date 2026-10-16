@@ -7,7 +7,7 @@ export interface CalibrationStats {
   brierScore: number | null;
   totalReviewed: number;
   accuracyTrend: 'improving' | 'declining' | 'stable' | 'insufficient_data';
-  overconfidenceLevel: number; // 0 to 1, where > 0.5 means overconfident
+  overconfidenceLevel: number | null; // null until enough valid observed outcomes exist
 }
 
 class CalibrationService {
@@ -52,7 +52,11 @@ class CalibrationService {
     const decision = await neonDb.getDecisionById(exp.decision_id);
     if (!decision) return;
 
-    const message = `🚨 *TwinMind Calibration Alert*\n\nLekzy, the target date for your decision "*${decision.title}*" has passed.\n\nTarget Metric: ${exp.target_metric}\nBaseline: ${exp.baseline_metric}\n\nDid you meet the success threshold? Reply with the outcome (e.g., "Outcome: met threshold" or "Outcome: missed baseline") to calibrate my reasoning.`;
+    const configuredName = s.userName?.trim() || '';
+    const greeting = configuredName ? `${configuredName}, ` : '';
+    const brand = s.brandName?.trim() || '';
+    const alertTitle = brand ? `${brand} Calibration Alert` : 'Calibration Alert';
+    const message = `🚨 *${alertTitle}*\\n\\n${greeting}the target date for your decision "*${decision.title}*" has passed.\\n\\nTarget Metric: ${exp.target_metric}\\nBaseline: ${exp.baseline_metric}\\n\\nDid you meet the success threshold? Reply with the observed outcome so the decision history can be updated.`;
 
     const channel = s.proactiveAlertChannel || 'none';
 
@@ -81,20 +85,14 @@ class CalibrationService {
    */
   public async getCalibrationSummary(): Promise<CalibrationStats> {
     const metrics = await neonDb.getCalibrationMetrics();
-    
-    let overconfidence = 0.5;
-    if (metrics.eligibleCount > 0) {
-      // Calculate average confidence vs average outcome
-      // This is a simplified overconfidence heuristic
-      // In a real implementation we'd do a proper calibration curve.
-      overconfidence = 0.5; // Default stable
-    }
 
     return {
       brierScore: metrics.brierScore,
       totalReviewed: metrics.eligibleCount,
-      accuracyTrend: metrics.eligibleCount >= 5 ? 'stable' : 'insufficient_data',
-      overconfidenceLevel: overconfidence
+      // The database query does not currently produce a historical time series.
+      // A directional trend cannot be inferred from a single aggregate.
+      accuracyTrend: 'insufficient_data',
+      overconfidenceLevel: metrics.overconfidenceLevel,
     };
   }
 
@@ -103,22 +101,22 @@ class CalibrationService {
    */
   public async getCalibrationContext(): Promise<string> {
     const summary = await this.getCalibrationSummary();
-    if (!summary.brierScore || summary.totalReviewed < 2) return '';
+    if (summary.brierScore === null || summary.totalReviewed < 5) return '';
 
-    let advice = '';
-    if (summary.brierScore > 0.25) {
-      advice = "Your calibration score is low (high Brier score). You tend to be overconfident in your strategic projections. Push back more on your own assumptions.";
-    } else if (summary.brierScore < 0.1) {
-      advice = "Your calibration score is excellent. Your judgment of risk and probability is highly accurate. Trust your instincts on high-confidence decisions.";
+    const measuredBias = summary.overconfidenceLevel;
+    let insight = 'The observed sample does not indicate a directional mean calibration bias.';
+    if (measuredBias !== null && measuredBias > 0.55) {
+      insight = 'Observed mean predicted probability exceeded the observed success rate in the eligible sample.';
+    } else if (measuredBias !== null && measuredBias < 0.45) {
+      insight = 'Observed mean predicted probability was below the observed success rate in the eligible sample.';
     }
 
-    return `\n\n======================================================\n` +
-           `DECISION CALIBRATION METRICS (METAGAME ANALYSIS)\n` +
-           `======================================================\n` +
-           `- Verified Brier Score: ${summary.brierScore} (Scale: 0=Perfect, 1=Random/Wrong)\n` +
-           `- Decisions Evaluated: ${summary.totalReviewed}\n` +
-           `- Strategic Insight: ${advice}\n` +
-           `Reference this data when "sparring" on new dilemmas. If I am being too optimistic, remind me of our calibration history.`;
+    return `\\n\\nDECISION CALIBRATION METRICS\\n` +
+      `- Empirical Brier score: ${summary.brierScore} (0 is perfect; 1 is worst for binary outcomes)\\n` +
+      `- Eligible decisions evaluated: ${summary.totalReviewed}\\n` +
+      `- Measured mean calibration level: ${measuredBias === null ? 'unavailable' : measuredBias}\\n` +
+      `- Empirical observation: ${insight}\\n` +
+      'Use only this measured history; do not infer a time trend from this aggregate.';
   }
 }
 
