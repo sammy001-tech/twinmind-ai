@@ -1001,14 +1001,28 @@ app.post('/api/swarm/execute', async (req: Request, res: Response): Promise<void
       return;
     }
 
+    const currentSettings = settingsManager.getSettings();
+    const targetProvider = provider || currentSettings.activeProvider;
+    if (targetProvider !== 'gemini' && targetProvider !== 'groq' && targetProvider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'PROVIDER_CONFIGURATION_REQUIRED' });
+      return;
+    }
+    const targetModel = model || currentSettings.providerModels[targetProvider] ||
+      (currentSettings.activeProvider === targetProvider ? currentSettings.activeModel : '');
+    if (!targetModel) {
+      res.status(503).json({ success: false, code: 'MODEL_CONFIGURATION_REQUIRED', provider: targetProvider });
+      return;
+    }
+
     const session = await specialistSwarmService.executeSwarmTurn({
       userPrompt: prompt.trim(),
       channel,
       customTavilyKey,
-      providerOverride: provider || settingsManager.getSettings().activeProvider,
-      modelOverride: model || settingsManager.getSettings().activeModel,
+      providerOverride: targetProvider,
+      modelOverride: targetModel,
       customGroqKey,
       customMistralKey,
+      customGeminiKey: req.body.customGeminiKey,
     });
 
     res.json({ success: true, session });
