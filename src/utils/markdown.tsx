@@ -106,15 +106,15 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
       elements.push(
         <div
           key={`table-${i}`}
-          className="my-3 overflow-x-auto rounded-xl border border-slate-300 dark:border-slate-700/80 bg-white dark:bg-slate-950/70 shadow-md"
+          className="my-3 w-full max-w-full min-w-0 overflow-x-auto overscroll-x-contain rounded-xl border border-slate-300 bg-white shadow-md dark:border-slate-700/80 dark:bg-slate-950/70"
         >
-          <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700/70 text-xs">
+          <table className="w-max min-w-full divide-y divide-slate-200 text-xs dark:divide-slate-700/70">
             <thead className="bg-slate-100 dark:bg-slate-800/90 text-slate-800 dark:text-slate-200">
               <tr>
                 {headers.map((h, colIdx) => (
                   <th
                     key={colIdx}
-                    className={`px-3 py-2 font-bold tracking-wide uppercase text-[11px] ${
+                    className={`min-w-[7rem] max-w-[18rem] whitespace-normal break-words px-3 py-2 font-bold tracking-wide uppercase text-[11px] ${
                       alignments[colIdx] === 'center'
                         ? 'text-center'
                         : alignments[colIdx] === 'right'
@@ -138,7 +138,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
                   {row.map((cell, cIdx) => (
                     <td
                       key={cIdx}
-                      className={`px-3 py-2 text-xs leading-relaxed ${
+                      className={`min-w-[7rem] max-w-[18rem] whitespace-normal break-words px-3 py-2 text-xs leading-relaxed ${
                         alignments[cIdx] === 'center'
                           ? 'text-center'
                           : alignments[cIdx] === 'right'
