@@ -288,6 +288,59 @@ app.post('/api/auth/logout', (_req: Request, res: Response) => {
 });
 
 // Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
+app.post('/api/artifacts/:filename/share-link', (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'OWNER_AUTH_REQUIRED' });
+    return;
+  }
+
+  const fileName = req.params.filename || '';
+  let filePath: string;
+  try {
+    filePath = resolveArtifactFilePath(fileName);
+  } catch {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
+    return;
+  }
+
+  try {
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size <= 0) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+      return;
+    }
+  } catch {
+    res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+    return;
+  }
+
+  try {
+    const url = artifactAccessService.createSignedPath(fileName);
+    const expires = new URL(url, 'https://twinmind.invalid').searchParams.get('expires');
+    if (!expires || !/^\d+$/.test(expires)) {
+      res.status(500).json({ success: false, code: 'ARTIFACT_LINK_CREATION_FAILED' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      url,
+      expiresAt: new Date(Number(expires) * 1000).toISOString(),
+    });
+  } catch (error: unknown) {
+    const code = error instanceof Error && /^[A-Z0-9_]+$/.test(error.message)
+      ? error.message
+      : 'ARTIFACT_LINK_CREATION_FAILED';
+    res.status(503).json({
+      success: false,
+      code,
+      error: 'A temporary download link could not be created. Check artifact signing configuration.',
+    });
+  }
+});
+
+// Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
 app.get('/artifacts/:filename', (req: Request, res: Response) => {
   const fileName = req.params.filename || '';
   if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
