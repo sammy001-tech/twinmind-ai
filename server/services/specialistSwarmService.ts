@@ -276,6 +276,7 @@ class SpecialistSwarmService {
     status: 'success' | 'error';
     url: string;
     fileName: string;
+    displayName?: string;
     type: string;
     mimeType?: string;
     sizeBytes?: number;
@@ -354,6 +355,7 @@ class SpecialistSwarmService {
         status: 'success',
         url: downloadUrl,
         fileName: finalFileName,
+        displayName: displayFileName,
         type: normalizedType,
         mimeType: generated.mimeType,
         sizeBytes: savedStats.size,
