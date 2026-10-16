@@ -282,7 +282,7 @@ function toCsvCell(value: ArtifactCell): string {
   // CSV opened directly in spreadsheet software can execute formula-like cells.
   // Preserve numeric types while neutralizing formula syntax in source text.
   const rawText = String(value);
-  const text = typeof value === 'string' && /^[\\t\\r\\n ]*[=+@-]/.test(rawText)
+  const text = typeof value === 'string' && /^[\t\r\n ]*[=+@-]/.test(rawText)
     ? `'${rawText}`
     : rawText;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
