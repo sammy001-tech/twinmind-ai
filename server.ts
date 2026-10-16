@@ -90,16 +90,23 @@ app.use('/api', (req: Request, res: Response, next) => {
   if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
     const origin = req.get('origin');
     const host = req.get('host');
-    if (origin && host) {
-      try {
-        if (new URL(origin).host.toLowerCase() !== host.toLowerCase()) {
-          res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
-          return;
-        }
-      } catch {
-        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Invalid request origin.' });
+    if (!origin || !host) {
+      res.status(403).json({ success: false, code: 'ORIGIN_REQUIRED', error: 'A same-origin browser request is required for state-changing API operations.' });
+      return;
+    }
+    try {
+      const parsedOrigin = new URL(origin);
+      if (parsedOrigin.origin !== `${req.protocol}://${host}` && parsedOrigin.host.toLowerCase() !== host.toLowerCase()) {
+        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
         return;
       }
+      if (parsedOrigin.host.toLowerCase() !== host.toLowerCase()) {
+        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
+        return;
+      }
+    } catch {
+      res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Invalid request origin.' });
+      return;
     }
   }
 
