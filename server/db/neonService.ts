@@ -335,15 +335,22 @@ class NeonDatabaseService {
     try {
       tempPool = new Pool({
         connectionString: testUrl.trim(),
-        ssl: { rejectUnauthorized: false },
+        ssl: { rejectUnauthorized: true },
         connectionTimeoutMillis: 8000,
       });
 
       const res = await tempPool.query('SELECT version();');
-      const version = res.rows[0]?.version || 'PostgreSQL';
+      const version = res.rows[0]?.version;
+      if (typeof version !== 'string' || !version.trim()) {
+        return { success: false, message: 'Connection succeeded but PostgreSQL returned no server-version metadata.' };
+      }
+      const serverVersion = version.split(' on ')[0]?.trim();
+      if (!serverVersion) {
+        return { success: false, message: 'PostgreSQL server-version metadata was not usable.' };
+      }
       return {
         success: true,
-        message: `Connected successfully! Detected: ${version.split(' on ')[0] || 'PostgreSQL'}`,
+        message: `Connection validated. Server version: ${serverVersion}`,
       };
     } catch (err: unknown) {
       return {
@@ -360,23 +367,11 @@ class NeonDatabaseService {
   /**
    * Save database URL to private settings (Environment variable is preferred)
    */
-  public async saveConfigUrl(url: string): Promise<{ success: boolean; message: string }> {
-    const trimmed = (url || '').trim();
-
-    if (!trimmed) {
-      return {
-        success: false,
-        message: 'Database connection is configured only through DATABASE_URL in the server environment. This endpoint does not alter deployment secrets.',
-      };
-    }
-
-    // Verify first
-    const testResult = await this.testCustomUrl(trimmed);
-    if (!testResult.success) {
-      return { success: false, message: `Connection test failed: ${testResult.message}` };
-    }
-
-    return { success: false, message: 'Database URL can only be set via DATABASE_URL environment variable for security and zero-hardcoding compliance.' };
+  public async saveConfigUrl(_url: string): Promise<{ success: boolean; message: string }> {
+    return {
+      success: false,
+      message: 'Database connections are managed only through the deployment DATABASE_URL secret. Use the separate connection-test endpoint to validate a candidate URL; this endpoint never stores or clears it.',
+    };
   }
 
   /**
