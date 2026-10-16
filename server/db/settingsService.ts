@@ -64,8 +64,10 @@ class SettingsManager {
           };
           // Ensure activeModel matches current provider if not explicitly set
           if (!this.currentSettings.activeModel) {
-            const prov = this.currentSettings.activeProvider || 'gemini';
-            this.currentSettings.activeModel = this.currentSettings.providerModels[prov as keyof typeof this.currentSettings.providerModels] || '';
+            const prov = this.currentSettings.activeProvider;
+            this.currentSettings.activeModel = prov
+              ? (this.currentSettings.providerModels[prov as keyof typeof this.currentSettings.providerModels] || '')
+              : '';
           }
         }
       }
