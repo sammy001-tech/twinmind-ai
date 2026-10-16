@@ -1289,14 +1289,20 @@ class TelegramBotManager {
     });
     if (this.syncedMessages.length > 50) this.syncedMessages.pop();
 
-    neonDb.saveMessage({
+    void neonDb.saveMessage({
       channel: 'telegram',
       role: sender === 'assistant' ? 'assistant' : 'user',
       content: text,
       provider: this.config.activeProvider,
       model: this.config.activeModel,
       metadata: { isVoice, ownerId: this.config.ownerId, ownerUsername: this.config.ownerUsername },
-    }).catch(() => {});
+    }).then((messageId) => {
+      if (messageId === undefined) {
+        console.warn('[TelegramBot] Conversation message was not persisted to the database.');
+      }
+    }).catch((error: unknown) => {
+      console.warn('[TelegramBot] Conversation message persistence failed:', error instanceof Error ? error.message : 'unknown error');
+    });
   }
 
   /**
