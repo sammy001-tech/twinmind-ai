@@ -421,7 +421,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {/* Circular Amber Send Button */}
             <button
               type="submit"
-              disabled={!text.trim() || isLoading}
+              disabled={(!text.trim() && !selectedImage) || isLoading}
               className={`w-9 h-9 rounded-full flex items-center justify-center transition shadow-lg ${
                 text.trim() && !isLoading
                   ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold active:scale-95 shadow-amber-500/20'
