@@ -100,7 +100,7 @@ app.use('/api', (req: Request, res: Response, next) => {
     }
     const publicOrigin = process.env.PUBLIC_APP_ORIGIN || process.env.APP_URL || process.env.RENDER_EXTERNAL_URL;
     const originDecision = evaluateSameOriginRequest({ origin, host, protocol: req.protocol, publicOrigin });
-    if (!originDecision.allowed) {
+    if (originDecision.allowed === false) {
       const error = originDecision.code === 'ORIGIN_REQUIRED'
         ? 'A same-origin browser request is required.'
         : originDecision.code === 'INVALID_PUBLIC_ORIGIN_CONFIGURATION'
