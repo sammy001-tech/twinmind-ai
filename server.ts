@@ -196,14 +196,13 @@ app.get('/artifacts/:filename', (req: Request, res: Response) => {
 
 // Shared server-side dynamic Gemini client supporting customGeminiKey override
 function getAiClient(req?: Request): GoogleGenAI {
-  const customKey = (req
+  const customKey = normalizeProviderApiKey(req
     ? ((req.headers['x-gemini-key'] as string) ||
        (req.headers['x-api-key'] as string) ||
        (req.body?.customGeminiKey as string))
-    : '')?.trim().replace(/^["']|["']$/g, '');
-
-  const settingsKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-  const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    : '');
+  const settingsKey = normalizeProviderApiKey(settingsManager.getSettings().customGeminiKey);
+  const envKey = normalizeProviderApiKey(process.env.GEMINI_API_KEY);
   const apiKey = customKey || settingsKey || envKey;
 
   if (!apiKey) throw new Error('PROVIDER_CREDENTIALS_MISSING:gemini');
@@ -1200,14 +1199,11 @@ app.post('/api/analyze-decision', async (req: Request, res: Response): Promise<v
       return;
     }
 
-    const geminiKey = (
-      req.get('x-gemini-key') ||
-      req.get('x-api-key') ||
-      req.body?.customGeminiKey ||
-      currentSettings.customGeminiKey ||
-      process.env.GEMINI_API_KEY ||
-      ''
-    ).trim().replace(/^["']|["']$/g, '');
+    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
+      normalizeProviderApiKey(req.get('x-api-key')) ||
+      normalizeProviderApiKey(req.body?.customGeminiKey) ||
+      normalizeProviderApiKey(currentSettings.customGeminiKey) ||
+      normalizeProviderApiKey(process.env.GEMINI_API_KEY);
 
     if (!geminiKey) {
       res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
@@ -1417,14 +1413,11 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const geminiKey = (
-      req.get('x-gemini-key') ||
-      req.get('x-api-key') ||
-      req.body?.customGeminiKey ||
-      settings.customGeminiKey ||
-      process.env.GEMINI_API_KEY ||
-      ''
-    ).trim().replace(/^["']|["']$/g, '');
+    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
+      normalizeProviderApiKey(req.get('x-api-key')) ||
+      normalizeProviderApiKey(req.body?.customGeminiKey) ||
+      normalizeProviderApiKey(settings.customGeminiKey) ||
+      normalizeProviderApiKey(process.env.GEMINI_API_KEY);
     if (!geminiKey) {
       res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
       return;
