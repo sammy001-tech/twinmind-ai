@@ -162,13 +162,17 @@ class ModelCatalogService {
     const key = this.normalizeKey(apiKey || process.env.GEMINI_API_KEY);
     if (!key) throw new Error('MODEL_PROVIDER_CONFIGURATION_MISSING:gemini');
 
+    const configuredModel = (type === 'embedding'
+      ? process.env.GEMINI_EMBEDDING_MODEL
+      : process.env.GEMINI_TTS_MODEL)?.trim();
+
     try {
       const client = new GoogleGenAI({ apiKey: key });
       const pager = await client.models.list();
       const eligible: string[] = [];
 
       for await (const model of pager) {
-        const id = model.name?.replace(/^models\//, '') || '';
+        const id = model.name?.replace(/^models\\//, '') || '';
         const methods = Array.isArray(model.supportedGenerationMethods)
           ? model.supportedGenerationMethods
           : [];
@@ -181,9 +185,14 @@ class ModelCatalogService {
         if (matches) eligible.push(id);
       }
 
-      if (!eligible.length) {
-        throw new Error(`MODEL_CAPABILITY_UNAVAILABLE:gemini:${type}`);
+      if (configuredModel) {
+        if (!eligible.includes(configuredModel)) {
+          throw new Error(`MODEL_NOT_CURRENTLY_AVAILABLE:gemini:${configuredModel}`);
+        }
+        return configuredModel;
       }
+
+      if (!eligible.length) throw new Error(`MODEL_CAPABILITY_UNAVAILABLE:gemini:${type}`);
       if (eligible.length > 1) {
         throw new Error(`MODEL_CAPABILITY_SELECTION_REQUIRED:gemini:${type}:${eligible.join(',')}`);
       }
