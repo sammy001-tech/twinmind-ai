@@ -34,6 +34,12 @@ export interface DebateRound {
 export interface DebateResult {
   decisionId?: number | null;
   topic: string;
+  forecast?: {
+    predictionEvent: string;
+    predictedProbability: number;
+    predictionDeadline: string;
+  } | null;
+  persistence?: { status: 'persisted'; decisionId: number };
   contextStatus?: 'available' | 'unavailable';
   partialRun?: boolean;
   rounds: DebateRound[];
@@ -167,6 +173,12 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
         throw new Error(data.error || 'Multi-agent debate failed.');
       }
       setDebateResult(data);
+      if (data.forecast) {
+        // Keep a forecast tied to one saved decision; avoid accidentally reusing it on the next run.
+        setForecastEvent('');
+        setForecastProbabilityPercent('');
+        setForecastDeadline('');
+      }
       if (data.decisionId) {
         fetchReviews(data.decisionId);
       }
@@ -728,6 +740,19 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
             {/* Rendered Live Multi-Agent Debate Transcript */}
             {debateResult && (
               <div className="space-y-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+                {debateResult.forecast && (
+                  <div className="p-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5 dark:bg-indigo-500/10 space-y-1.5">
+                    <p className="text-xs font-bold text-indigo-700 dark:text-indigo-300">
+                      Forecast saved with Decision #{debateResult.decisionId}
+                    </p>
+                    <p className="text-sm text-slate-900 dark:text-slate-100">{debateResult.forecast.predictionEvent}</p>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-600 dark:text-slate-300">
+                      <span>Predicted probability: {(debateResult.forecast.predictedProbability * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}%</span>
+                      <span>Deadline: {new Date(debateResult.forecast.predictionDeadline).toLocaleString()}</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400">This is the original saved forecast; later observations are recorded separately.</p>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">

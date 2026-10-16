@@ -2624,9 +2624,18 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
       channel: 'web',
     });
 
+    if (!Number.isSafeInteger(savedId) || (savedId as number) < 1) {
+      res.status(503).json({
+        success: false,
+        code: 'PERSISTENCE_FAILED',
+        error: 'The debate could not be durably saved. The decision record and any forecast were not persisted.',
+      });
+      return;
+    }
+
     res.json({
       success: true,
-      decisionId: savedId ?? undefined,
+      decisionId: savedId,
       topic,
       knowledgeStatus,
       rounds,
@@ -2636,9 +2645,7 @@ app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
         predictedProbability: forecast.predictedProbability,
         predictionDeadline: forecast.predictionDeadline,
       } : null,
-      persistence: savedId === null || savedId === undefined
-        ? { status: 'failed', code: 'PERSISTENCE_FAILED' }
-        : { status: 'persisted', decisionId: savedId },
+      persistence: { status: 'persisted', decisionId: savedId },
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Debate execution failed';
