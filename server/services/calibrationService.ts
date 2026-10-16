@@ -112,11 +112,11 @@ class CalibrationService {
       insight = 'Observed mean predicted probability was below the observed success rate in the eligible sample.';
     }
 
-    return `\\n\\nDECISION CALIBRATION METRICS\\n` +
-      `- Empirical Brier score: ${summary.brierScore} (0 is perfect; 1 is worst for binary outcomes)\\n` +
-      `- Eligible decisions evaluated: ${summary.totalReviewed}\\n` +
-      `- Measured mean calibration level: ${measuredBias === null ? 'unavailable' : measuredBias}\\n` +
-      `- Empirical observation: ${insight}\\n` +
+    return `\n\nDECISION CALIBRATION METRICS\n` +
+      `- Empirical Brier score: ${summary.brierScore} (0 is perfect; 1 is worst for binary outcomes)\n` +
+      `- Eligible decisions evaluated: ${summary.totalReviewed}\n` +
+      `- Measured mean calibration level: ${measuredBias === null ? 'unavailable' : measuredBias}\n` +
+      `- Empirical observation: ${insight}\n` +
       'Use only this measured history; do not infer a time trend from this aggregate.';
   }
 }
