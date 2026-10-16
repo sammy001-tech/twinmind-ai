@@ -40,10 +40,6 @@ class AdversarialSentinelService {
       const activeDecisions = decisions.filter(d => d.confidence > 70); // High confidence decisions are the best targets for red-teaming
 
       for (const decision of activeDecisions) {
-        // Check if we've already red-teamed this recently to avoid spam
-        // For now, we just pick a few or use a probability check
-        if (Math.random() > 0.3) continue; 
-
         await this.performRedTeamAudit(decision);
       }
     } catch (err) {
@@ -76,15 +72,15 @@ class AdversarialSentinelService {
 
       // 2. Use LLM to find the "Blind Spot"
       const genAI = new GoogleGenAI({ apiKey });
-      const modelId = await modelCatalogService.resolveModelForProvider('gemini', s.providerModels?.gemini || s.activeModel, apiKey);
+      const modelId = await modelCatalogService.resolveModelForProvider('gemini', s.providerModels?.gemini, apiKey);
 
       const auditPrompt = `
-        You are the ADVERSARIAL SENTINEL for Lekzy's Digital Twin. 
+        You are the ADVERSARIAL SENTINEL for the configured Digital Twin owner. 
         Your goal is to find COGNITIVE BLIND SPOTS and STRATEGIC RISKS in Lekzy's decisions.
 
         DECISION: "${decision.title}"
         RECOMMENDATION: "${decision.recommendation}"
-        LEKZY'S CONFIDENCE: ${decision.confidence}%
+        OWNER CONFIDENCE RECORDED IN DATABASE: ${decision.confidence}%
 
         VERIFIED WEB EVIDENCE:
         ${evidence}
@@ -97,7 +93,7 @@ class AdversarialSentinelService {
 
         ALERT FORMAT:
         🚨 SENTINEL ALERT: [Short Title]
-        Lekzy, you are ${decision.confidence}% confident in this, but you might have a blind spot.
+        The recorded confidence for this decision is ${decision.confidence}%, but a blind spot may remain.
         RISK: [1 sentence]
         EVIDENCE: [1 sentence citing source]
         NEXT STEP: [Actionable mitigation]
@@ -111,7 +107,9 @@ class AdversarialSentinelService {
           contents: [{ role: 'user', parts: [{ text: auditPrompt }] }],
           config: { temperature: 0.4 }
         });
-        return response.text || '';
+        const text = response.text?.trim() || '';
+        if (!text) throw new Error('AI_OUTPUT_EMPTY: Sentinel provider returned no audit result');
+        return text;
       }, { operationName: 'SentinelAudit' });
 
       if (result.includes('NO_BLIND_SPOT')) {
