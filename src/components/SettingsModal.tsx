@@ -648,56 +648,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const handleSaveDb = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsTestingDb(true);
-    setDbFeedback(null);
-    try {
-      const res = await fetch('/api/db/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ databaseUrl: dbUrlInput.trim() }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setDbFeedback({ type: 'success', text: data.message });
-        setFeedbackToast('Database settings updated.');
-        await loadDbStatus();
-      } else {
-        setDbFeedback({ type: 'error', text: data.message });
-      }
-    } catch (err: unknown) {
-      setDbFeedback({
-        type: 'error',
-        text: err instanceof Error ? err.message : 'Failed to save DB configuration',
-      });
-    } finally {
-      setIsTestingDb(false);
-    }
-  };
-
-  const handleClearDb = async () => {
-    setIsTestingDb(true);
-    try {
-      const res = await fetch('/api/db/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ databaseUrl: '' }),
-      });
-      const data = await res.json();
-      setDbUrlInput('');
-      setDbFeedback({ type: 'success', text: 'Database configuration cleared.' });
-      await loadDbStatus();
-    } catch (err: unknown) {
-      setDbFeedback({
-        type: 'error',
-        text: err instanceof Error ? err.message : 'Failed to clear DB config',
-      });
-    } finally {
-      setIsTestingDb(false);
-    }
-  };
-
   // Load models for all providers from backend
   const loadAllModels = async () => {
     setIsLoading(true);
@@ -1955,7 +1905,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          <form onSubmit={handleSaveDb} className="space-y-2.5">
+          <form onSubmit={(event) => { event.preventDefault(); void handleTestDb(); }} className="space-y-2.5">
             <div>
               <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
                 Neon Connection String (postgresql://...)
@@ -1984,18 +1934,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              {dbStatus?.configured && dbStatus.source === 'settings' ? (
-                <button
-                  type="button"
-                  onClick={handleClearDb}
-                  disabled={isTestingDb}
-                  className="text-[11px] text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 underline font-medium"
-                >
-                  Clear Saved URL
-                </button>
-              ) : (
-                <div />
-              )}
+
 
               <div className="flex items-center gap-2">
                 <button
@@ -2007,13 +1946,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {renderKeyTestButtonIcon("neon_db", isTestingDb)}
                   <span>{isTestingDb ? "Testing..." : "Test Connection"}</span>
                 </button>
-                <button
-                  type="submit"
-                  disabled={isTestingDb || !dbUrlInput.trim()}
-                  className="px-3.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition disabled:opacity-50"
-                >
-                  Save &amp; Connect
-                </button>
+
               </div>
             </div>
           </form>
