@@ -777,7 +777,7 @@ class TelegramBotManager {
             this.log('error', 'TELEGRAM_WEBHOOK_SECRET is required before enabling Telegram webhook mode.');
             return false;
           }
-          const cleanUrl = this.config.webhookUrl.replace(/\\/+$/, '');
+          const cleanUrl = this.config.webhookUrl.replace(/\/+$/, '');
           const webhookTarget = cleanUrl.endsWith('/api/telegram/webhook') ? cleanUrl : `${cleanUrl}/api/telegram/webhook`;
           const setRes = await fetch(`https://api.telegram.org/bot${this.config.token}/setWebhook`, {
             method: 'POST',
