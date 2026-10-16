@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { jobQueueService, type JobRecord } from './jobQueueService.ts';
 import { twilioService } from './twilioService.ts';
 import { intentClassifierService } from './intentClassifier.ts';
@@ -9,7 +10,7 @@ import { artifactAccessService } from './artifactAccessService.ts';
 
 export class WhatsAppWorker {
   private isRunning = false;
-  private workerLeaseId = `worker-${process.pid}-${Math.random().toString(36).slice(2, 6)}`;
+  private workerLeaseId = `worker-${process.pid}-${randomUUID()}`;
 
   /**
    * Start worker polling loop & heartbeat recovery daemon
