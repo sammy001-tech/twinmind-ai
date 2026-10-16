@@ -61,12 +61,10 @@ class NeonDatabaseService {
   }
 
   /**
-   * Determine database URL using strict priority:
-   * 1. process.env.DATABASE_URL (Environment variable / .env)
-   * 2. Stored private configuration in db-config.json (Saved from UI)
-   * 3. Null (Zero fallback / zero hardcoding)
+   * Database connection configuration is deployment-managed and environment-only.
+   * Missing DATABASE_URL remains missing; the application does not persist a URL sent by the UI.
    */
-  public getActiveUrl(): { url: string | null; source: 'environment' | 'settings' | 'none' } {
+  public getActiveUrl(): { url: string | null; source: 'environment' | 'none' } {
     if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim()) {
       return { url: process.env.DATABASE_URL.trim(), source: 'environment' };
     }
@@ -84,7 +82,7 @@ class NeonDatabaseService {
       const user = parsed.username ? parsed.username.slice(0, 3) + '***' : '';
       return `${parsed.protocol}//${user}:****@${parsed.host}${parsed.pathname}`;
     } catch {
-      return 'postgresql://****@neon.tech/***';
+      return 'Invalid connection URL format';
     }
   }
 
