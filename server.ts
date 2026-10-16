@@ -329,35 +329,60 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
 });
 
 // Live Multi-Model Status & Capabilities probe (Strict Zero-Fallback Policy)
-app.get('/api/models/status', (req: Request, res: Response) => {
-  const groqKey = process.env.GROQ_API_KEY;
-  const mistralKey = process.env.MISTRAL_API_KEY;
+app.get('/api/models/status', async (_req: Request, res: Response) => {
+  const settings = settingsManager.getSettings();
+  const keys = {
+    gemini: (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
+    groq: (settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
+    mistral: (settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+  };
+
+  const [geminiModels, groqModels, mistralModels] = await Promise.all([
+    modelCatalogService.getLiveModels('gemini', keys.gemini),
+    modelCatalogService.getLiveModels('groq', keys.groq),
+    modelCatalogService.getLiveModels('mistral', keys.mistral),
+  ]);
+
+  const catalogueStatus = (key: string, models: unknown[]) =>
+    !key ? 'unconfigured' : models.length ? 'available' : 'unavailable';
+  const providerModel = (provider: 'gemini' | 'groq' | 'mistral', models: Array<{id:string}>) => {
+    const configured = settings.providerModels?.[provider] ||
+      (settings.activeProvider === provider ? settings.activeModel : '');
+    return {
+      configuredModel: configured || null,
+      configuredModelAvailable: configured ? models.some((item) => item.id === configured) : false,
+    };
+  };
 
   res.json({
+    checkedAt: new Date().toISOString(),
     providers: [
       {
         id: 'gemini',
         name: 'Google Gemini',
-        role: 'Core Brain',
-        enabled: true,
-        hasKey: Boolean(process.env.GEMINI_API_KEY),
-        description: 'Primary intelligence, deep strategic reasoning, multimodal understanding & speech synthesis.',
+        hasKey: Boolean(keys.gemini),
+        enabled: Boolean(keys.gemini && geminiModels.length),
+        catalogueStatus: catalogueStatus(keys.gemini, geminiModels),
+        liveModelCount: geminiModels.length,
+        ...providerModel('gemini', geminiModels),
       },
       {
         id: 'groq',
-        name: 'Groq LPUs',
-        role: 'Fast Reflex',
-        enabled: Boolean(groqKey),
-        hasKey: Boolean(groqKey),
-        description: 'Ultra-low latency conversational reflex (sub-second response for mobile chats).',
+        name: 'Groq',
+        hasKey: Boolean(keys.groq),
+        enabled: Boolean(keys.groq && groqModels.length),
+        catalogueStatus: catalogueStatus(keys.groq, groqModels),
+        liveModelCount: groqModels.length,
+        ...providerModel('groq', groqModels),
       },
       {
         id: 'mistral',
         name: 'Mistral AI',
-        role: 'Challenger / Second Opinion',
-        enabled: Boolean(mistralKey),
-        hasKey: Boolean(mistralKey),
-        description: 'Independent model perspective for stress-testing decisions and challenging assumptions.',
+        hasKey: Boolean(keys.mistral),
+        enabled: Boolean(keys.mistral && mistralModels.length),
+        catalogueStatus: catalogueStatus(keys.mistral, mistralModels),
+        liveModelCount: mistralModels.length,
+        ...providerModel('mistral', mistralModels),
       },
     ],
   });
@@ -367,35 +392,27 @@ app.get('/api/models/status', (req: Request, res: Response) => {
 app.get('/api/keys/verify-env', async (_req: Request, res: Response) => {
   const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
   if (!envKey) {
-    return res.json({ success: false, error: 'GEMINI_API_KEY is not set in environment.' });
+    res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING', provider: 'gemini' });
+    return;
   }
 
-  const format = envKey.startsWith('AQ.') ? 'Modern (AQ.)' : envKey.startsWith('AIza') ? 'Legacy (AIza)' : 'Unknown';
-  const display = `${envKey.slice(0, 4)}...${envKey.slice(-4)}`;
-
-  try {
-    const client = new GoogleGenAI({ apiKey: envKey });
-    const model = await modelCatalogService.resolveModelForProvider('gemini', undefined, envKey);
-    // Quick probe using the new SDK patterns
-    await client.models.generateContent({
-      model,
-      contents: 'ping'
-    });
-    
-    res.json({
-      success: true,
-      format,
-      display,
-      message: `Environment key (${format}) is valid and connected successfully.`
-    });
-  } catch (err: any) {
-    res.json({
+  const models = await modelCatalogService.getLiveGeminiModels(envKey);
+  if (!models.length) {
+    res.status(502).json({
       success: false,
-      format,
-      display,
-      error: err?.message || 'Verification failed.'
+      code: 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+      provider: 'gemini',
+      checkedAt: new Date().toISOString(),
     });
+    return;
   }
+
+  res.json({
+    success: true,
+    provider: 'gemini',
+    liveModelCount: models.length,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
 // Real-Time Live API Key Verification Endpoint (Strict Zero-Fallback Policy)
