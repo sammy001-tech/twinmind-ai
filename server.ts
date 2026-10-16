@@ -2378,10 +2378,31 @@ app.listen(PORT, '0.0.0.0', async () => {
     sentinelService.runCognitiveRedTeamScan().catch(err => console.error('Periodic sentinel scan error:', err));
   }, 1000 * 60 * 60 * 6);
 
-  // Hydrate settings from Neon DB if available
-  settingsManager.syncFromDatabase().catch((dbErr) => {
-    console.warn('Neon DB settings sync deferred:', dbErr);
-  });
+  // Hydrate settings only after a real database connection succeeds. If Neon is
+  // temporarily unavailable at boot, retry hydration after the DB reconnects.
+  let databaseSettingsHydrated = false;
+  let databaseSettingsHydrationInProgress = false;
+  const hydrateSettingsWhenDatabaseIsReady = async (): Promise<void> => {
+    if (databaseSettingsHydrated || databaseSettingsHydrationInProgress) return;
+    databaseSettingsHydrationInProgress = true;
+    try {
+      const connected = await neonDb.ensureConnected();
+      if (!connected) return;
+      await settingsManager.syncFromDatabase();
+      databaseSettingsHydrated = true;
+      console.log('[NeonDB] Database-backed settings hydration completed.');
+    } catch (dbErr) {
+      console.warn('[NeonDB] Settings hydration deferred:', dbErr instanceof Error ? dbErr.message : 'unknown error');
+    } finally {
+      databaseSettingsHydrationInProgress = false;
+    }
+  };
+
+  void hydrateSettingsWhenDatabaseIsReady();
+  const settingsHydrationTimer = setInterval(() => {
+    void hydrateSettingsWhenDatabaseIsReady();
+  }, 30_000);
+  settingsHydrationTimer.unref?.();
   // Attempt background startup of Telegram bot listener
   try {
     await telegramBotManager.start();

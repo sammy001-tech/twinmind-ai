@@ -46,6 +46,12 @@ class AdversarialSentinelService {
     this.isScanning = true;
 
     try {
+      const databaseReady = await neonDb.ensureConnected();
+      if (!databaseReady) {
+        console.warn('[Sentinel] Scan deferred: Neon PostgreSQL is unavailable after bounded connection retries.');
+        return;
+      }
+
       const settings = settingsManager.getSettings();
       const apiKey = this.resolveUsableCredential(settings.customGeminiKey, process.env.GEMINI_API_KEY);
       const pendingBefore = await neonDb.getSentinelPendingDecisionCount();

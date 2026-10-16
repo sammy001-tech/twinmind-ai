@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import fs from 'fs';
 import path from 'path';
+import { isRetryableDatabaseError, summarizeDatabaseConnectionError } from '../utils/databaseConnection.ts';
 
 export interface DatabaseStatus {
   configured: boolean;
@@ -54,10 +55,67 @@ class NeonDatabaseService {
   private currentUrl: string | null = null;
   private isConnected = false;
   private lastError: string | null = null;
+  private lastConnectionError: unknown = null;
   private initializedSchema = false;
+  private connectionAttempt: Promise<boolean> | null = null;
+  private readonly maxConnectionAttempts = 3;
+  private readonly reconnectIntervalMs = 30_000;
+  private reconnectTimer: NodeJS.Timeout;
 
   constructor() {
-    this.refreshConnection();
+    void this.ensureConnected();
+    this.reconnectTimer = setInterval(() => {
+      if (this.isConnected || !this.getActiveUrl().url || this.connectionAttempt) return;
+      console.warn('[NeonDB] Database remains disconnected; attempting bounded background reconnection.');
+      void this.ensureConnected();
+    }, this.reconnectIntervalMs);
+    this.reconnectTimer.unref?.();
+  }
+
+  /**
+   * Wait for a shared connection attempt or initiate bounded retries. This prevents
+   * concurrent startup services from racing to create separate PostgreSQL pools.
+   */
+  public ensureConnected(): Promise<boolean> {
+    const { url } = this.getActiveUrl();
+    if (url && this.isConnected && this.pool && this.currentUrl === url) {
+      return Promise.resolve(true);
+    }
+
+    if (this.connectionAttempt) return this.connectionAttempt;
+
+    const attempt = this.connectWithRetries();
+    this.connectionAttempt = attempt;
+    void attempt.finally(() => {
+      if (this.connectionAttempt === attempt) this.connectionAttempt = null;
+    }).catch(() => {
+      // connectWithRetries handles connection errors; this guard prevents a
+      // rejected cleanup chain from becoming an unhandled promise rejection.
+    });
+    return attempt;
+  }
+
+  private async connectWithRetries(): Promise<boolean> {
+    const { url } = this.getActiveUrl();
+    if (!url) return this.connectOnce();
+
+    for (let attempt = 1; attempt <= this.maxConnectionAttempts; attempt++) {
+      if (await this.connectOnce()) return true;
+
+      const connectionError = this.lastConnectionError;
+      if (attempt >= this.maxConnectionAttempts || !isRetryableDatabaseError(connectionError)) {
+        break;
+      }
+
+      const delayMs = attempt * 1_000;
+      console.warn(
+        `[NeonDB] Transient database connection failure (attempt ${attempt}/${this.maxConnectionAttempts}); retrying in ${delayMs}ms.`
+      );
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+    }
+
+    console.warn('[NeonDB] Initial connection attempts did not succeed; automatic reconnection will retry in the background.');
+    return false;
   }
 
   /**
@@ -89,56 +147,73 @@ class NeonDatabaseService {
   /**
    * Initialize or refresh connection pool
    */
-  public async refreshConnection(): Promise<boolean> {
+  private async connectOnce(): Promise<boolean> {
     const { url, source } = this.getActiveUrl();
 
     if (!url) {
-      if (this.pool) {
-        await this.pool.end().catch(() => {});
-        this.pool = null;
-      }
+      const previousPool = this.pool;
+      this.pool = null;
       this.currentUrl = null;
       this.isConnected = false;
-      this.lastError = 'No DATABASE_URL configured in environment or settings.';
+      this.lastConnectionError = null;
+      this.lastError = 'No DATABASE_URL configured in the deployment environment.';
+      if (previousPool) void previousPool.end().catch(() => {});
       return false;
     }
 
-    // Reuse pool if URL hasn't changed and already connected
-    if (this.pool && this.currentUrl === url && this.isConnected) {
-      return true;
-    }
+    if (this.pool && this.currentUrl === url && this.isConnected) return true;
 
-    // Clean up old pool
-    if (this.pool) {
-      await this.pool.end().catch(() => {});
-      this.pool = null;
-    }
+    const previousUrl = this.currentUrl;
+    const previousPool = this.pool;
+    this.pool = null;
+    this.currentUrl = null;
+    this.isConnected = false;
+    if (previousUrl !== url) this.initializedSchema = false;
+    if (previousPool) void previousPool.end().catch(() => {});
 
+    let nextPool: Pool | null = null;
     try {
-      this.pool = new Pool({
+      nextPool = new Pool({
         connectionString: url,
         ssl: { rejectUnauthorized: true },
         max: 10,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000,
+        connectionTimeoutMillis: 15000,
       });
 
-      // Test connection
-      const client = await this.pool.connect();
+      nextPool.on('error', (err: Error) => {
+        if (this.pool !== nextPool) return;
+        this.isConnected = false;
+        this.lastConnectionError = err;
+        const details = summarizeDatabaseConnectionError(err, url);
+        this.lastError = details.causeMessage || details.message;
+        console.error('[NeonDB] Idle PostgreSQL connection error:', JSON.stringify(details));
+      });
+
+      this.pool = nextPool;
+
+      const client = await nextPool.connect();
       client.release();
 
       this.currentUrl = url;
       this.isConnected = true;
+      this.lastConnectionError = null;
       this.lastError = null;
       console.log(`[NeonDB] Successfully connected to Neon PostgreSQL (${source})`);
 
-      // Auto-initialize schema
       await this.initSchema();
       return true;
     } catch (err: unknown) {
       this.isConnected = false;
-      this.lastError = err instanceof Error ? err.message : 'Database connection error';
-      console.error('[NeonDB] Connection failed:', this.lastError);
+      this.lastConnectionError = err;
+      const details = summarizeDatabaseConnectionError(err, url);
+      this.lastError = details.causeMessage || details.message;
+      console.error('[NeonDB] Connection failed:', JSON.stringify(details));
+
+      const failedPool = this.pool === nextPool ? this.pool : nextPool;
+      this.pool = null;
+      this.currentUrl = null;
+      if (failedPool) void failedPool.end().catch(() => {});
       return false;
     }
   }
