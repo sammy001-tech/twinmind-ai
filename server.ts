@@ -1107,6 +1107,20 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       (req as any)._artifactErrors = artifactErrors;
     }
 
+    const requestedArtifact = /\b(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|format|convert)\b[\s\S]{0,100}\b(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook)\b|\b(?:file|spreadsheet|excel|xlsx|csv|pdf|document|workbook)\b[\s\S]{0,100}\b(?:create|generate|make|produce|prepare|export|download|attach|provide|deliver|format|convert)\b/i.test(lastUserQuery);
+    const verifiedArtifacts = Array.isArray((req as any)._artifacts) ? (req as any)._artifacts : [];
+    const artifactErrors = Array.isArray((req as any)._artifactErrors) ? (req as any)._artifactErrors : [];
+
+    if (requestedArtifact && verifiedArtifacts.length === 0 && artifactErrors.length === 0) {
+      const unavailable = {
+        type: 'unknown',
+        code: 'ARTIFACT_NOT_GENERATED',
+        message: 'The response did not produce a verifiable file through the file-generation tool. No download is available.',
+      };
+      (req as any)._artifactErrors = [unavailable];
+      res.write(`data: ${JSON.stringify({ meta: { artifacts: [], artifactErrors: [unavailable] } })}\n\n`);
+    }
+
     if (!fullReply.trim()) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no chat reply');
 
     // Persist messages to Neon Postgres and report the result.
