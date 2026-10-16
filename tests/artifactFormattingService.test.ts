@@ -77,7 +77,7 @@ test('creates CSV with proper quoting, UTF-8 BOM, and formula-like text neutrali
   const generated = await generateArtifactBuffer(
     'csv',
     [
-      { Brand: 'Brand, Incorporated', Notes: 'Says "hello"\nand then left', FormulaLike: '=HYPERLINK("https://example.com","open")', NegativeFormulaLike: '-HYPERLINK("https://example.com","open")', Balance: -100 },
+      { Brand: 'Brand, Incorporated', Notes: 'Says "hello"\nand then left', FormulaLike: '=HYPERLINK("https://example.com","open")', NegativeFormulaLike: '-HYPERLINK("https://example.com","open")', NegativeNumericText: '-100.50', Balance: -100 },
     ],
     'Prospects.csv',
     new Date('2026-01-02T03:04:05.000Z'),
@@ -89,6 +89,7 @@ test('creates CSV with proper quoting, UTF-8 BOM, and formula-like text neutrali
   assert.ok(csv.includes('"Says ""hello""\nand then left"'));
   assert.ok(csv.includes("'=HYPERLINK"));
   assert.ok(csv.includes("'-HYPERLINK"));
+  assert.ok(csv.includes(',-100.50'));
   assert.ok(csv.includes(',-100'));
 });
 
