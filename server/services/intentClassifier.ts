@@ -113,6 +113,8 @@ Respond strictly in valid JSON matching this structure:
       const message = err instanceof Error ? err.message : 'Intent classification failed';
       console.warn('[IntentClassifier] Live classification unavailable:', message);
       throw new Error(`INTENT_CLASSIFICATION_FAILED:${message}`);
-    }}
+    }
+  }
+}
 
 export const intentClassifierService = new IntentClassifierService();
