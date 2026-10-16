@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import {
   AlertTriangle,
   Check,
-  Copy,
   Download,
   FileDown,
   FileSpreadsheet,
