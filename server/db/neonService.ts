@@ -894,8 +894,10 @@ class NeonDatabaseService {
    * Compute unbundled Brier score and calibration metrics across finalized decisions
    */
   public async getCalibrationMetrics(): Promise<{
-    totalDecisions: number;
-    totalReviews: number;
+    available: boolean;
+    error?: string;
+    totalDecisions: number | null;
+    totalReviews: number | null;
     eligibleCount: number;
     sampleSizeSufficient: boolean; // requires eligibleCount >= 5
     brierScore: number | null; // (1/N) * sum((predicted_prob - outcome)^2)
@@ -904,8 +906,10 @@ class NeonDatabaseService {
   }> {
     if (!this.pool || !this.isConnected) {
       return {
-        totalDecisions: 0,
-        totalReviews: 0,
+        available: false,
+        error: 'DATABASE_UNAVAILABLE',
+        totalDecisions: null,
+        totalReviews: null,
         eligibleCount: 0,
         sampleSizeSufficient: false,
         brierScore: null,
@@ -975,6 +979,7 @@ class NeonDatabaseService {
         : Math.max(0, Math.min(1, 0.5 + meanPredictionBias / 2));
 
       return {
+        available: true,
         totalDecisions,
         totalReviews,
         eligibleCount,
@@ -986,8 +991,10 @@ class NeonDatabaseService {
     } catch (err) {
       console.error('[NeonDB] Error computing calibration metrics:', err);
       return {
-        totalDecisions: 0,
-        totalReviews: 0,
+        available: false,
+        error: 'CALIBRATION_QUERY_FAILED',
+        totalDecisions: null,
+        totalReviews: null,
         eligibleCount: 0,
         sampleSizeSufficient: false,
         brierScore: null,
