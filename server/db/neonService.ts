@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { createHash } from 'node:crypto';
 import { validateStoredArtifact } from '../services/artifactStorageService.ts';
+import { calculateCalibrationMetrics, canTransitionExperiment, getEffectiveExperimentStatus, isExperimentLifecycleStatus, transitionRequiresReplacement, type ExperimentLifecycleStatus } from '../services/decisionCalibrationRules.ts';
 import fs from 'fs';
 import path from 'path';
 import { isRetryableDatabaseError, summarizeDatabaseConnectionError } from '../utils/databaseConnection.ts';
@@ -37,9 +38,20 @@ export interface DecisionRecord {
   options?: unknown[];
   recommendation?: string;
   confidence?: number;
+  prediction_event?: string | null;
+  predicted_probability?: number | null;
+  prediction_deadline?: string | null;
   full_analysis?: Record<string, unknown>;
   channel?: string;
   created_at?: string;
+}
+
+function postgresErrorCode(error: unknown): string {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[A-Z0-9]+$/.test(code)) return code;
+  }
+  return 'unknown';
 }
 
 export interface ChatThreadRecord {
@@ -83,13 +95,7 @@ export interface ArtifactStorageReadiness {
   schemaReady: boolean;
 }
 
-function postgresErrorCode(error: unknown): string {
-  if (error && typeof error === 'object' && 'code' in error) {
-    const code = (error as { code?: unknown }).code;
-    if (typeof code === 'string' && /^[A-Z0-9]+$/.test(code)) return code;
-  }
-  return 'unknown';
-}
+
 
 class NeonDatabaseService {
   private pool: Pool | null = null;
@@ -302,6 +308,9 @@ class NeonDatabaseService {
           options JSONB DEFAULT '[]',
           recommendation TEXT,
           confidence INTEGER,
+          prediction_event TEXT,
+          predicted_probability NUMERIC(5,4) CHECK (predicted_probability >= 0 AND predicted_probability <= 1),
+          prediction_deadline TIMESTAMP WITH TIME ZONE,
           full_analysis JSONB,
           channel VARCHAR(32) DEFAULT 'web',
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -309,27 +318,42 @@ class NeonDatabaseService {
 
         CREATE TABLE IF NOT EXISTS decision_reviews (
           id SERIAL PRIMARY KEY,
-          decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
-          idempotency_key VARCHAR(128) UNIQUE,
+          decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE RESTRICT,
+          actor_id VARCHAR(64) NOT NULL DEFAULT 'owner',
+          idempotency_key VARCHAR(128),
+          payload_hash CHAR(64),
+          supersedes_review_id INTEGER REFERENCES decision_reviews(id) ON DELETE RESTRICT,
           user_email VARCHAR(255),
           observation TEXT NOT NULL,
           actual_outcome VARCHAR(64),
+          evidence_source TEXT,
+          outcome_verified BOOLEAN NOT NULL DEFAULT FALSE,
+          verified_at TIMESTAMP WITH TIME ZONE,
           review_data JSONB DEFAULT '{}',
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE TABLE IF NOT EXISTS decision_experiments (
           id SERIAL PRIMARY KEY,
-          decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
-          user_email VARCHAR(255) NOT NULL,
+          decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE RESTRICT,
+          actor_id VARCHAR(64) NOT NULL DEFAULT 'owner',
+          user_email VARCHAR(255),
           baseline_metric VARCHAR(255),
+          baseline_value NUMERIC,
           target_metric VARCHAR(255),
           units VARCHAR(50),
           threshold_value NUMERIC,
           measurement_direction VARCHAR(20) DEFAULT 'above',
-          status VARCHAR(50) DEFAULT 'Proposed',
+          observation_window_days INTEGER,
+          evidence_source TEXT,
+          is_hypothesis BOOLEAN NOT NULL DEFAULT FALSE,
+          supersedes_experiment_id INTEGER REFERENCES decision_experiments(id) ON DELETE RESTRICT,
+          status VARCHAR(50) NOT NULL DEFAULT 'Proposed',
           start_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
           target_date TIMESTAMP WITH TIME ZONE,
+          idempotency_key VARCHAR(128),
+          payload_hash CHAR(64),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -394,9 +418,104 @@ class NeonDatabaseService {
         CREATE INDEX IF NOT EXISTS idx_chat_threads_updated ON chat_threads(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_experiments_decision ON decision_experiments(decision_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_reviews_user_key ON decision_reviews (user_email, idempotency_key);
+        -- Review idempotency uniqueness is upgraded below.
         CREATE INDEX IF NOT EXISTS idx_persona_memories_category ON persona_memories(category);
         CREATE INDEX IF NOT EXISTS idx_persona_memories_created ON persona_memories(created_at DESC);
+      `);
+
+      // Idempotent schema upgrade for new forecast, review, and experiment contracts.
+      await this.pool.query(`
+        ALTER TABLE decisions ADD COLUMN IF NOT EXISTS prediction_event TEXT;
+        ALTER TABLE decisions ADD COLUMN IF NOT EXISTS predicted_probability NUMERIC(5,4);
+        ALTER TABLE decisions ADD COLUMN IF NOT EXISTS prediction_deadline TIMESTAMP WITH TIME ZONE;
+
+        ALTER TABLE decision_reviews ADD COLUMN IF NOT EXISTS actor_id VARCHAR(64) NOT NULL DEFAULT 'owner';
+        ALTER TABLE decision_reviews ADD COLUMN IF NOT EXISTS payload_hash CHAR(64);
+        ALTER TABLE decision_reviews ADD COLUMN IF NOT EXISTS supersedes_review_id INTEGER REFERENCES decision_reviews(id) ON DELETE RESTRICT;
+        ALTER TABLE decision_reviews ADD COLUMN IF NOT EXISTS evidence_source TEXT;
+        ALTER TABLE decision_reviews ADD COLUMN IF NOT EXISTS outcome_verified BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE decision_reviews ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_idempotency_key_key;
+        ALTER TABLE decision_reviews DROP CONSTRAINT IF EXISTS decision_reviews_decision_id_fkey;
+        ALTER TABLE decision_reviews ADD CONSTRAINT decision_reviews_decision_id_fkey FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE RESTRICT;
+        DROP INDEX IF EXISTS idx_reviews_user_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_reviews_actor_key
+          ON decision_reviews (decision_id, actor_id, idempotency_key)
+          WHERE idempotency_key IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_reviews_superseded_once
+          ON decision_reviews (supersedes_review_id)
+          WHERE supersedes_review_id IS NOT NULL;
+
+        ALTER TABLE decision_experiments ALTER COLUMN user_email DROP NOT NULL;
+        ALTER TABLE decision_experiments DROP CONSTRAINT IF EXISTS decision_experiments_decision_id_fkey;
+        ALTER TABLE decision_experiments ADD CONSTRAINT decision_experiments_decision_id_fkey FOREIGN KEY (decision_id) REFERENCES decisions(id) ON DELETE RESTRICT;
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS baseline_value NUMERIC;
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS actor_id VARCHAR(64) NOT NULL DEFAULT 'owner';
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS observation_window_days INTEGER;
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS evidence_source TEXT;
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS is_hypothesis BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS supersedes_experiment_id INTEGER REFERENCES decision_experiments(id) ON DELETE RESTRICT;
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(128);
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS payload_hash CHAR(64);
+        ALTER TABLE decision_experiments ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_experiments_actor_key
+          ON decision_experiments (actor_id, idempotency_key)
+          WHERE idempotency_key IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS decision_experiment_events (
+          id BIGSERIAL PRIMARY KEY,
+          experiment_id INTEGER NOT NULL REFERENCES decision_experiments(id) ON DELETE RESTRICT,
+          actor_id VARCHAR(64) NOT NULL DEFAULT 'owner',
+          event_type VARCHAR(48) NOT NULL,
+          from_status VARCHAR(48),
+          to_status VARCHAR(48),
+          idempotency_key VARCHAR(128),
+          payload_hash CHAR(64),
+          payload JSONB NOT NULL DEFAULT '{}',
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_experiment_events_actor_key
+          ON decision_experiment_events (experiment_id, actor_id, idempotency_key)
+          WHERE idempotency_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_experiment_events_history
+          ON decision_experiment_events (experiment_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS decision_experiment_observations (
+          id BIGSERIAL PRIMARY KEY,
+          experiment_id INTEGER NOT NULL REFERENCES decision_experiments(id) ON DELETE RESTRICT,
+          actor_id VARCHAR(64) NOT NULL DEFAULT 'owner',
+          idempotency_key VARCHAR(128) NOT NULL,
+          payload_hash CHAR(64) NOT NULL,
+          observation TEXT NOT NULL,
+          measured_value NUMERIC,
+          evidence_source TEXT NOT NULL,
+          actual_outcome VARCHAR(64),
+          outcome_verified BOOLEAN NOT NULL DEFAULT FALSE,
+          verified_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (experiment_id, actor_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_experiment_observations_history
+          ON decision_experiment_observations (experiment_id, created_at DESC);
+
+        CREATE OR REPLACE FUNCTION prevent_original_decision_mutation() RETURNS trigger AS $$
+        BEGIN
+          IF ROW(NEW.title, NEW.situation, NEW.options, NEW.recommendation, NEW.confidence,
+                 NEW.prediction_event, NEW.predicted_probability, NEW.prediction_deadline,
+                 NEW.full_analysis, NEW.channel, NEW.created_at)
+             IS DISTINCT FROM
+             ROW(OLD.title, OLD.situation, OLD.options, OLD.recommendation, OLD.confidence,
+                 OLD.prediction_event, OLD.predicted_probability, OLD.prediction_deadline,
+                 OLD.full_analysis, OLD.channel, OLD.created_at) THEN
+            RAISE EXCEPTION 'ORIGINAL_DECISION_IMMUTABLE';
+          END IF;
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        DROP TRIGGER IF EXISTS decisions_immutable_verdict ON decisions;
+        CREATE TRIGGER decisions_immutable_verdict
+          BEFORE UPDATE ON decisions
+          FOR EACH ROW EXECUTE FUNCTION prevent_original_decision_mutation();
       `);
 
       // Initialize pgvector extension for Neon vector knowledge search
@@ -946,18 +1065,28 @@ class NeonDatabaseService {
     if (!this.pool || !this.isConnected) return null;
 
     try {
+      const forecastFieldsProvided = dec.prediction_event != null
+        || dec.predicted_probability != null
+        || dec.prediction_deadline != null;
+      if (forecastFieldsProvided && (
+        typeof dec.prediction_event !== 'string' || !dec.prediction_event.trim()
+        || typeof dec.predicted_probability !== 'number' || !Number.isFinite(dec.predicted_probability)
+        || dec.predicted_probability < 0 || dec.predicted_probability > 1
+        || !dec.prediction_deadline || !Number.isFinite(Date.parse(dec.prediction_deadline))
+      )) throw new Error('INVALID_DECISION_FORECAST');
+
       const res = await this.pool.query(
-        `INSERT INTO decisions (title, situation, options, recommendation, confidence, full_analysis, channel)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO decisions
+          (title, situation, options, recommendation, confidence, full_analysis, channel,
+           prediction_event, predicted_probability, prediction_deadline)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING id`,
         [
-          dec.title,
-          dec.situation || null,
-          JSON.stringify(dec.options || []),
-          dec.recommendation || null,
-          dec.confidence ?? null,
-          JSON.stringify(dec.full_analysis || {}),
-          dec.channel || 'web',
+          dec.title, dec.situation || null, JSON.stringify(dec.options || []),
+          dec.recommendation || null, dec.confidence ?? null,
+          JSON.stringify(dec.full_analysis || {}), dec.channel || 'web',
+          dec.prediction_event?.trim() || null, dec.predicted_probability ?? null,
+          dec.prediction_deadline ? new Date(dec.prediction_deadline).toISOString() : null,
         ]
       );
       return res.rows[0]?.id || null;
@@ -985,6 +1114,9 @@ class NeonDatabaseService {
         options: r.options,
         recommendation: r.recommendation,
         confidence: r.confidence,
+        prediction_event: r.prediction_event,
+        predicted_probability: r.predicted_probability === null || r.predicted_probability === undefined ? null : Number(r.predicted_probability),
+        prediction_deadline: r.prediction_deadline,
         full_analysis: r.full_analysis,
         channel: r.channel,
         created_at: r.created_at,
@@ -1121,6 +1253,9 @@ class NeonDatabaseService {
         options: r.options,
         recommendation: r.recommendation,
         confidence: r.confidence,
+        prediction_event: r.prediction_event,
+        predicted_probability: r.predicted_probability === null || r.predicted_probability === undefined ? null : Number(r.predicted_probability),
+        prediction_deadline: r.prediction_deadline,
         full_analysis: r.full_analysis,
         channel: r.channel,
         created_at: r.created_at,
@@ -1131,277 +1266,517 @@ class NeonDatabaseService {
     }
   }
 
-  /**
-   * Append-only decision outcome observation review with idempotency
-   */
+  /** Append an outcome observation with atomic idempotency and explicit verification metadata. */
   public async saveDecisionReview(review: {
     decisionId: number;
-    idempotencyKey?: string;
-    userEmail?: string;
+    idempotencyKey: string;
     observation: string;
-    actualOutcome?: string;
+    actualOutcome: string;
+    evidenceSource: string;
+    outcomeVerified: boolean;
+    supersedesReviewId?: number;
     reviewData?: Record<string, unknown>;
   }): Promise<{ reviewId: number | null; isDuplicate: boolean; conflict?: boolean }> {
-    if (!this.pool || !this.isConnected) {
-      return { reviewId: null, isDuplicate: false };
-    }
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
+    if (
+      !Number.isSafeInteger(review.decisionId) || review.decisionId < 1
+      || typeof review.idempotencyKey !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(review.idempotencyKey)
+      || typeof review.observation !== 'string' || !review.observation.trim() || review.observation.length > 8000
+      || typeof review.actualOutcome !== 'string' || !review.actualOutcome.trim()
+      || typeof review.evidenceSource !== 'string' || !review.evidenceSource.trim() || review.evidenceSource.length > 2048
+      || (review.supersedesReviewId !== undefined && (!Number.isSafeInteger(review.supersedesReviewId) || review.supersedesReviewId < 1))
+    ) throw new Error('INVALID_REVIEW_PAYLOAD');
 
+    const normalized = {
+      decisionId: review.decisionId,
+      observation: review.observation.trim(),
+      actualOutcome: review.actualOutcome.trim(),
+      evidenceSource: review.evidenceSource.trim(),
+      outcomeVerified: review.outcomeVerified === true,
+      supersedesReviewId: review.supersedesReviewId ?? null,
+      reviewData: review.reviewData || {},
+    };
+    const payloadHash = createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+    const client = await this.pool.connect();
     try {
-      if (review.idempotencyKey) {
-        const existing = await this.pool.query(
-          'SELECT id, observation, actual_outcome FROM decision_reviews WHERE idempotency_key = $1 AND (user_email = $2 OR $2 IS NULL) LIMIT 1',
-          [review.idempotencyKey, review.userEmail || null]
+      await client.query('BEGIN');
+
+      if (normalized.supersedesReviewId !== null) {
+        const prior = await client.query(
+          `SELECT id FROM decision_reviews
+           WHERE id = $1 AND decision_id = $2
+           FOR UPDATE;`,
+          [normalized.supersedesReviewId, normalized.decisionId],
         );
-        if (existing.rows.length > 0) {
-          const prev = existing.rows[0];
-          const isSameObservation = prev.observation === review.observation && (prev.actual_outcome || '') === (review.actualOutcome || '');
-          if (!isSameObservation) {
-            return { reviewId: prev.id, isDuplicate: true, conflict: true };
-          }
-          return { reviewId: prev.id, isDuplicate: true, conflict: false };
-        }
+        if (prior.rows.length !== 1) throw new Error('REVIEW_CORRECTION_TARGET_NOT_FOUND');
+        const alreadyCorrected = await client.query(
+          'SELECT id FROM decision_reviews WHERE supersedes_review_id = $1 LIMIT 1 FOR UPDATE',
+          [normalized.supersedesReviewId],
+        );
+        if (alreadyCorrected.rows.length) throw new Error('REVIEW_ALREADY_CORRECTED');
       }
 
-      const res = await this.pool.query(
-        `INSERT INTO decision_reviews (decision_id, idempotency_key, user_email, observation, actual_outcome, review_data)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id`,
+      const insert = await client.query(
+        `INSERT INTO decision_reviews
+          (decision_id, actor_id, idempotency_key, payload_hash, supersedes_review_id,
+           user_email, observation, actual_outcome, evidence_source, outcome_verified,
+           verified_at, review_data)
+         VALUES ($1, 'owner', $2, $3, $4, NULL, $5, $6, $7, $8,
+           CASE WHEN $8 THEN CURRENT_TIMESTAMP ELSE NULL END, $9)
+         ON CONFLICT (decision_id, actor_id, idempotency_key)
+           WHERE idempotency_key IS NOT NULL
+         DO NOTHING
+         RETURNING id;`,
         [
-          review.decisionId,
-          review.idempotencyKey || null,
-          review.userEmail || null,
-          review.observation,
-          review.actualOutcome || null,
-          JSON.stringify(review.reviewData || {}),
-        ]
+          normalized.decisionId, review.idempotencyKey, payloadHash, normalized.supersedesReviewId,
+          normalized.observation, normalized.actualOutcome, normalized.evidenceSource,
+          normalized.outcomeVerified, JSON.stringify(normalized.reviewData),
+        ],
       );
+      if (insert.rows.length === 1) {
+        await client.query('COMMIT');
+        return { reviewId: Number(insert.rows[0].id), isDuplicate: false, conflict: false };
+      }
 
-      return { reviewId: res.rows[0]?.id || null, isDuplicate: false, conflict: false };
-    } catch (err) {
-      console.error('[NeonDB] Failed to save decision review:', err);
-      return { reviewId: null, isDuplicate: false, conflict: false };
+      const existing = await client.query(
+        `SELECT id, payload_hash FROM decision_reviews
+         WHERE decision_id = $1 AND actor_id = 'owner' AND idempotency_key = $2
+         LIMIT 1;`,
+        [normalized.decisionId, review.idempotencyKey],
+      );
+      if (existing.rows.length !== 1) throw new Error('REVIEW_PERSISTENCE_FAILED');
+      await client.query('COMMIT');
+      return {
+        reviewId: Number(existing.rows[0].id),
+        isDuplicate: true,
+        conflict: String(existing.rows[0].payload_hash || '') !== payloadHash,
+      };
+    } catch (error: unknown) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (error instanceof Error && /^(INVALID_REVIEW_PAYLOAD|DATABASE_UNAVAILABLE|REVIEW_CORRECTION_TARGET_NOT_FOUND|REVIEW_ALREADY_CORRECTED|REVIEW_PERSISTENCE_FAILED)$/.test(error.message)) throw error;
+      console.error('[NeonDB] Review persistence failed; database error code:', postgresErrorCode(error));
+      throw new Error('REVIEW_PERSISTENCE_FAILED');
+    } finally {
+      client.release();
     }
   }
 
-  /**
-   * Retrieve outcome review history for a decision
-   */
   public async getDecisionReviews(decisionId?: number): Promise<Array<{
     id: number;
     decision_id: number;
+    actor_id: string;
     idempotency_key: string | null;
-    user_email: string | null;
+    supersedes_review_id: number | null;
     observation: string;
     actual_outcome: string | null;
+    evidence_source: string | null;
+    outcome_verified: boolean;
+    verified_at: string | null;
     review_data: Record<string, unknown>;
     created_at: string;
   }>> {
-    if (!this.pool || !this.isConnected) return [];
-
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
     try {
       const sql = decisionId
-        ? 'SELECT * FROM decision_reviews WHERE decision_id = $1 ORDER BY created_at DESC'
-        : 'SELECT * FROM decision_reviews ORDER BY created_at DESC LIMIT 100';
-      const params = decisionId ? [decisionId] : [];
-      const res = await this.pool.query(sql, params);
-      return res.rows;
-    } catch (err) {
-      console.error('[NeonDB] Error fetching decision reviews:', err);
-      return [];
+        ? 'SELECT * FROM decision_reviews WHERE decision_id = $1 ORDER BY created_at DESC, id DESC'
+        : 'SELECT * FROM decision_reviews ORDER BY created_at DESC, id DESC LIMIT 100';
+      const result = await this.pool.query(sql, decisionId ? [decisionId] : []);
+      return result.rows;
+    } catch (error: unknown) {
+      console.error('[NeonDB] Review history lookup failed; database error code:', postgresErrorCode(error));
+      throw new Error('REVIEW_HISTORY_UNAVAILABLE');
     }
   }
 
-  /**
-   * Save or update an experiment linked to a decision
-   */
+  /** Create a measurable experiment or explicitly classified hypothesis atomically. */
   public async saveDecisionExperiment(exp: {
     decisionId: number;
-    userEmail: string;
     baselineMetric?: string;
+    baselineValue?: number;
     targetMetric?: string;
     units?: string;
     thresholdValue?: number;
     measurementDirection?: 'above' | 'below';
-    status?: string;
     targetDate?: string;
-  }): Promise<{ id: number | null }> {
-    if (!this.pool || !this.isConnected) return { id: null };
+    observationWindowDays?: number;
+    evidenceSource?: string;
+    hypothesisOnly?: boolean;
+    supersedesExperimentId?: number;
+    idempotencyKey: string;
+  }): Promise<{ id: number | null; isDuplicate?: boolean; conflict?: boolean }> {
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
+    const hypothesisOnly = exp.hypothesisOnly === true;
+    const baseline = typeof exp.baselineMetric === 'string' ? exp.baselineMetric.trim() : '';
+    const metric = typeof exp.targetMetric === 'string' ? exp.targetMetric.trim() : '';
+    const units = typeof exp.units === 'string' ? exp.units.trim() : '';
+    const evidenceSource = typeof exp.evidenceSource === 'string' ? exp.evidenceSource.trim() : '';
+    const direction = exp.measurementDirection;
+    const dateMs = typeof exp.targetDate === 'string' ? Date.parse(exp.targetDate) : NaN;
+    const threshold = exp.thresholdValue;
+    const windowDays = exp.observationWindowDays;
 
+    if (
+      !Number.isSafeInteger(exp.decisionId) || exp.decisionId < 1
+      || !/^[A-Za-z0-9._:-]{1,128}$/.test(exp.idempotencyKey)
+      || typeof exp.hypothesisOnly !== 'boolean'
+      || (!hypothesisOnly && (
+        !baseline || typeof exp.baselineValue !== 'number' || !Number.isFinite(exp.baselineValue)
+        || !metric || !units || typeof threshold !== 'number' || !Number.isFinite(threshold)
+        || (direction !== 'above' && direction !== 'below')
+        || !Number.isFinite(dateMs) || dateMs <= Date.now()
+        || !Number.isSafeInteger(windowDays) || (windowDays as number) < 1 || (windowDays as number) > 3650
+        || !evidenceSource
+      ))
+      || baseline.length > 255 || metric.length > 255 || units.length > 50 || evidenceSource.length > 2048
+      || (exp.supersedesExperimentId !== undefined && (!Number.isSafeInteger(exp.supersedesExperimentId) || exp.supersedesExperimentId < 1))
+    ) throw new Error('INVALID_EXPERIMENT_CRITERIA');
+
+    const normalized = {
+      decisionId: exp.decisionId, baselineMetric: baseline || null, baselineValue: exp.baselineValue ?? null, targetMetric: metric || null,
+      units: units || null, thresholdValue: threshold ?? null, measurementDirection: direction || 'above',
+      targetDate: Number.isFinite(dateMs) ? new Date(dateMs).toISOString() : null,
+      observationWindowDays: windowDays ?? null, evidenceSource: evidenceSource || null,
+      hypothesisOnly, supersedesExperimentId: exp.supersedesExperimentId ?? null,
+    };
+    const payloadHash = createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+    const client = await this.pool.connect();
     try {
-      const res = await this.pool.query(
-        `INSERT INTO decision_experiments 
-         (decision_id, user_email, baseline_metric, target_metric, units, threshold_value, measurement_direction, status, target_date)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING id`,
-        [
-          exp.decisionId,
-          exp.userEmail,
-          exp.baselineMetric || null,
-          exp.targetMetric || null,
-          exp.units || null,
-          exp.thresholdValue ?? null,
-          exp.measurementDirection || 'above',
-          exp.status || 'Proposed',
-          exp.targetDate ? new Date(exp.targetDate).toISOString() : null,
-        ]
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1));', ['owner:' + exp.idempotencyKey]);
+      const prior = await client.query(
+        'SELECT id, payload_hash FROM decision_experiments WHERE actor_id = $1 AND idempotency_key = $2 LIMIT 1 FOR UPDATE',
+        ['owner', exp.idempotencyKey],
       );
-      return { id: res.rows[0]?.id || null };
-    } catch (err) {
-      console.error('[NeonDB] Failed to save decision experiment:', err);
-      return { id: null };
+      if (prior.rows.length === 1) {
+        await client.query('COMMIT');
+        return {
+          id: Number(prior.rows[0].id), isDuplicate: true,
+          conflict: String(prior.rows[0].payload_hash || '') !== payloadHash,
+        };
+      }
+      const decision = await client.query('SELECT id FROM decisions WHERE id = $1 LIMIT 1 FOR SHARE', [exp.decisionId]);
+      if (!decision.rows.length) throw new Error('DECISION_NOT_FOUND');
+      if (normalized.supersedesExperimentId !== null) {
+        const parent = await client.query(
+          'SELECT id FROM decision_experiments WHERE id = $1 AND decision_id = $2 FOR SHARE',
+          [normalized.supersedesExperimentId, exp.decisionId],
+        );
+        if (!parent.rows.length) throw new Error('PIVOT_PARENT_NOT_FOUND');
+      }
+      const inserted = await client.query(
+        `INSERT INTO decision_experiments
+          (decision_id, actor_id, user_email, baseline_metric, baseline_value, target_metric, units,
+           threshold_value, measurement_direction, observation_window_days, evidence_source,
+           is_hypothesis, supersedes_experiment_id, status, target_date, idempotency_key, payload_hash)
+         VALUES ($1, 'owner', NULL, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'Proposed', $12, $13, $14)
+         RETURNING id;`,
+        [
+          normalized.decisionId, normalized.baselineMetric, normalized.baselineValue, normalized.targetMetric, normalized.units,
+          normalized.thresholdValue, normalized.measurementDirection, normalized.observationWindowDays,
+          normalized.evidenceSource, normalized.hypothesisOnly, normalized.supersedesExperimentId,
+          normalized.targetDate, exp.idempotencyKey, payloadHash,
+        ],
+      );
+      const id = Number(inserted.rows[0]?.id);
+      if (!Number.isSafeInteger(id) || id < 1) throw new Error('EXPERIMENT_PERSISTENCE_FAILED');
+      await client.query(
+        `INSERT INTO decision_experiment_events (experiment_id, actor_id, event_type, to_status, payload)
+         VALUES ($1, 'owner', $2, 'Proposed', $3::jsonb);`,
+        [id, hypothesisOnly ? 'hypothesis_registered' : 'experiment_registered', JSON.stringify(normalized)],
+      );
+      await client.query('COMMIT');
+      return { id, isDuplicate: false, conflict: false };
+    } catch (error: unknown) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (error instanceof Error && /^(INVALID_EXPERIMENT_CRITERIA|DECISION_NOT_FOUND|PIVOT_PARENT_NOT_FOUND|EXPERIMENT_PERSISTENCE_FAILED)$/.test(error.message)) throw error;
+      console.error('[NeonDB] Experiment registration failed; database error code:', postgresErrorCode(error));
+      throw new Error('EXPERIMENT_PERSISTENCE_FAILED');
+    } finally {
+      client.release();
     }
   }
 
-  /**
-   * Get all experiments for a decision or across all decisions
-   */
   public async getDecisionExperiments(decisionId?: number): Promise<Array<{
     id: number;
     decision_id: number;
-    user_email: string;
+    actor_id: string;
     baseline_metric: string | null;
     target_metric: string | null;
     units: string | null;
     threshold_value: number | null;
     measurement_direction: string;
-    status: string;
+    observation_window_days: number | null;
+    evidence_source: string | null;
+    is_hypothesis: boolean;
+    supersedes_experiment_id: number | null;
+    status: ExperimentLifecycleStatus | string;
     start_date: string;
     target_date: string | null;
     created_at: string;
+    updated_at: string;
     decision_title?: string;
   }>> {
-    if (!this.pool || !this.isConnected) return [];
-
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
     try {
-      const sql = decisionId
-        ? `SELECT e.*, d.title as decision_title 
-           FROM decision_experiments e 
-           JOIN decisions d ON d.id = e.decision_id 
-           WHERE e.decision_id = $1 
-           ORDER BY e.created_at DESC`
-        : `SELECT e.*, d.title as decision_title 
-           FROM decision_experiments e 
-           JOIN decisions d ON d.id = e.decision_id 
-           ORDER BY e.created_at DESC LIMIT 100`;
-      const params = decisionId ? [decisionId] : [];
-      const res = await this.pool.query(sql, params);
-      return res.rows;
-    } catch (err) {
-      console.error('[NeonDB] Error fetching decision experiments:', err);
-      return [];
+      const select = `SELECT e.*, d.title AS decision_title,
+        CASE
+          WHEN e.status IN ('Active', 'Active Experiment', 'Awaiting Data') AND e.target_date < CURRENT_TIMESTAMP THEN 'Overdue'
+          WHEN e.status = 'Active' THEN 'Active Experiment'
+          ELSE e.status
+        END AS effective_status
+        FROM decision_experiments e JOIN decisions d ON d.id = e.decision_id`;
+      const result = await this.pool.query(
+        decisionId ? select + ' WHERE e.decision_id = $1 ORDER BY e.created_at DESC, e.id DESC'
+          : select + ' ORDER BY e.created_at DESC, e.id DESC LIMIT 100',
+        decisionId ? [decisionId] : [],
+      );
+      return result.rows.map((row) => ({ ...row, status: row.effective_status as string, is_hypothesis: Boolean(row.is_hypothesis) }));
+    } catch (error: unknown) {
+      console.error('[NeonDB] Experiment lookup failed; database error code:', postgresErrorCode(error));
+      throw new Error('EXPERIMENT_LOOKUP_UNAVAILABLE');
     }
   }
 
-  /**
-   * Compute unbundled Brier score and calibration metrics across finalized decisions
-   */
+  /** Status update and lifecycle event share a transaction; terminal states cannot reopen. */
+  public async transitionDecisionExperiment(input: {
+    experimentId: number;
+    toStatus: ExperimentLifecycleStatus;
+    idempotencyKey: string;
+    note?: string;
+    replacementExperimentId?: number;
+  }): Promise<{ experimentId: number; isDuplicate: boolean; conflict: boolean }> {
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
+    if (
+      !Number.isSafeInteger(input.experimentId) || input.experimentId < 1
+      || !isExperimentLifecycleStatus(input.toStatus) || input.toStatus === 'Overdue'
+      || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.idempotencyKey)
+      || (input.note !== undefined && (typeof input.note !== 'string' || input.note.length > 8000))
+    ) throw new Error('INVALID_EXPERIMENT_TRANSITION');
+    const note = input.note?.trim() || '';
+    if (['Inconclusive', 'Cancelled', 'Pivoted'].includes(input.toStatus) && !note) throw new Error('EXPERIMENT_TRANSITION_NOTE_REQUIRED');
+    if (transitionRequiresReplacement(input.toStatus)) {
+      if (!Number.isSafeInteger(input.replacementExperimentId) || (input.replacementExperimentId as number) < 1) throw new Error('PIVOT_REPLACEMENT_REQUIRED');
+    } else if (input.replacementExperimentId !== undefined) throw new Error('PIVOT_REPLACEMENT_NOT_ALLOWED');
+
+    const normalized = { toStatus: input.toStatus, note, replacementExperimentId: input.replacementExperimentId ?? null };
+    const payloadHash = createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query('SELECT id, decision_id, status, target_date FROM decision_experiments WHERE id = $1 FOR UPDATE', [input.experimentId]);
+      if (!result.rows.length) throw new Error('EXPERIMENT_NOT_FOUND');
+      const current = result.rows[0];
+      const prior = await client.query(
+        'SELECT payload_hash FROM decision_experiment_events WHERE experiment_id = $1 AND actor_id = $2 AND idempotency_key = $3 LIMIT 1 FOR UPDATE',
+        [input.experimentId, 'owner', input.idempotencyKey],
+      );
+      if (prior.rows.length) {
+        await client.query('COMMIT');
+        return { experimentId: input.experimentId, isDuplicate: true, conflict: String(prior.rows[0].payload_hash || '') !== payloadHash };
+      }
+      const fromStatus = getEffectiveExperimentStatus(current.status, current.target_date) || current.status;
+      if (!isExperimentLifecycleStatus(fromStatus) || !canTransitionExperiment(fromStatus, input.toStatus)) throw new Error('INVALID_EXPERIMENT_TRANSITION');
+      if (input.toStatus === 'Completed Review') {
+        const verified = await client.query(
+          `SELECT id FROM decision_experiment_observations
+           WHERE experiment_id = $1 AND outcome_verified = TRUE
+             AND actual_outcome IN ('Met Success Threshold', 'Missed Baseline')
+             AND evidence_source IS NOT NULL AND LENGTH(BTRIM(evidence_source)) > 0
+             AND verified_at IS NOT NULL ORDER BY verified_at DESC LIMIT 1;`,
+          [input.experimentId],
+        );
+        if (!verified.rows.length) throw new Error('VERIFIED_OUTCOME_REQUIRED');
+      }
+      if (input.toStatus === 'Pivoted') {
+        const replacement = await client.query(
+          'SELECT id FROM decision_experiments WHERE id = $1 AND decision_id = $2 AND supersedes_experiment_id = $3 LIMIT 1 FOR SHARE',
+          [input.replacementExperimentId, current.decision_id, input.experimentId],
+        );
+        if (!replacement.rows.length) throw new Error('PIVOT_REPLACEMENT_NOT_LINKED');
+      }
+      await client.query('UPDATE decision_experiments SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [input.toStatus, input.experimentId]);
+      await client.query(
+        `INSERT INTO decision_experiment_events
+          (experiment_id, actor_id, event_type, from_status, to_status, idempotency_key, payload_hash, payload)
+         VALUES ($1, 'owner', 'status_transition', $2, $3, $4, $5, $6::jsonb);`,
+        [input.experimentId, fromStatus, input.toStatus, input.idempotencyKey, payloadHash, JSON.stringify(normalized)],
+      );
+      await client.query('COMMIT');
+      return { experimentId: input.experimentId, isDuplicate: false, conflict: false };
+    } catch (error: unknown) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (error instanceof Error && /^(INVALID_EXPERIMENT_TRANSITION|EXPERIMENT_TRANSITION_NOTE_REQUIRED|PIVOT_REPLACEMENT_REQUIRED|PIVOT_REPLACEMENT_NOT_ALLOWED|EXPERIMENT_NOT_FOUND|VERIFIED_OUTCOME_REQUIRED|PIVOT_REPLACEMENT_NOT_LINKED)$/.test(error.message)) throw error;
+      console.error('[NeonDB] Experiment transition failed; database error code:', postgresErrorCode(error));
+      throw new Error('EXPERIMENT_TRANSITION_PERSISTENCE_FAILED');
+    } finally { client.release(); }
+  }
+
+  public async appendDecisionExperimentObservation(input: {
+    experimentId: number;
+    idempotencyKey: string;
+    observation: string;
+    measuredValue?: number;
+    evidenceSource: string;
+    actualOutcome?: string;
+    ownerConfirmed?: boolean;
+  }): Promise<{ observationId: number; isDuplicate: boolean; conflict: boolean }> {
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
+    if (
+      !Number.isSafeInteger(input.experimentId) || input.experimentId < 1
+      || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.idempotencyKey)
+      || typeof input.observation !== 'string' || !input.observation.trim() || input.observation.length > 8000
+      || typeof input.evidenceSource !== 'string' || !input.evidenceSource.trim() || input.evidenceSource.length > 2048
+      || (input.measuredValue !== undefined && (typeof input.measuredValue !== 'number' || !Number.isFinite(input.measuredValue)))
+    ) throw new Error('INVALID_EXPERIMENT_OBSERVATION');
+    const allowed = ['Met Success Threshold', 'Missed Baseline', 'Inconclusive', 'Pivot Executed'];
+    if (input.actualOutcome !== undefined && !allowed.includes(input.actualOutcome)) throw new Error('INVALID_EXPERIMENT_OUTCOME');
+    const binary = input.actualOutcome === 'Met Success Threshold' || input.actualOutcome === 'Missed Baseline';
+    if (binary && input.ownerConfirmed !== true) throw new Error('OUTCOME_CONFIRMATION_REQUIRED');
+    const normalized = {
+      experimentId: input.experimentId, observation: input.observation.trim(), measuredValue: input.measuredValue ?? null,
+      evidenceSource: input.evidenceSource.trim(), actualOutcome: input.actualOutcome ?? null, outcomeVerified: binary && input.ownerConfirmed === true,
+    };
+    const payloadHash = createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const experiment = await client.query('SELECT id, status, target_date FROM decision_experiments WHERE id = $1 FOR UPDATE', [input.experimentId]);
+      if (!experiment.rows.length) throw new Error('EXPERIMENT_NOT_FOUND');
+      const effectiveStatus = getEffectiveExperimentStatus(experiment.rows[0].status, experiment.rows[0].target_date);
+      if (!effectiveStatus || !['Active Experiment', 'Awaiting Data', 'Overdue'].includes(effectiveStatus)) throw new Error('EXPERIMENT_NOT_ACCEPTING_OBSERVATIONS');
+      const prior = await client.query(
+        'SELECT id, payload_hash FROM decision_experiment_observations WHERE experiment_id = $1 AND actor_id = $2 AND idempotency_key = $3 LIMIT 1 FOR UPDATE',
+        [input.experimentId, 'owner', input.idempotencyKey],
+      );
+      if (prior.rows.length) {
+        await client.query('COMMIT');
+        return { observationId: Number(prior.rows[0].id), isDuplicate: true, conflict: String(prior.rows[0].payload_hash || '') !== payloadHash };
+      }
+      const inserted = await client.query(
+        `INSERT INTO decision_experiment_observations
+          (experiment_id, actor_id, idempotency_key, payload_hash, observation, measured_value, evidence_source, actual_outcome, outcome_verified, verified_at)
+         VALUES ($1, 'owner', $2, $3, $4, $5, $6, $7, $8, CASE WHEN $8 THEN CURRENT_TIMESTAMP ELSE NULL END) RETURNING id;`,
+        [input.experimentId, input.idempotencyKey, payloadHash, normalized.observation, normalized.measuredValue, normalized.evidenceSource, normalized.actualOutcome, normalized.outcomeVerified],
+      );
+      const observationId = Number(inserted.rows[0]?.id);
+      if (!Number.isSafeInteger(observationId) || observationId < 1) throw new Error('EXPERIMENT_OBSERVATION_PERSISTENCE_FAILED');
+      await client.query(
+        `INSERT INTO decision_experiment_events
+          (experiment_id, actor_id, event_type, idempotency_key, payload_hash, payload)
+         VALUES ($1, 'owner', 'observation_recorded', $2, $3, $4::jsonb);`,
+        [input.experimentId, input.idempotencyKey, payloadHash, JSON.stringify({ ...normalized, observationId })],
+      );
+      await client.query('COMMIT');
+      return { observationId, isDuplicate: false, conflict: false };
+    } catch (error: unknown) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if (error instanceof Error && /^(INVALID_EXPERIMENT_OBSERVATION|INVALID_EXPERIMENT_OUTCOME|OUTCOME_CONFIRMATION_REQUIRED|EXPERIMENT_NOT_FOUND|EXPERIMENT_NOT_ACCEPTING_OBSERVATIONS|EXPERIMENT_OBSERVATION_PERSISTENCE_FAILED)$/.test(error.message)) throw error;
+      console.error('[NeonDB] Experiment observation failed; database error code:', postgresErrorCode(error));
+      throw new Error('EXPERIMENT_OBSERVATION_PERSISTENCE_FAILED');
+    } finally { client.release(); }
+  }
+
+  public async getDecisionExperimentEvents(experimentId: number): Promise<Array<{
+    id: number; event_type: string; from_status: string | null; to_status: string | null;
+    payload: Record<string, unknown>; created_at: string;
+  }>> {
+    if (!this.pool || !this.isConnected) throw new Error('DATABASE_UNAVAILABLE');
+    if (!Number.isSafeInteger(experimentId) || experimentId < 1) throw new Error('INVALID_EXPERIMENT_ID');
+    try {
+      const result = await this.pool.query(
+        `SELECT id, event_type, from_status, to_status, payload, created_at FROM decision_experiment_events
+         WHERE experiment_id = $1 ORDER BY created_at DESC, id DESC LIMIT 200;`,
+        [experimentId],
+      );
+      return result.rows;
+    } catch (error: unknown) {
+      console.error('[NeonDB] Experiment event history failed; database error code:', postgresErrorCode(error));
+      throw new Error('EXPERIMENT_HISTORY_UNAVAILABLE');
+    }
+  }
+
   public async getCalibrationMetrics(): Promise<{
-    available: boolean;
-    error?: string;
-    totalDecisions: number | null;
-    totalReviews: number | null;
-    eligibleCount: number;
-    sampleSizeSufficient: boolean; // requires eligibleCount >= 5
-    brierScore: number | null; // (1/N) * sum((predicted_prob - outcome)^2)
-    overconfidenceLevel: number | null;
+    available: boolean; error?: string; totalDecisions: number | null; totalReviews: number | null;
+    eligibleCount: number; sampleSizeSufficient: boolean; brierScore: number | null;
+    meanPredictedProbability: number | null; observedSuccessRate: number | null; meanCalibrationBias: number | null;
+    successfulOutcomes: number; verifiedOutcomeCount: number; unverifiedOutcomeCount: number;
+    calibrationBands: ReturnType<typeof calculateCalibrationMetrics>['calibrationBands'];
     outcomeCounts: Record<string, number>;
   }> {
     if (!this.pool || !this.isConnected) {
       return {
-        available: false,
-        error: 'DATABASE_UNAVAILABLE',
-        totalDecisions: null,
-        totalReviews: null,
-        eligibleCount: 0,
-        sampleSizeSufficient: false,
-        brierScore: null,
-        overconfidenceLevel: null,
-        outcomeCounts: {
-          'Met Success Threshold': 0,
-          'Missed Baseline': 0,
-          'Inconclusive': 0,
-          'Pivot Executed': 0,
-          'Overdue': 0,
-          'Cancelled': 0,
-        },
+        available: false, error: 'DATABASE_UNAVAILABLE', totalDecisions: null, totalReviews: null,
+        eligibleCount: 0, sampleSizeSufficient: false, brierScore: null, meanPredictedProbability: null,
+        observedSuccessRate: null, meanCalibrationBias: null, successfulOutcomes: 0, verifiedOutcomeCount: 0,
+        unverifiedOutcomeCount: 0, calibrationBands: [], outcomeCounts: {},
       };
     }
-
     try {
-      const dRes = await this.pool.query('SELECT COUNT(*) FROM decisions');
-      const totalDecisions = parseInt(dRes.rows[0]?.count || '0', 10);
-
-      const rRes = await this.pool.query(`
-        SELECT dr.actual_outcome, d.confidence 
-        FROM decision_reviews dr 
-        JOIN decisions d ON d.id = dr.decision_id
-      `);
-
-      const totalReviews = rRes.rows.length;
-      const outcomeCounts: Record<string, number> = {
-        'Met Success Threshold': 0,
-        'Missed Baseline': 0,
-        'Inconclusive': 0,
-        'Pivot Executed': 0,
-        'Overdue': 0,
-        'Cancelled': 0,
-      };
-
-      let sumSquareError = 0;
-      let sumPredictedProbability = 0;
-      let sumObservedOutcome = 0;
-      let eligibleCount = 0;
-
-      for (const row of rRes.rows) {
-        const outcome = row.actual_outcome || 'Inconclusive';
-        outcomeCounts[outcome] = (outcomeCounts[outcome] || 0) + 1;
-
-        // Brier score calculation applies only to binary outcomes (Met Success Threshold = 1, Missed Baseline = 0)
+      const [decisionCount, reviewCount, latestReviews, eligibleRows] = await Promise.all([
+        this.pool.query('SELECT COUNT(*)::int AS count FROM decisions;'),
+        this.pool.query('SELECT COUNT(*)::int AS count FROM decision_reviews;'),
+        this.pool.query(
+          `WITH current_reviews AS (
+            SELECT dr.* FROM decision_reviews dr
+            WHERE NOT EXISTS (SELECT 1 FROM decision_reviews correction WHERE correction.supersedes_review_id = dr.id)
+          )
+          SELECT DISTINCT ON (dr.decision_id) dr.actual_outcome, dr.outcome_verified, dr.evidence_source, dr.verified_at
+          FROM current_reviews dr ORDER BY dr.decision_id, dr.created_at DESC, dr.id DESC;`,
+        ),
+        this.pool.query(
+          `WITH current_reviews AS (
+            SELECT dr.* FROM decision_reviews dr
+            WHERE NOT EXISTS (SELECT 1 FROM decision_reviews correction WHERE correction.supersedes_review_id = dr.id)
+          ),
+          latest_review AS (
+            SELECT DISTINCT ON (dr.decision_id) dr.*
+            FROM current_reviews dr ORDER BY dr.decision_id, dr.created_at DESC, dr.id DESC
+          )
+          SELECT d.id AS decision_id, d.prediction_event, d.predicted_probability, d.prediction_deadline,
+            dr.actual_outcome, dr.outcome_verified, dr.evidence_source, dr.verified_at
+          FROM decisions d
+          JOIN latest_review dr ON dr.decision_id = d.id
+          WHERE dr.outcome_verified = TRUE AND dr.verified_at IS NOT NULL
+            AND dr.evidence_source IS NOT NULL AND LENGTH(BTRIM(dr.evidence_source)) > 0
+            AND dr.actual_outcome IN ('Met Success Threshold', 'Missed Baseline')
+            AND d.prediction_event IS NOT NULL AND LENGTH(BTRIM(d.prediction_event)) > 0
+            AND d.predicted_probability BETWEEN 0 AND 1
+            AND d.prediction_deadline IS NOT NULL AND d.prediction_deadline <= CURRENT_TIMESTAMP;`,
+        ),
+      ]);
+      const categories = ['Met Success Threshold','Missed Baseline','Inconclusive','Pivot Executed','Cancelled','Pending Verification','Unverified Outcome'];
+      const outcomeCounts: Record<string, number> = Object.fromEntries(categories.map((x) => [x, 0]));
+      for (const row of latestReviews.rows) {
+        const outcome = typeof row.actual_outcome === 'string' ? row.actual_outcome : 'Pending Verification';
         if (outcome === 'Met Success Threshold' || outcome === 'Missed Baseline') {
-          const confidence = row.confidence === null || row.confidence === undefined ? NaN : Number(row.confidence);
-          if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) continue;
-          const predictedProb = confidence / 100;
-          const actualVal = outcome === 'Met Success Threshold' ? 1 : 0;
-          sumSquareError += Math.pow(predictedProb - actualVal, 2);
-          sumPredictedProbability += predictedProb;
-          sumObservedOutcome += actualVal;
-          eligibleCount++;
-        }
+          const verified = row.outcome_verified === true && typeof row.evidence_source === 'string' && row.evidence_source.trim() && row.verified_at;
+          outcomeCounts[verified ? outcome : 'Unverified Outcome'] += 1;
+        } else if (Object.prototype.hasOwnProperty.call(outcomeCounts, outcome)) outcomeCounts[outcome] += 1;
+        else outcomeCounts['Pending Verification'] += 1;
       }
-
-      const sampleSizeSufficient = eligibleCount >= 5;
-      const brierScore = sampleSizeSufficient && eligibleCount > 0 ? parseFloat((sumSquareError / eligibleCount).toFixed(4)) : null;
-      const meanPredictionBias = sampleSizeSufficient && eligibleCount > 0
-        ? (sumPredictedProbability / eligibleCount) - (sumObservedOutcome / eligibleCount)
-        : null;
-      // 0.5 indicates no mean calibration bias; above 0.5 means predicted probabilities
-      // exceed the observed success rate in the eligible binary-outcome sample.
-      const overconfidenceLevel = meanPredictionBias === null
-        ? null
-        : Math.max(0, Math.min(1, 0.5 + meanPredictionBias / 2));
-
+      const calculation = calculateCalibrationMetrics(eligibleRows.rows.map((row) => ({
+        decisionId: Number(row.decision_id), predictionEvent: row.prediction_event,
+        predictedProbability: row.predicted_probability, predictionDeadline: row.prediction_deadline,
+        actualOutcome: row.actual_outcome, outcomeVerified: row.outcome_verified === true,
+        evidenceSource: row.evidence_source, verifiedAt: row.verified_at,
+      })));
+      const verifiedOutcomeCount = outcomeCounts['Met Success Threshold'] + outcomeCounts['Missed Baseline'];
       return {
-        available: true,
-        totalDecisions,
-        totalReviews,
-        eligibleCount,
-        sampleSizeSufficient,
-        brierScore,
-        overconfidenceLevel,
-        outcomeCounts,
+        available: true, totalDecisions: Number(decisionCount.rows[0]?.count ?? 0),
+        totalReviews: Number(reviewCount.rows[0]?.count ?? 0), eligibleCount: calculation.eligibleCount,
+        sampleSizeSufficient: calculation.sampleSizeSufficient, brierScore: calculation.brierScore,
+        meanPredictedProbability: calculation.meanPredictedProbability, observedSuccessRate: calculation.observedSuccessRate,
+        meanCalibrationBias: calculation.meanCalibrationBias, successfulOutcomes: calculation.successfulOutcomes,
+        verifiedOutcomeCount, unverifiedOutcomeCount: outcomeCounts['Unverified Outcome'],
+        calibrationBands: calculation.calibrationBands, outcomeCounts,
       };
-    } catch (err) {
-      console.error('[NeonDB] Error computing calibration metrics:', err);
+    } catch (error: unknown) {
+      console.error('[NeonDB] Calibration query failed; database error code:', postgresErrorCode(error));
       return {
-        available: false,
-        error: 'CALIBRATION_QUERY_FAILED',
-        totalDecisions: null,
-        totalReviews: null,
-        eligibleCount: 0,
-        sampleSizeSufficient: false,
-        brierScore: null,
-        overconfidenceLevel: null,
-        outcomeCounts: {},
+        available: false, error: 'CALIBRATION_QUERY_FAILED', totalDecisions: null, totalReviews: null,
+        eligibleCount: 0, sampleSizeSufficient: false, brierScore: null, meanPredictedProbability: null,
+        observedSuccessRate: null, meanCalibrationBias: null, successfulOutcomes: 0,
+        verifiedOutcomeCount: 0, unverifiedOutcomeCount: 0, calibrationBands: [], outcomeCounts: {},
       };
     }
   }

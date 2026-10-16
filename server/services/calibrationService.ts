@@ -8,7 +8,7 @@ export interface CalibrationStats {
   totalReviewed: number | null;
   available: boolean;
   accuracyTrend: 'improving' | 'declining' | 'stable' | 'insufficient_data';
-  overconfidenceLevel: number | null; // null until enough valid observed outcomes exist
+  meanCalibrationBias: number | null;
 }
 
 class CalibrationService {
@@ -93,7 +93,7 @@ class CalibrationService {
       totalReviewed: metrics.available ? metrics.eligibleCount : null,
       // The query returns one aggregate, not a time series; directional trends are unavailable.
       accuracyTrend: 'insufficient_data',
-      overconfidenceLevel: metrics.available ? metrics.overconfidenceLevel : null,
+      meanCalibrationBias: metrics.available ? metrics.meanCalibrationBias : null,
     };
   }
 
@@ -104,20 +104,20 @@ class CalibrationService {
     const summary = await this.getCalibrationSummary();
     if (!summary.available || summary.brierScore === null || summary.totalReviewed === null || summary.totalReviewed < 5) return '';
 
-    const measuredBias = summary.overconfidenceLevel;
-    let insight = 'The observed sample does not indicate a directional mean calibration bias.';
-    if (measuredBias !== null && measuredBias > 0.55) {
-      insight = 'Observed mean predicted probability exceeded the observed success rate in the eligible sample.';
-    } else if (measuredBias !== null && measuredBias < 0.45) {
-      insight = 'Observed mean predicted probability was below the observed success rate in the eligible sample.';
+    const measuredBias = summary.meanCalibrationBias;
+    let insight = 'The eligible sample is too limited to draw a directional calibration conclusion.';
+    if (measuredBias !== null && measuredBias > 0) {
+      insight = 'The recorded forecast probability exceeds the observed success rate in eligible observations.';
+    } else if (measuredBias !== null && measuredBias < 0) {
+      insight = 'The recorded forecast probability is below the observed success rate in eligible observations.';
     }
 
     return `\n\nDECISION CALIBRATION METRICS\n` +
-      `- Empirical Brier score: ${summary.brierScore} (0 is perfect; 1 is worst for binary outcomes)\n` +
-      `- Eligible decisions evaluated: ${summary.totalReviewed}\n` +
-      `- Measured mean calibration level: ${measuredBias === null ? 'unavailable' : measuredBias}\n` +
+      `- Empirical Brier score: ${summary.brierScore} (0 is best; 1 is worst for binary outcomes)\n` +
+      `- Eligible forecasts evaluated: ${summary.totalReviewed}\n` +
+      `- Mean calibration bias (predicted probability minus observed success rate): ${measuredBias === null ? 'unavailable' : measuredBias}\n` +
       `- Empirical observation: ${insight}\n` +
-      'Use only this measured history; do not infer a time trend from this aggregate.';
+      'Use only recorded probabilities, elapsed prediction windows, owner-verified binary outcomes, and documented evidence. Do not infer a time trend from this aggregate.';
   }
 }
 
