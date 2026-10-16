@@ -2087,289 +2087,181 @@ app.post('/api/scrape', async (req: Request, res: Response): Promise<void> => {
 
 // Multi-Agent Debate & Devil's Advocate Endpoint (Strict Zero-Fallback & Evidence-Audited)
 app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
-  const { topic } = req.body;
-  if (!topic) {
-    res.status(400).json({ success: false, error: 'Debate topic is required' });
-    return;
-  }
   try {
-    const s = settingsManager.getSettings();
-    const effectiveMistralKey = req.body.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY;
-    const effectiveGroqKey = req.body.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY;
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    if (!topic) {
+      res.status(400).json({ success: false, code: 'DEBATE_TOPIC_REQUIRED' });
+      return;
+    }
 
+    const settings = settingsManager.getSettings();
+    const keys = {
+      gemini: (req.body.customGeminiKey || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
+      groq: (req.body.customGroqKey || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
+      mistral: (req.body.customMistralKey || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+    };
+    const missingCredentials = Object.entries(keys).filter(([, key]) => !key).map(([provider]) => provider);
+    if (missingCredentials.length) {
+      res.status(503).json({
+        success: false,
+        code: 'DEBATE_PROVIDER_CREDENTIALS_MISSING',
+        missingProviders: missingCredentials,
+      });
+      return;
+    }
+
+    const configuredModels = {
+      gemini: settings.providerModels.gemini || (settings.activeProvider === 'gemini' ? settings.activeModel : ''),
+      groq: settings.providerModels.groq || (settings.activeProvider === 'groq' ? settings.activeModel : ''),
+      mistral: settings.providerModels.mistral || (settings.activeProvider === 'mistral' ? settings.activeModel : ''),
+    };
+    const missingModels = Object.entries(configuredModels).filter(([, model]) => !model).map(([provider]) => provider);
+    if (missingModels.length) {
+      res.status(503).json({
+        success: false,
+        code: 'DEBATE_MODEL_CONFIGURATION_MISSING',
+        missingProviders: missingModels,
+      });
+      return;
+    }
+
+    // Each role is bound to its explicitly configured provider. No cross-provider fallback is permitted.
     const [geminiModel, groqModel, mistralModel] = await Promise.all([
-      modelCatalogService.resolveModelForProvider('gemini', s.providerModels.gemini),
-      modelCatalogService.resolveModelForProvider('groq', s.providerModels.groq, effectiveGroqKey),
-      modelCatalogService.resolveModelForProvider('mistral', s.providerModels.mistral, effectiveMistralKey),
+      modelCatalogService.resolveModelForProvider('gemini', configuredModels.gemini, keys.gemini),
+      modelCatalogService.resolveModelForProvider('groq', configuredModels.groq, keys.groq),
+      modelCatalogService.resolveModelForProvider('mistral', configuredModels.mistral, keys.mistral),
     ]);
 
-    // Pass 1: Search Knowledge Vault for verified evidence
-    let knowledgeDocs: Array<{ id?: string | number; title: string; content: string }> = [];
-    let contextStatus: 'available' | 'unavailable' = 'unavailable';
+    const requestedSynthesisProvider = req.body.provider || settings.activeProvider;
+    if (requestedSynthesisProvider !== 'gemini' && requestedSynthesisProvider !== 'groq' && requestedSynthesisProvider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'SYNTHESIS_PROVIDER_CONFIGURATION_REQUIRED' });
+      return;
+    }
+    const synthesisModel = req.body.model || configuredModels[requestedSynthesisProvider];
+    const synthesisKey = keys[requestedSynthesisProvider];
+    const liveSynthesisModel = await modelCatalogService.resolveModelForProvider(
+      requestedSynthesisProvider,
+      synthesisModel,
+      synthesisKey
+    );
 
+    let knowledgeDocs: Array<{ id?: string | number; title: string; content: string }> = [];
+    let knowledgeStatus: 'available' | 'no_matching_records' | 'query_failed' = 'no_matching_records';
     try {
       knowledgeDocs = await knowledgeService.search(topic, 3, 0.35);
-      if (knowledgeDocs.length > 0) {
-        contextStatus = 'available';
-      }
-    } catch (kErr) {
-      console.warn('Knowledge Vault search warning for debate:', kErr);
-      contextStatus = 'unavailable';
+      knowledgeStatus = knowledgeDocs.length ? 'available' : 'no_matching_records';
+    } catch (error) {
+      knowledgeStatus = 'query_failed';
+      console.warn('[Debate] Knowledge retrieval failed:', error instanceof Error ? error.message : 'unknown error');
     }
 
-    const groundTruthContext = contextStatus === 'available'
-      ? `VERIFIED KNOWLEDGE VAULT RECORDS:\n${knowledgeDocs.map((d) => `- [Source ID: ${d.id || 'doc'}] "${d.title}": ${d.content.slice(0, 300)}`).join('\n')}\n`
-      : 'EXPLICIT STATUS: Knowledge Vault returned 0 matching documents or was unavailable. NO PRE-EXISTING VERIFIED RECORDS EXIST FOR THIS TOPIC.\n';
+    const sourceContext = knowledgeStatus === 'available'
+      ? knowledgeDocs.map((doc) => {
+          const sourceId = doc.id === undefined || doc.id === null ? '' : ' [record id: ' + doc.id + ']';
+          return '- ' + doc.title + sourceId + ': ' + doc.content.slice(0, 2000);
+        }).join('\n')
+      : '';
 
-    const evidenceRules = `
-EVIDENCE STANDARDS & CLAIM VALIDATION CONTRACTS:
-1. Every claim MUST be explicitly tagged with one of: [Verified], [Inferred], [Hypothesis], [Unknown].
-2. [Verified] requires referencing a specific matching record from the VERIFIED KNOWLEDGE VAULT RECORDS above.
-${contextStatus === 'unavailable' ? '3. CRITICAL: Zero Knowledge Vault records were retrieved. You MUST NOT label any statement or numerical metric as [Verified]. Tag claims as [Hypothesis] or [Unknown].' : ''}
-4. DO NOT invent or simulate unverified figures (user counts, revenue, conversion rates) as verified facts.
-5. If no baseline metric exists in the sources, label proposed targets as [Conditional Hypothesis - Missing Baseline].
-`;
+    const evidenceContext = [
+      'Knowledge retrieval status: ' + knowledgeStatus + '.',
+      sourceContext ? 'Retrieved stored records (these establish what is stored, not independent external verification):\n' + sourceContext : '',
+      'Do not claim that knowledge retrieval occurred successfully unless the status says available.',
+      'Distinguish sourced statements from inferences, hypotheses, and unknowns. Do not invent user metrics, baselines, sources, or historical data.',
+      'When source data is missing, describe the uncertainty and state what data would be needed to resolve it.',
+    ].filter(Boolean).join('\n\n');
 
-    // Server-Side Claim Downgrade Validator
-    const enforceClaimValidation = (text: string): string => {
-      if (contextStatus === 'unavailable') {
-        // Downgrade any ungrounded [Verified] tags to [Hypothesis - Source Unverified]
-        return text.replace(/\[Verified\]/g, '[Hypothesis - Source Unverified]');
-      }
-      return text;
-    };
+    const callProvider = (
+      provider: 'gemini' | 'groq' | 'mistral',
+      model: string,
+      prompt: string
+    ) => twinAgentService.generateCompletion({
+      prompt,
+      provider,
+      model,
+      customGeminiKey: keys.gemini,
+      customGroqKey: keys.groq,
+      customMistralKey: keys.mistral,
+    });
 
-    let partialRun = false;
-    const targetProvider = req.body.provider || s.activeProvider || 'gemini';
-    const targetModel = req.body.model || s.activeModel;
+    const proPrompt = [
+      'Analyze the proposed decision as a constructive advocate. Present the strongest reasonable case, practical value drivers, constraints, and a testable validation plan. Do not make up evidence or metrics.',
+      'Topic: ' + topic,
+      evidenceContext,
+    ].join('\n\n');
+    const contrarianPrompt = [
+      'Act as an independent adversarial reviewer. Identify the strongest unsupported assumption, downside risks, second-order consequences, and evidence that would disprove the preferred option. Do not invent facts or claim unsupported certainty.',
+      'Topic: ' + topic,
+      evidenceContext,
+    ].join('\n\n');
+    const realistPrompt = [
+      'Assess execution feasibility. Identify dependencies, available-resource constraints, realistic sequencing, costs, operational risks, and measurable criteria that require an observed baseline. Do not fabricate existing resources or metrics.',
+      'Topic: ' + topic,
+      evidenceContext,
+    ].join('\n\n');
 
-    // Pass 2: Pro Advocate (Uses user active provider/model or Gemini)
-    const proPrompt = `You are the Pro / Optimist Advocate in a multi-agent decision debate.
-Debate Topic: "${topic}"
-
-${groundTruthContext}
-${evidenceRules}
-
-Present a strong, structured, evidence-backed argument supporting this topic or direction.
-Include:
-1. Core Strategic Thesis (with explicit evidence tags)
-2. Key Value Drivers & Evidence
-3. Proposed Validation Plan & Minimum Success Thresholds
-Be rigorous, concise, and honest about assumptions.`;
-
-    let proArg = '';
-    let proAgentName = `${targetProvider.toUpperCase()} Pro Advocate`;
-    try {
-      const proResText = await twinAgentService.generateCompletion({
-        prompt: proPrompt,
-        provider: targetProvider,
-        model: targetModel,
-        customGeminiKey: req.body.customGeminiKey,
-        customGroqKey: req.body.customGroqKey,
-        customMistralKey: req.body.customMistralKey,
-      });
-      proArg = enforceClaimValidation(proResText || 'No argument generated.');
-    } catch (err) {
-      partialRun = true;
-      proArg = `[Provider Error] Pro Advocate pass unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    const [proArgRaw, contrarianRaw, realistRaw] = await Promise.all([
+      callProvider('gemini', geminiModel, proPrompt),
+      callProvider('mistral', mistralModel, contrarianPrompt),
+      callProvider('groq', groqModel, realistPrompt),
+    ]);
+    const proArg = proArgRaw.trim();
+    const contrarianArg = contrarianRaw.trim();
+    const realistArg = realistRaw.trim();
+    if (!proArg || !contrarianArg || !realistArg) {
+      throw new Error('AI_OUTPUT_EMPTY: one or more debate roles returned no usable content');
     }
 
-    // Pass 3: Mistral / Independent Devil's Advocate (Rigorous Cross-Examination & Challenge)
-    const contrarianPrompt = `You are the Contrarian / Devil's Advocate in a multi-agent decision debate.
-Debate Topic: "${topic}"
+    const synthesisPrompt = [
+      'Synthesize the three live analyses below into a provisional decision review. Separate retrieved-source statements from inferences and unresolved assumptions. Do not invent baseline metrics, probabilities, user identity, historical decisions, or evidence. Explicitly mention when information is insufficient. Do not manufacture a confidence score. Include an immediate next step and the evidence required to validate it.',
+      'Topic: ' + topic,
+      'Retrieved-source status: ' + knowledgeStatus,
+      'Evidence context:\n' + evidenceContext,
+      'ADVOCATE (' + geminiModel + '):\n' + proArg,
+      'ADVERSARIAL REVIEWER (' + mistralModel + '):\n' + contrarianArg,
+      'EXECUTION REALIST (' + groqModel + '):\n' + realistArg,
+    ].join('\n\n');
 
-Pro Advocate Position:
-${proArg}
-
-${groundTruthContext}
-${evidenceRules}
-
-Conduct a rigorous cross-examination of the Pro Advocate's argument:
-1. Identify Pro Advocate's strongest UNSUPPORTED claim or assumption and directly challenge it.
-2. Identify hidden risks, second-order downsides, and potential points of failure.
-3. State what testable evidence or data would be required to prove or disprove the Pro Advocate's hypothesis.
-Tag every claim as [Verified], [Inferred], [Hypothesis], or [Unknown]. Be incisive and candid.`;
-
-    let mistralArg = '';
-    let mistralAgentName = 'Mistral Devil\'s Advocate';
-    let mistralModelUsed = mistralModel;
-    if (effectiveMistralKey) {
-      try {
-        const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${effectiveMistralKey}` },
-          body: JSON.stringify({
-            model: mistralModel,
-            messages: [{ role: 'user', content: contrarianPrompt }],
-            temperature: 0.7,
-            max_tokens: 500,
-          }),
-        });
-        if (mistralRes.ok) {
-          const data = await mistralRes.json();
-          mistralArg = enforceClaimValidation(data.choices?.[0]?.message?.content?.trim() || '');
-        }
-      } catch (mErr) {
-        console.warn('Mistral round error:', mErr);
-      }
-    }
-    if (!mistralArg) {
-      try {
-        const contrarianResText = await twinAgentService.generateCompletion({
-          prompt: contrarianPrompt,
-          provider: targetProvider,
-          model: targetModel,
-          customGeminiKey: req.body.customGeminiKey,
-          customGroqKey: req.body.customGroqKey,
-          customMistralKey: req.body.customMistralKey,
-        });
-        mistralArg = enforceClaimValidation(contrarianResText || 'No contrarian critique generated.');
-        mistralAgentName = effectiveMistralKey ? 'Mistral Devil\'s Advocate' : `Independent Devil's Advocate (${targetProvider.toUpperCase()})`;
-        mistralModelUsed = effectiveMistralKey ? mistralModel : `${targetModel || targetProvider}`;
-      } catch (err) {
-        partialRun = true;
-        mistralArg = '[Provider Error] Devil\'s Advocate pass unavailable due to API rate limit or outage.';
-      }
-    }
-
-    // Pass 4: Groq / Independent Realist Cross-Examiner (Pragmatic Execution & Commitments Check)
-    const realistPrompt = `You are the Pragmatic Realist & Execution Cross-Examiner in a multi-agent decision debate.
-Debate Topic: "${topic}"
-
-Pro Advocate Case:
-${proArg}
-
-Contrarian Challenge:
-${mistralArg}
-
-${groundTruthContext}
-${evidenceRules}
-
-Cross-examine both positions on real-world execution realities:
-1. Operational Bottlenecks: Time sinks, complexity, resource requirements, and distraction risks.
-2. Baseline & Threshold Definition: How should baseline metrics and realistic minimum success thresholds be established?
-3. Impact on Existing Commitments: Evaluate trade-offs against current active projects, learning obligations, and ongoing tasks.
-Tag every claim as [Verified], [Inferred], [Hypothesis], or [Unknown].`;
-
-    let groqArg = '';
-    let groqAgentName = 'Groq Realist Cross-Examiner';
-    let groqModelUsed = groqModel;
-    if (effectiveGroqKey) {
-      try {
-        const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${effectiveGroqKey}` },
-          body: JSON.stringify({
-            model: groqModel,
-            messages: [{ role: 'user', content: realistPrompt }],
-            temperature: 0.7,
-            max_tokens: 500,
-          }),
-        });
-        if (groqRes.ok) {
-          const data = await groqRes.json();
-          groqArg = enforceClaimValidation(data.choices?.[0]?.message?.content?.trim() || '');
-        }
-      } catch (gErr) {
-        console.warn('Groq round error:', gErr);
-      }
-    }
-    if (!groqArg) {
-      try {
-        const realistResText = await twinAgentService.generateCompletion({
-          prompt: realistPrompt,
-          provider: targetProvider,
-          model: targetModel,
-          customGeminiKey: req.body.customGeminiKey,
-          customGroqKey: req.body.customGroqKey,
-          customMistralKey: req.body.customMistralKey,
-        });
-        groqArg = enforceClaimValidation(realistResText || 'No execution reality check generated.');
-        groqAgentName = effectiveGroqKey ? 'Groq Realist Cross-Examiner' : `Pragmatic Realist Cross-Examiner (${targetProvider.toUpperCase()})`;
-        groqModelUsed = effectiveGroqKey ? groqModel : `${targetModel || targetProvider}`;
-      } catch (err) {
-        partialRun = true;
-        groqArg = '[Provider Error] Realist Cross-Examiner pass unavailable due to API rate limit or outage.';
-      }
-    }
-
-    // Pass 5: Digital Twin Chief Arbiter (Synthesis Verdict with Evidence Audit & 3-Horizon Breakdown)
-    const synthesisPrompt = `You are Olalekan's Digital Twin acting as Chief Arbiter. Review all debate perspectives:
-
-[PRO ADVOCATE]
-${proArg}
-
-[CONTRARIAN DEVIL'S ADVOCATE]
-${mistralArg}
-
-[PRAGMATIC REALIST]
-${groqArg}
-
-Debate Topic: "${topic}"
-
-Synthesize a provisional, evidence-driven verdict following this EXACT STRUCTURE:
-
-### 1. EVIDENCE AUDIT & CLAIM VERIFICATION
-- Context Status: ${contextStatus}
-- Identify key claims and distinguish [Verified] facts from [Inferred] logic, [Hypothesis] assumptions, and [Unknown] missing variables.
-- Address the Contrarian's primary challenge and state what missing information would change this verdict.
-
-### 2. 3-DIMENSIONAL CONFIDENCE ASSESSMENT
-- Evidence Sufficiency: [High / Moderate / Insufficient] — Explain why based on verified data vs assumptions.
-- Recommendation Confidence: [High / Moderate / Low] — Explain given trade-offs, reversibility, and costs.
-- Prediction Confidence: [High / Moderate / Low] — Explain likelihood of experiment outcome. Note: If Evidence Sufficiency is Insufficient, Prediction Confidence MUST be Low.
-
-### 3. THREE-HORIZON DECISION BREAKDOWN
-- Horizon 1 (Immediate Focus: Next 7-14 Days): What requires urgent operational attention now.
-- Horizon 2 (30-Day Commercial Experiment): What deserves focused validation/investment for the next 30 days, including baseline metrics & success thresholds.
-- Horizon 3 (Long-Term Strategic Value): Which initiative possesses the highest long-term potential and core platform value.
-
-### 4. EXISTING COMMITMENTS & RISK MATRIX
-- Explain how existing obligations (e.g. active projects, learning goals, operational tools) are prioritized or maintained rather than erased.
-- Actionable Immediate Next Practical Step.`;
-
-    let verdict = '';
-    try {
-      const synthesisResText = await twinAgentService.generateCompletion({
-        prompt: synthesisPrompt,
-        provider: targetProvider,
-        model: targetModel,
-        customGeminiKey: req.body.customGeminiKey,
-        customGroqKey: req.body.customGroqKey,
-        customMistralKey: req.body.customMistralKey,
-      });
-      verdict = enforceClaimValidation(synthesisResText || 'No synthesis generated.');
-    } catch (err) {
-      verdict = `Chief Arbiter synthesis error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+    const verdict = (await callProvider(requestedSynthesisProvider, liveSynthesisModel, synthesisPrompt)).trim();
+    if (!verdict) throw new Error('AI_OUTPUT_EMPTY: configured synthesis provider returned no usable content');
 
     const rounds = [
-      { agent: proAgentName, model: targetModel || geminiModel, role: 'Pro / Optimist Advocate', text: proArg },
-      { agent: mistralAgentName, model: mistralModelUsed, role: 'Contrarian / Skeptic', text: mistralArg },
-      { agent: groqAgentName, model: groqModelUsed, role: 'Execution Realist', text: groqArg },
-      { agent: `Digital Twin Chief Arbiter (${targetProvider.toUpperCase()})`, model: targetModel || geminiModel, role: 'Chief Arbiter Verdict', text: verdict },
+      { agent: 'Advocate', provider: 'gemini', model: geminiModel, role: 'Advocate', text: proArg, status: 'complete' },
+      { agent: 'Adversarial reviewer', provider: 'mistral', model: mistralModel, role: 'Contrarian', text: contrarianArg, status: 'complete' },
+      { agent: 'Execution realist', provider: 'groq', model: groqModel, role: 'Realist', text: realistArg, status: 'complete' },
+      { agent: 'Synthesis', provider: requestedSynthesisProvider, model: liveSynthesisModel, role: 'Synthesis', text: verdict, status: 'complete' },
     ];
 
-    // Persist immutable decision record to Neon DB
     const savedId = await neonDb.saveDecision({
       title: topic.slice(0, 100),
-      situation: groundTruthContext,
+      situation: evidenceContext,
       recommendation: verdict.slice(0, 500),
-      confidence: contextStatus === 'available' ? 85 : 50,
-      full_analysis: { topic, contextStatus, partialRun, rounds },
+      full_analysis: {
+        topic,
+        knowledgeStatus,
+        providers: { gemini: geminiModel, mistral: mistralModel, groq: groqModel, synthesis: liveSynthesisModel },
+        rounds,
+      },
       channel: 'web',
     });
 
     res.json({
       success: true,
-      decisionId: savedId,
       topic,
-      contextStatus,
-      partialRun,
+      knowledgeStatus,
       rounds,
+      synthesis: verdict,
+      persistence: savedId === null || savedId === undefined
+        ? { status: 'failed', code: 'PERSISTENCE_FAILED' }
+        : { status: 'persisted', decisionId: savedId },
     });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Multi-agent debate failed' });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Debate execution failed';
+    console.error('[Debate] Request failed:', message);
+    res.status(503).json({
+      success: false,
+      code: message.split(':')[0] || 'DEBATE_EXECUTION_UNAVAILABLE',
+      error: message,
+    });
   }
 });
 
