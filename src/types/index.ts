@@ -18,6 +18,19 @@ export interface ProviderStatus {
   selectedModel: string;
 }
 
+export interface GeneratedArtifact {
+  /** Storage identifier used only to resolve the protected download route. */
+  name: string;
+  /** Signed, time-limited application download path returned by the server. */
+  url: string;
+  type: string;
+  displayName?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  generatedAt?: string;
+  validationStatus?: 'validated';
+}
+
 export interface ChatMessage {
   id: string;
   dbId?: number;
