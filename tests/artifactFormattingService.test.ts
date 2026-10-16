@@ -18,7 +18,7 @@ test('normalizes only the file formats supported by the artifact generator', () 
   assert.throws(() => normalizeArtifactFormat('docx'), /UNSUPPORTED_ARTIFACT_FORMAT/);
 });
 
-test('rejects missing content and malformed markdown table structures', () => {
+test('rejects missing content and malformed markdown table structures', async () => {
   assert.throws(() => parseArtifactContent('   '), /ARTIFACT_CONTENT_REQUIRED/);
   assert.throws(
     () => parseArtifactContent('| Brand | Email |\n| --- | --- |\n| Example Brand | contact@example.com | extra |'),
