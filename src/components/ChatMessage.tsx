@@ -21,7 +21,10 @@ import {
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { GeneratedArtifactCard } from './GeneratedArtifactCard.tsx';
-import { removeDuplicateArtifactDownloadLines } from '../utils/artifacts.ts';
+import {
+  removeDuplicateArtifactDownloadLines,
+  removeUnverifiedArtifactSuccessClaims,
+} from '../utils/artifacts.ts';
 
 export interface GroupedMessages {
   groupId: string;
@@ -144,7 +147,10 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   const isUser = message.role === 'user';
   const displayContent = isUser
     ? message.content
-    : removeDuplicateArtifactDownloadLines(message.content, message.artifacts);
+    : removeDuplicateArtifactDownloadLines(
+        removeUnverifiedArtifactSuccessClaims(message.content, message.artifacts, message.artifactErrors),
+        message.artifacts,
+      );
   const [copied, setCopied] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
