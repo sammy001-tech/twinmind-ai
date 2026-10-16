@@ -662,7 +662,7 @@ class NeonDatabaseService {
           dec.situation || null,
           JSON.stringify(dec.options || []),
           dec.recommendation || null,
-          dec.confidence || null,
+          dec.confidence ?? null,
           JSON.stringify(dec.full_analysis || {}),
           dec.channel || 'web',
         ]
@@ -908,6 +908,7 @@ class NeonDatabaseService {
         eligibleCount: 0,
         sampleSizeSufficient: false,
         brierScore: null,
+        overconfidenceLevel: null,
         outcomeCounts: {
           'Met Success Threshold': 0,
           'Missed Baseline': 0,
@@ -940,6 +941,8 @@ class NeonDatabaseService {
       };
 
       let sumSquareError = 0;
+      let sumPredictedProbability = 0;
+      let sumObservedOutcome = 0;
       let eligibleCount = 0;
 
       for (const row of rRes.rows) {
@@ -953,12 +956,22 @@ class NeonDatabaseService {
           const predictedProb = confidence / 100;
           const actualVal = outcome === 'Met Success Threshold' ? 1 : 0;
           sumSquareError += Math.pow(predictedProb - actualVal, 2);
+          sumPredictedProbability += predictedProb;
+          sumObservedOutcome += actualVal;
           eligibleCount++;
         }
       }
 
       const sampleSizeSufficient = eligibleCount >= 5;
       const brierScore = sampleSizeSufficient && eligibleCount > 0 ? parseFloat((sumSquareError / eligibleCount).toFixed(4)) : null;
+      const meanPredictionBias = sampleSizeSufficient && eligibleCount > 0
+        ? (sumPredictedProbability / eligibleCount) - (sumObservedOutcome / eligibleCount)
+        : null;
+      // 0.5 indicates no mean calibration bias; above 0.5 means predicted probabilities
+      // exceed the observed success rate in the eligible binary-outcome sample.
+      const overconfidenceLevel = meanPredictionBias === null
+        ? null
+        : Math.max(0, Math.min(1, 0.5 + meanPredictionBias / 2));
 
       return {
         totalDecisions,
@@ -966,6 +979,7 @@ class NeonDatabaseService {
         eligibleCount,
         sampleSizeSufficient,
         brierScore,
+        overconfidenceLevel,
         outcomeCounts,
       };
     } catch (err) {
@@ -976,6 +990,7 @@ class NeonDatabaseService {
         eligibleCount: 0,
         sampleSizeSufficient: false,
         brierScore: null,
+        overconfidenceLevel: null,
         outcomeCounts: {},
       };
     }
