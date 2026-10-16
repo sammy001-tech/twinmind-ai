@@ -123,8 +123,15 @@ export class WhatsAppWorker {
 
     // 2. If photo is present or message is general text, route to multimodal reasoning
     const s = settingsManager.getSettings();
-    const activeProvider = s.activeProvider || 'gemini';
-    const activeModel = s.activeModel || s.providerModels[activeProvider] || '';
+    const activeProvider = s.activeProvider;
+    if (activeProvider !== 'gemini' && activeProvider !== 'groq' && activeProvider !== 'mistral') {
+      throw new Error('PROVIDER_CONFIGURATION_REQUIRED: configure the WhatsApp AI provider before processing inbound messages');
+    }
+    const activeModel = s.providerModels[activeProvider] ||
+      (s.activeProvider === activeProvider ? s.activeModel : '');
+    if (!activeModel) {
+      throw new Error(`MODEL_CONFIGURATION_REQUIRED:${activeProvider}: configure an explicit provider model before processing inbound messages`);
+    }
 
     if (!incomingImageData) {
       // Dynamic NLP Intent Classification using active LLM provider
@@ -133,9 +140,10 @@ export class WhatsAppWorker {
 
       // If classification needs clarification or confidence < 0.75
       if (classification.requiresClarification || classification.confidence < 0.75) {
-        const prompt =
-          classification.clarificationPrompt ||
-          `I want to make sure I understand correctly. Did you want to start a debate, log a decision outcome, or ask a question? Please clarify!`;
+        const prompt = classification.clarificationPrompt?.trim();
+        if (!prompt) {
+          throw new Error('AI_OUTPUT_SCHEMA_INVALID: clarification is required but the model did not provide usable text');
+        }
         await twilioService.sendWhatsAppMessage(senderPhone, `🤔 ${prompt}`);
         return;
       }
