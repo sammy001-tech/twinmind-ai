@@ -5,7 +5,8 @@ import { settingsManager } from '../db/settingsService.ts';
 
 export interface CalibrationStats {
   brierScore: number | null;
-  totalReviewed: number;
+  totalReviewed: number | null;
+  available: boolean;
   accuracyTrend: 'improving' | 'declining' | 'stable' | 'insufficient_data';
   overconfidenceLevel: number | null; // null until enough valid observed outcomes exist
 }
@@ -87,12 +88,12 @@ class CalibrationService {
     const metrics = await neonDb.getCalibrationMetrics();
 
     return {
-      brierScore: metrics.brierScore,
-      totalReviewed: metrics.eligibleCount,
-      // The database query does not currently produce a historical time series.
-      // A directional trend cannot be inferred from a single aggregate.
+      available: metrics.available,
+      brierScore: metrics.available ? metrics.brierScore : null,
+      totalReviewed: metrics.available ? metrics.eligibleCount : null,
+      // The query returns one aggregate, not a time series; directional trends are unavailable.
       accuracyTrend: 'insufficient_data',
-      overconfidenceLevel: metrics.overconfidenceLevel,
+      overconfidenceLevel: metrics.available ? metrics.overconfidenceLevel : null,
     };
   }
 
@@ -101,7 +102,7 @@ class CalibrationService {
    */
   public async getCalibrationContext(): Promise<string> {
     const summary = await this.getCalibrationSummary();
-    if (summary.brierScore === null || summary.totalReviewed < 5) return '';
+    if (!summary.available || summary.brierScore === null || summary.totalReviewed === null || summary.totalReviewed < 5) return '';
 
     const measuredBias = summary.overconfidenceLevel;
     let insight = 'The observed sample does not indicate a directional mean calibration bias.';
