@@ -119,7 +119,7 @@ class NeonDatabaseService {
     try {
       this.pool = new Pool({
         connectionString: url,
-        ssl: { rejectUnauthorized: false },
+        ssl: { rejectUnauthorized: true },
         max: 10,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 10000,
@@ -364,8 +364,10 @@ class NeonDatabaseService {
     const trimmed = (url || '').trim();
 
     if (!trimmed) {
-      await this.refreshConnection();
-      return { success: true, message: 'Database configuration cleared.' };
+      return {
+        success: false,
+        message: 'Database connection is configured only through DATABASE_URL in the server environment. This endpoint does not alter deployment secrets.',
+      };
     }
 
     // Verify first
@@ -946,7 +948,9 @@ class NeonDatabaseService {
 
         // Brier score calculation applies only to binary outcomes (Met Success Threshold = 1, Missed Baseline = 0)
         if (outcome === 'Met Success Threshold' || outcome === 'Missed Baseline') {
-          const predictedProb = (row.confidence || 75) / 100; // normalize 0-100 score to 0.0-1.0
+          const confidence = row.confidence === null || row.confidence === undefined ? NaN : Number(row.confidence);
+          if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) continue;
+          const predictedProb = confidence / 100;
           const actualVal = outcome === 'Met Success Threshold' ? 1 : 0;
           sumSquareError += Math.pow(predictedProb - actualVal, 2);
           eligibleCount++;
@@ -1231,13 +1235,14 @@ class NeonDatabaseService {
   }): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
     try {
-      await this.pool.query(
+      const result = await this.pool.query(
         `INSERT INTO twin_jobs (id, message_sid, sender_phone, payload, status, updated_at)
          VALUES ($1, $2, $3, $4, 'pending', CURRENT_TIMESTAMP)
-         ON CONFLICT (message_sid) DO NOTHING`,
+         ON CONFLICT (message_sid) DO NOTHING
+         RETURNING id`,
         [job.id, job.message_sid, job.sender_phone, JSON.stringify(job.payload)]
       );
-      return true;
+      return (result.rowCount ?? 0) > 0;
     } catch (err) {
       console.error('[NeonDB] Error inserting job:', err);
       return false;
