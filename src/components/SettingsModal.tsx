@@ -1414,13 +1414,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 inline-block animate-pulse" />
                       Live API
                     </span>
-                  ) : selectedProviderTab === 'gemini' ? (
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 font-medium">
+                  ) : selectedProviderTab ? (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30 font-medium">
                       Live catalogue unavailable
                     </span>
                   ) : (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30 font-medium">
-                      API Key Required for Live Models
+                      Select a provider to inspect its live catalogue
                     </span>
                   )}
                 </div>
@@ -1431,16 +1431,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               {filteredModels.length === 0 ? (
                 <div className="p-6 text-center space-y-2 text-slate-500 dark:text-slate-400 text-xs">
-                  {selectedProviderTab && !liveStatus[selectedProviderTab] ? (
+                  {!selectedProviderTab ? (
+                    <p>Select a provider tab to inspect its live model catalogue.</p>
+                  ) : !liveStatus[selectedProviderTab] ? (
                     <div className="space-y-1.5 max-w-sm mx-auto">
                       <p className="font-semibold text-slate-700 dark:text-slate-300">
                         No live models loaded for {selectedProviderTab.toUpperCase()}
                       </p>
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        To fetch verified live models directly from {selectedProviderTab.toUpperCase()}, enter your API key in the Credentials section below and click save.
+                        To fetch verified live models directly from {selectedProviderTab.toUpperCase()}, configure its API key and retry the live catalogue request.
                       </p>
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        A model must appear in the provider's current live catalogue before it can be activated. Re-enter credentials and retry the live catalogue request.
+                        A model must appear in the provider's current live catalogue before it can be activated.
                       </p>
                     </div>
                   ) : (
@@ -1455,7 +1457,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   return (
                     <div
                       key={m.id}
-                      onClick={() => { if (selectedProviderTab) if (selectedProviderTab) handleSelectModel(selectedProviderTab, m.id); }}
+                      onClick={() => { if (selectedProviderTab) handleSelectModel(selectedProviderTab, m.id); }}
                       role="button"
                       tabIndex={0}
                       className={`p-3 rounded-xl border text-left cursor-pointer transition flex items-center justify-between gap-3 ${
@@ -1492,7 +1494,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleSelectModel(selectedProviderTab, m.id);
+                          if (selectedProviderTab) handleSelectModel(selectedProviderTab, m.id);
                         }}
                         className={`px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition flex items-center gap-1 ${
                           isSelected
