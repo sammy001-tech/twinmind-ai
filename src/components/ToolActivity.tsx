@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Cpu, Search, Database, ChevronDown, ChevronUp, CheckCircle2, ShieldCheck, ExternalLink } from 'lucide-react';
+import { Cpu, Search, Database, ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
 import { SwarmSessionState } from '../types/index.ts';
+import { getReportedSpecialists } from '../utils/toolActivity.ts';
 
 interface ToolActivityProps {
   useSwarm?: boolean;
@@ -23,9 +24,7 @@ export const ToolActivity: React.FC<ToolActivityProps> = ({
     return null;
   }
 
-  const contributingModels = swarmState?.specialists && swarmState.specialists.length > 0
-    ? swarmState.specialists
-    : ['Gemini 2.5 Flash', 'Llama 3.3 70B', 'Mistral Large'];
+  const contributingModels = getReportedSpecialists(swarmState?.specialists);
 
   return (
     <div className="my-2.5 rounded-xl border border-slate-800 bg-slate-900/60 overflow-hidden text-xs text-slate-300">
@@ -41,18 +40,17 @@ export const ToolActivity: React.FC<ToolActivityProps> = ({
           </div>
           <span className="font-semibold text-slate-200 truncate">
             {useSwarm
-              ? `Swarm Consensus (${contributingModels.length} models)`
+              ? contributingModels.length > 0
+                ? `Swarm Consensus (${contributingModels.length} reported specialists)`
+                : 'Swarm activity details'
               : knowledgeSources?.length
               ? `Knowledge Vault Context (${knowledgeSources.length} sources)`
               : 'Tool Activity & Provenance'}
           </span>
-          <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded shrink-0 flex items-center gap-1">
-            <CheckCircle2 className="w-2.5 h-2.5" /> Verified
-          </span>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
-          {latencyMs && (
+          {latencyMs != null && (
             <span className="text-[10px] text-slate-400 font-mono">
               {latencyMs > 1000 ? `${(latencyMs / 1000).toFixed(1)}s` : `${latencyMs}ms`}
             </span>
@@ -71,19 +69,25 @@ export const ToolActivity: React.FC<ToolActivityProps> = ({
           {useSwarm && (
             <div>
               <span className="text-[11px] font-semibold text-slate-400 block mb-1.5">
-                Contributing Multi-Model Intelligence:
+                Runtime-reported specialists:
               </span>
-              <div className="flex flex-wrap gap-1.5">
-                {contributingModels.map((model, idx) => (
-                  <span
-                    key={idx}
-                    className="px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/80 text-[11px] text-slate-300 font-mono flex items-center gap-1"
-                  >
-                    <ShieldCheck className="w-3 h-3 text-amber-400" />
-                    {model}
-                  </span>
-                ))}
-              </div>
+              {contributingModels.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {contributingModels.map((model) => (
+                    <span
+                      key={model}
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-700/80 bg-slate-800/90 px-2 py-0.5 font-mono text-[11px] text-slate-300"
+                    >
+                      <Cpu className="h-3 w-3 text-amber-400" />
+                      {model}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[11px] leading-relaxed text-slate-400">
+                  The runtime did not report specialist details for this run.
+                </p>
+              )}
             </div>
           )}
 
