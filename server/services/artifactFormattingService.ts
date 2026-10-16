@@ -168,9 +168,10 @@ function displayValue(value: unknown): string {
 }
 function safeTextCell(value: unknown): string {
   const text = displayValue(value);
-  // Numeric values remain numeric text; user-supplied strings are neutralized
-  // when spreadsheet software could interpret them as formulas.
+  // Numeric values remain intact. A textual negative number is not an executable
+  // formula, but other formula-like strings are neutralized for spreadsheet importers.
   if (typeof value !== 'string') return text;
+  if (/^[\t\r\n ]*-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\s*$/.test(text)) return text;
   return /^[\t\r\n ]*[=+\-@]/.test(text) ? "'" + text : text;
 }
 function serializeCsv(headers: string[], rows: unknown[][]): string {
