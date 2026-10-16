@@ -92,7 +92,6 @@ class TelegramBotManager {
   private isRunning: boolean = false;
   private logs: TelegramLogEntry[] = [];
   private syncedMessages: SyncedTelegramMessage[] = [];
-  private ai: GoogleGenAI | null = null;
   private conversationHistory: { role: 'user' | 'assistant'; content: string }[] = [];
   private commandRegistry: TelegramCommandHandler[] = [];
   private lastSyncedCommands: Array<{ command: string; description: string }> = [];
@@ -111,18 +110,6 @@ class TelegramBotManager {
     this.log('info', 'Telegram service initialized with Zero Silent Failure policy');
   }
 
-  private initAi() {
-    if (process.env.GEMINI_API_KEY) {
-      this.ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-telegram',
-          },
-        },
-      });
-    }
-  }
 
   /**
    * Initializes the command directory.
@@ -1329,21 +1316,36 @@ class TelegramBotManager {
   }
 
   private async generateVoiceBuffer(text: string): Promise<Buffer | null> {
-    if (!this.ai) this.initAi();
-    if (!this.ai) return null;
+    const settings = settingsManager.getSettings();
+    const voice = (settings.voice || '').trim();
+    const apiKey = (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+
+    if (!voice) {
+      console.warn('[TelegramBot] Voice synthesis unavailable: no voice identifier is configured.');
+      return null;
+    }
+    if (!apiKey) {
+      console.warn('[TelegramBot] Voice synthesis unavailable: Gemini credentials are not configured.');
+      return null;
+    }
+
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+      .replace(/[*_#>-]/g, ' ')
+      .trim()
+      .slice(0, 1000);
+
+    if (!cleanText) {
+      console.warn('[TelegramBot] Voice synthesis unavailable: source text is empty after formatting cleanup.');
+      return null;
+    }
 
     try {
-      const s = settingsManager.getSettings();
-      const voice = s.voice || 'Fenrir';
-      const cleanText = text
-        .replace(/```[\s\S]*?```/g, ' ')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-        .replace(/[*_#>-]/g, ' ')
-        .slice(0, 1000);
-
-      const model = await modelCatalogService.resolveSpecializedModel('tts');
-      const response = await this.ai.models.generateContent({
+      const model = await modelCatalogService.resolveSpecializedModel('tts', apiKey);
+      const client = new GoogleGenAI({ apiKey });
+      const response = await client.models.generateContent({
         model,
         contents: [{ role: 'user', parts: [{ text: cleanText }] }],
         config: {
@@ -1357,15 +1359,17 @@ class TelegramBotManager {
       });
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        return Buffer.from(base64Audio, 'base64');
+      if (!base64Audio) {
+        console.warn('[TelegramBot] Voice synthesis provider returned no audio data.');
+        return null;
       }
-    } catch (err) {
-      console.warn('Voice synthesis buffer error:', err);
-    }
-    return null;
-  }
 
+      return Buffer.from(base64Audio, 'base64');
+    } catch (err) {
+      console.warn('[TelegramBot] Voice synthesis unavailable:', err instanceof Error ? err.message : 'provider request failed');
+      return null;
+    }
+  }
   /**
    * Send a proactive alert message to the paired owner.
    */
