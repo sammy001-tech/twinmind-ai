@@ -470,7 +470,7 @@ export default function App() {
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
 
   const displayName = nickname.trim() || userName.trim();
-  const initialLetter = (userName.trim() || brandName.trim() || 'T').charAt(0).toUpperCase();
+  const initialLetter = (userName.trim() || brandName.trim()).charAt(0).toUpperCase();
 
   const handleSaveNickname = (newName: string, newNickname: string) => {
     setUserName(newName);
@@ -1232,6 +1232,7 @@ export default function App() {
                 onScroll={handleMessagesScroll}
                 onWheel={interruptProgrammaticScroll}
                 onTouchStart={interruptProgrammaticScroll}
+                onPointerDown={interruptProgrammaticScroll}
                 className="chat-messages-viewport h-full min-h-0 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-3"
               >
                 <div ref={messagesContentRef} className="min-h-full w-full min-w-0 flex flex-col space-y-1">
