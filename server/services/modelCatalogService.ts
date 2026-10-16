@@ -55,9 +55,11 @@ class ModelCatalogService {
       const models: LiveModelInfo[] = [];
 
       for await (const model of pager) {
-        const id = model.name?.replace(/^models\//, '') || '';
-        const methods = Array.isArray(model.supportedGenerationMethods)
-          ? model.supportedGenerationMethods
+        // Validate provider-returned capabilities because the SDK Model type omits this API metadata.
+        const rawModel = model as unknown as { name?: unknown; displayName?: unknown; description?: unknown; supportedGenerationMethods?: unknown };
+        const id = typeof rawModel.name === 'string' ? rawModel.name.replace(/^models\//, '') : '';
+        const methods = Array.isArray(rawModel.supportedGenerationMethods)
+          ? rawModel.supportedGenerationMethods.filter((item): item is string => typeof item === 'string')
           : [];
         if (!id || !methods.includes('generateContent')) continue;
 
@@ -172,11 +174,13 @@ class ModelCatalogService {
       const eligible: string[] = [];
 
       for await (const model of pager) {
-                const id = model.name?.replace(/^models\//, '') || '';
-        const methods = Array.isArray(model.supportedGenerationMethods)
-          ? model.supportedGenerationMethods
-          : [];
-        if (!id) continue;
+                // Validate provider-returned capabilities because the SDK Model type omits this API metadata.
+                const rawModel = model as unknown as { name?: unknown; displayName?: unknown; description?: unknown; supportedGenerationMethods?: unknown };
+                const id = typeof rawModel.name === 'string' ? rawModel.name.replace(/^models\//, '') : '';
+                const methods = Array.isArray(rawModel.supportedGenerationMethods)
+                  ? rawModel.supportedGenerationMethods.filter((item): item is string => typeof item === 'string')
+                  : [];
+                if (!id) continue;
 
         const matches = type === 'embedding'
           ? id.toLowerCase().includes('embedding') && methods.includes('embedContent')
