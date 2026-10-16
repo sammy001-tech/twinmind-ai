@@ -34,6 +34,13 @@ function secretsMatch(left: string, right: string): boolean {
   return timingSafeEqual(leftDigest, rightDigest);
 }
 
+function normalizeProviderApiKey(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const key = value.trim().replace(/^["']|["']$/g, '');
+  if (!key || key.includes('...') || key === '********') return '';
+  return key;
+}
+
 const app = express();
 // Trust forwarded headers only when the deployment explicitly states its trusted proxy hop count.
 const configuredProxyHops = process.env.TRUST_PROXY_HOPS?.trim();
@@ -566,14 +573,13 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
   }
 
   const settings = settingsManager.getSettings();
-  const key = (
-    req.get(`x-${provider}-key`) ||
-    req.get('x-api-key') ||
-    (provider === 'gemini' ? settings.customGeminiKey || process.env.GEMINI_API_KEY :
-      provider === 'groq' ? settings.customGroqKey || process.env.GROQ_API_KEY :
-        settings.customMistralKey || process.env.MISTRAL_API_KEY) ||
-    ''
-  ).trim().replace(/^["']|["']$/g, '');
+  const requestKey = normalizeProviderApiKey(req.get(`x-${provider}-key`) || req.get('x-api-key'));
+  const storedKey = provider === 'gemini'
+    ? normalizeProviderApiKey(settings.customGeminiKey || process.env.GEMINI_API_KEY)
+    : provider === 'groq'
+      ? normalizeProviderApiKey(settings.customGroqKey || process.env.GROQ_API_KEY)
+      : normalizeProviderApiKey(settings.customMistralKey || process.env.MISTRAL_API_KEY);
+  const key = requestKey || storedKey;
 
   if (!key) {
     res.status(503).json({ success: false, provider, code: 'PROVIDER_CREDENTIALS_MISSING', models: [], isLiveApi: false });
@@ -605,9 +611,9 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
 app.get('/api/models/all', async (req: Request, res: Response): Promise<void> => {
   const settings = settingsManager.getSettings();
   const keys = {
-    gemini: (req.get('x-gemini-key') || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
-    groq: (req.get('x-groq-key') || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
-    mistral: (req.get('x-mistral-key') || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+    gemini: normalizeProviderApiKey(req.get('x-gemini-key')) || normalizeProviderApiKey(settings.customGeminiKey || process.env.GEMINI_API_KEY),
+    groq: normalizeProviderApiKey(req.get('x-groq-key')) || normalizeProviderApiKey(settings.customGroqKey || process.env.GROQ_API_KEY),
+    mistral: normalizeProviderApiKey(req.get('x-mistral-key')) || normalizeProviderApiKey(settings.customMistralKey || process.env.MISTRAL_API_KEY),
   };
 
   const [gemini, groq, mistral] = await Promise.all([
@@ -1049,8 +1055,12 @@ app.post('/api/threads', async (req: Request, res: Response): Promise<void> => {
       res.status(400).json({ error: 'Thread ID and title are required.' });
       return;
     }
-    await neonDb.saveThread({ id, title, channel });
-    res.json({ success: true, message: 'Thread saved.' });
+    const persisted = await neonDb.saveThread({ id, title, channel });
+    if (!persisted) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Thread was not saved to the database.' });
+      return;
+    }
+    res.json({ success: true, persistence: 'persisted' });
   } catch (err: unknown) {
     res.status(500).json({ error: 'Failed to save thread' });
   }
@@ -1065,8 +1075,12 @@ app.put('/api/threads/:id/title', async (req: Request, res: Response): Promise<v
       res.status(400).json({ error: 'Title cannot be empty.' });
       return;
     }
-    await neonDb.saveThread({ id, title: title.trim() });
-    res.json({ success: true, message: 'Thread renamed.' });
+    const persisted = await neonDb.saveThread({ id, title: title.trim() });
+    if (!persisted) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Thread title change was not saved to the database.' });
+      return;
+    }
+    res.json({ success: true, persistence: 'persisted' });
   } catch (err: unknown) {
     res.status(500).json({ error: 'Failed to rename thread' });
   }
