@@ -1216,7 +1216,7 @@ app.post('/api/analyze-decision', async (req: Request, res: Response): Promise<v
       selectedVoice: currentSettings.voice || '',
     });
 
-    const analysisPrompt = \`Analyze the following decision using evidence-bound reasoning.
+    const analysisPrompt = `Analyze the following decision using evidence-bound reasoning.
 Separate facts from assumptions, compare realistic options and trade-offs, and identify practical next steps.
 Do not invent personal facts, sources, historical data, or user preferences.
 Return only one valid JSON object with these keys:
@@ -1235,7 +1235,7 @@ Return only one valid JSON object with these keys:
 }
 confidenceScore is a model estimate, not an empirically calibrated probability. Do not map confidenceLevel to a numeric score.
 Decision to analyze:
-\${dilemma}\`;
+${dilemma}`;
 
     const response = await callWithRetry(() =>
       getAiClient(req).models.generateContent({
@@ -1296,15 +1296,15 @@ Decision to analyze:
       } else {
         try {
           const challengerModel = await modelCatalogService.resolveModelForProvider('mistral', challengerConfiguredModel, mistralKey);
-          const challengerPrompt = \`Critically review this decision analysis using only the supplied text. Do not invent facts or evidence.
-Decision: \${dilemma}
-Primary analysis: \${JSON.stringify(parsed)}
-Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreement", "Alternative Perspective") and "points" (array of evidence-based strings).\`;
+          const challengerPrompt = `Critically review this decision analysis using only the supplied text. Do not invent facts or evidence.
+Decision: ${dilemma}
+Primary analysis: ${JSON.stringify(parsed)}
+Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreement", "Alternative Perspective") and "points" (array of evidence-based strings).`;
           const challengerResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: \`Bearer \${mistralKey}\`,
+              Authorization: `Bearer ${mistralKey}`,
             },
             body: JSON.stringify({
               model: challengerModel,
