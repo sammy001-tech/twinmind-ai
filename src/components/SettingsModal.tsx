@@ -86,7 +86,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onAutoPlayVoiceChange,
   voiceSpeed = 1,
   onVoiceSpeedChange,
-  brandName = 'TwinMind AI',
+  brandName = '',
   onSaveBrandName,
   userName = '',
   nickname = '',
@@ -1008,15 +1008,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       (m.description && m.description.toLowerCase().includes(searchFilter.toLowerCase()))
   );
 
-  const activeModel = providerModels[activeProvider as keyof typeof providerModels] || providerModels.gemini;
-
-  const voices = [
-    { id: 'Fenrir', label: 'Fenrir', desc: 'Direct, confident, grounded' },
-    { id: 'Puck', label: 'Puck', desc: 'Curious, conversational, energetic' },
-    { id: 'Charon', label: 'Charon', desc: 'Deep, analytical, measured' },
-    { id: 'Kore', label: 'Kore', desc: 'Warm, thoughtful, balanced' },
-    { id: 'Zephyr', label: 'Zephyr', desc: 'Fast, concise, punchy' },
-  ];
+  const activeModel = providerModels[activeProvider as keyof typeof providerModels] || '';
 
   const modalInner = (
     <div
@@ -2423,28 +2415,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <h3 className="text-xs font-semibold text-slate-900 dark:text-white">Voice Note Persona (TTS)</h3>
           </div>
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Select the voice profile used when generating spoken voice notes in chat:
+            Configure the voice identifier accepted by the selected speech model:
           </p>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {voices.map((v) => (
-              <button
-                key={v.id}
-                type="button"
-                onClick={() => onVoiceChange(v.id)}
-                className={`p-2.5 rounded-xl border text-left text-xs transition ${
-                  voice === v.id
-                    ? 'bg-amber-500/15 border-amber-500 text-slate-900 dark:text-white font-semibold ring-1 ring-amber-500/30'
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                }`}
-              >
-                <div className="font-semibold flex items-center justify-between">
-                  <span>{v.label}</span>
-                  {voice === v.id && <Check className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />}
-                </div>
-                <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{v.desc}</div>
-              </button>
-            ))}
+          <div className="space-y-1.5">
+            <label htmlFor="tts-voice-id" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+              Provider voice identifier
+            </label>
+            <input
+              id="tts-voice-id"
+              type="text"
+              value={voice}
+              onChange={(event) => onVoiceChange(event.target.value)}
+              placeholder="Enter a voice ID supported by the configured TTS model"
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-amber-500"
+            />
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">
+              Voice IDs are not preselected. The provider validates the configured ID when audio is generated.
+            </p>
           </div>
 
           {/* Voice Note Auto-Play & Speed Settings */}
