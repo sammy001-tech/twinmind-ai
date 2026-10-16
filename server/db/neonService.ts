@@ -699,6 +699,119 @@ class NeonDatabaseService {
   }
 
   /**
+   * Return the next bounded batch of eligible Sentinel decisions that do not
+   * have a durable completed audit record. Deferred audits are held out for
+   * one retry window so failures do not block every later decision.
+   */
+  public async getPendingSentinelDecisions(limit = 15): Promise<DecisionRecord[] | null> {
+    if (!this.pool || !this.isConnected) return null;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('INVALID_SENTINEL_BATCH_SIZE');
+
+    try {
+      const result = await this.pool.query(
+        `SELECT d.*
+         FROM decisions d
+         WHERE d.confidence IS NOT NULL
+           AND d.confidence BETWEEN 0 AND 100
+           AND NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM twin_events e
+             WHERE e.event_type = 'sentinel_decision_audit'
+               AND e.payload->>'decisionId' = d.id::text
+               AND (
+                 e.payload->>'status' = 'completed'
+                 OR (
+                   e.payload->>'status' = 'deferred'
+                   AND e.created_at > CURRENT_TIMESTAMP - INTERVAL '12 hours'
+                 )
+               )
+           )
+         ORDER BY d.created_at ASC, d.id ASC
+         LIMIT $1`,
+        [limit]
+      );
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        situation: row.situation,
+        options: row.options,
+        recommendation: row.recommendation,
+        confidence: row.confidence,
+        full_analysis: row.full_analysis,
+        channel: row.channel,
+        created_at: row.created_at,
+      }));
+    } catch (err) {
+      console.error('[NeonDB] Failed to retrieve pending Sentinel decisions:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Count eligible decisions without a completed audit. Null means that the
+   * database state could not be read; it is not equivalent to an empty queue.
+   */
+  public async getSentinelPendingDecisionCount(): Promise<number | null> {
+    if (!this.pool || !this.isConnected) return null;
+
+    try {
+      const result = await this.pool.query(
+        `SELECT COUNT(*)::int AS pending_count
+         FROM decisions d
+         WHERE d.confidence IS NOT NULL
+           AND d.confidence BETWEEN 0 AND 100
+           AND NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM twin_events e
+             WHERE e.event_type = 'sentinel_decision_audit'
+               AND e.payload->>'decisionId' = d.id::text
+               AND e.payload->>'status' = 'completed'
+           )`
+      );
+      const count = result.rows[0]?.pending_count;
+      return typeof count === 'number' && Number.isFinite(count) ? count : null;
+    } catch (err) {
+      console.error('[NeonDB] Failed to count pending Sentinel decisions:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Persist Sentinel audit state. A completion is only considered durable when
+   * the insert succeeds and returns its event ID.
+   */
+  public async recordSentinelDecisionAudit(
+    decisionId: number,
+    status: 'completed' | 'deferred',
+    details: Record<string, unknown> = {}
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !Number.isSafeInteger(decisionId) || decisionId < 1) return false;
+
+    const payload = {
+      ...details,
+      decisionId,
+      status,
+      recordedAt: new Date().toISOString(),
+    };
+
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO twin_events (event_type, payload)
+         VALUES ('sentinel_decision_audit', $1)
+         RETURNING id`,
+        [JSON.stringify(payload)]
+      );
+      return (result.rowCount ?? result.rows.length) > 0;
+    } catch (err) {
+      console.warn('[NeonDB] Unable to persist Sentinel audit state:', err instanceof Error ? err.message : 'unknown error');
+      return false;
+    }
+  }
+
+  /**
    * Get single decision record by ID
    */
   public async getDecisionById(id: number): Promise<DecisionRecord | null> {
