@@ -483,8 +483,22 @@ export async function generateArtifactBuffer(
       : content.text;
     buffer = Buffer.from(formatMarkdown(markdown, title), 'utf8');
   } else if (type === 'csv') {
-    if (isTableContent(content)) buffer = Buffer.from('\uFEFF' + serializeCsv(content.headers, content.rows), 'utf8');
-    else buffer = Buffer.from('\uFEFF' + serializeCsv(['Content'], content.text.split('\n').map((line) => [line])), 'utf8');
+    if (isTableContent(content)) {
+      const hasContext = content.preamble.length > 0 || content.postamble.length > 0;
+      if (hasContext) {
+        const headers = ['Record Type', 'Context', ...content.headers];
+        const contextRows = [
+          ...content.preamble.map((line) => ['Context', line, ...content.headers.map(() => '')]),
+          ...content.postamble.map((line) => ['Context', line, ...content.headers.map(() => '')]),
+        ];
+        const dataRows = content.rows.map((row) => ['Data', '', ...row]);
+        buffer = Buffer.from('\uFEFF' + serializeCsv(headers, [...contextRows, ...dataRows]), 'utf8');
+      } else {
+        buffer = Buffer.from('\uFEFF' + serializeCsv(content.headers, content.rows), 'utf8');
+      }
+    } else {
+      buffer = Buffer.from('\uFEFF' + serializeCsv(['Content'], content.text.split('\n').map((line) => [line])), 'utf8');
+    }
   } else if (type === 'xlsx') buffer = await generateXlsx(content, title, generatedAt);
   else buffer = await generatePdf(content, title, generatedAt);
 
