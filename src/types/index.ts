@@ -138,7 +138,7 @@ export type KeyTestStatusMap = Record<string, KeyTestResult>;
 
 export interface AppSettings {
   brandName?: string;
-  activeProvider: 'gemini' | 'groq' | 'mistral';
+  activeProvider: 'gemini' | 'groq' | 'mistral' | '';
   activeModel: string;
   providerModels: {
     gemini: string;
