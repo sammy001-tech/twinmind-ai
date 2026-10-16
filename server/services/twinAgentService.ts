@@ -255,9 +255,18 @@ class TwinAgentService {
   constructor() {
   }
 
+  private resolveUsableCredential(...candidates: Array<string | undefined>): string {
+    for (const candidate of candidates) {
+      const key = (candidate || '').trim().replace(/^["']|["']$/g, '');
+      if (!key || key.includes('...') || key === '********') continue;
+      return key;
+    }
+    return '';
+  }
+
   public getGeminiClient(customKey?: string): GoogleGenAI {
     const s = settingsManager.getSettings();
-    const apiKey = (customKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const apiKey = this.resolveUsableCredential(customKey, s.customGeminiKey, process.env.GEMINI_API_KEY);
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY is not configured on the server. Please check your credentials in Settings.');
     }
@@ -295,7 +304,7 @@ class TwinAgentService {
 
     // Provider 1: Groq LPUs
     if (effectiveProvider === 'groq') {
-      const key = options.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY;
+      const key = this.resolveUsableCredential(options.customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY);
       if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:groq');
       if (key) {
         const model = await modelCatalogService.resolveModelForProvider('groq', options.model || s.providerModels.groq, key);
@@ -341,7 +350,7 @@ class TwinAgentService {
 
     // Provider 2: Mistral AI
     if (effectiveProvider === 'mistral') {
-      const key = options.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY;
+      const key = this.resolveUsableCredential(options.customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
       if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:mistral');
       if (key) {
         const model = await modelCatalogService.resolveModelForProvider('mistral', options.model || s.providerModels.mistral, key);
@@ -386,7 +395,7 @@ class TwinAgentService {
     }
 
     // Provider 3: Google Gemini
-    const geminiKey = (options.customGeminiKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const geminiKey = this.resolveUsableCredential(options.customGeminiKey, s.customGeminiKey, process.env.GEMINI_API_KEY);
     if (!geminiKey) {
       throw new Error(`No valid API key found for provider "${effectiveProvider}". Please configure your API key in Settings.`);
     }
@@ -896,10 +905,10 @@ Respond in valid JSON:
     }
     const configuredModel = modelOverride || s.providerModels?.[provider] || (s.activeProvider === provider ? s.activeModel : '');
     const providerApiKey = provider === 'gemini'
-      ? (options.customGeminiKey || s.customGeminiKey || process.env.GEMINI_API_KEY)
+      ? this.resolveUsableCredential(options.customGeminiKey, s.customGeminiKey, process.env.GEMINI_API_KEY)
       : provider === 'groq'
-        ? (customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY)
-        : (customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY);
+        ? this.resolveUsableCredential(customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY)
+        : this.resolveUsableCredential(customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
     if (!providerApiKey) throw new Error(`PROVIDER_CREDENTIALS_MISSING:${provider}`);
     const model = await modelCatalogService.resolveModelForProvider(provider, configuredModel, providerApiKey);
 
