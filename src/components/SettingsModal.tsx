@@ -162,7 +162,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     gemini: boolean;
     groq: boolean;
     mistral: boolean;
-  }>({ gemini: true, groq: false, mistral: false });
+  }>({ gemini: false, groq: false, mistral: false });
 
 
   // Neon PostgreSQL Database State
@@ -781,13 +781,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   if (!isOpen) return null;
 
   const handleSelectModel = (provider: 'gemini' | 'groq' | 'mistral', modelId: string) => {
+    const liveModels = modelsByProvider[provider];
+    if (!liveStatus[provider] || !liveModels.some((candidate) => candidate.id === modelId)) {
+      setErrorMsg(`Cannot activate "${modelId}": this identifier is not present in the current live ${provider.toUpperCase()} catalogue.`);
+      return;
+    }
+
     if (onSelectModelAndActivate) {
       onSelectModelAndActivate(provider, modelId);
     } else {
       onSelectProviderModel(provider, modelId);
       onProviderChange(provider);
     }
-    setFeedbackToast(`Activated "${modelId}" for ${provider.toUpperCase()}`);
+    setFeedbackToast(`Selected live model "${modelId}" for ${provider.toUpperCase()}`);
     setTimeout(() => setFeedbackToast(null), 3000);
   };
 
@@ -1453,7 +1459,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </span>
                   ) : selectedProviderTab === 'gemini' ? (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 font-medium">
-                      Standard Gemini Catalog
+                      Live catalogue unavailable
                     </span>
                   ) : (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30 font-medium">
@@ -1477,11 +1483,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         To fetch verified live models directly from {selectedProviderTab.toUpperCase()}, enter your API key in the Credentials section below and click save.
                       </p>
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        Alternatively, you can manually type and activate any model ID above (e.g.{' '}
-                        <code className="font-mono text-amber-600 dark:text-amber-400">
-                          {selectedProviderTab === 'groq' ? 'openai/gpt-oss-120b' : 'ministral-14b-latest'}
-                        </code>
-                        ).
+                        A model must appear in the provider's current live catalogue before it can be activated. Re-enter credentials and retry the live catalogue request.
                       </p>
                     </div>
                   ) : (
