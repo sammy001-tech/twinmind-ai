@@ -355,7 +355,7 @@ export const DecisionCalibrationDashboard: React.FC<DecisionCalibrationDashboard
             <h2 className="text-lg font-bold tracking-tight">Decision Calibration & Experiment Tracking</h2>
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Probabilistic forecasts, verified outcomes, explicit sample sizes, and append-only experiment history
+            Probabilistic forecasts, owner-attested outcomes (not independently verified), explicit sample sizes, and append-only experiment history
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -388,15 +388,18 @@ export const DecisionCalibrationDashboard: React.FC<DecisionCalibrationDashboard
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                 <div className="p-4 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 space-y-2">
                   <div className="text-xs font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">Brier Score · Forecast Error</div>
-                  {metrics.sampleSizeSufficient && metrics.brierScore !== null ? (
+                  {metrics.brierScore !== null ? (
                     <>
                       <div className="text-3xl font-extrabold font-mono">{metrics.brierScore.toFixed(4)}</div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400">Lower is better. Eligible forecasts: {metrics.eligibleCount}.</p>
+                      {!metrics.sampleSizeSufficient && (
+                        <p className="text-[11px] font-semibold text-amber-600 dark:text-amber-400">Insufficient sample: fewer than 5 eligible forecasts. Treat this score as descriptive, not an established calibration result.</p>
+                      )}
                     </>
                   ) : (
                     <>
-                      <div className="text-base font-extrabold text-amber-600 dark:text-amber-400">Insufficient sample</div>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">{metrics.eligibleCount} eligible forecast(s); at least 5 required before showing the aggregate score as established.</p>
+                      <div className="text-base font-extrabold text-amber-600 dark:text-amber-400">No eligible forecasts</div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">An explicit event, probability, elapsed deadline, owner-attested binary outcome, and evidence source are required to calculate a score.</p>
                     </>
                   )}
                 </div>
@@ -411,16 +414,16 @@ export const DecisionCalibrationDashboard: React.FC<DecisionCalibrationDashboard
                   <p className="text-[11px] text-slate-500 dark:text-slate-400">Includes pending, inconclusive, and correction history.</p>
                 </div>
                 <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-1">
-                  <div className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Observed Binary Outcomes</div>
-                  <div className="text-3xl font-extrabold font-mono">{metrics.successfulOutcomes} / {metrics.verifiedOutcomeCount}</div>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">Count of recorded verified successes, not a claim of 100% predictive accuracy.</p>
+                  <div className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">Eligible Forecast Outcomes</div>
+                  <div className="text-3xl font-extrabold font-mono">{metrics.successfulOutcomes} / {metrics.eligibleCount}</div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">Owner-attested successes among eligible forecasts. Owner attestation is not independent verification.</p>
                 </div>
               </div>
 
               <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3">
                 <div>
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Confidence calibration by probability band</h3>
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Only forecasts with an explicit event and probability, an elapsed deadline, an owner-confirmed binary outcome, and a non-empty evidence source are eligible. Qualitative confidence and evidence sufficiency are different fields.</p>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Forecast calibration by probability band</h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Only forecasts with an explicit event and probability, an elapsed deadline, an owner-attested binary outcome, and a non-empty evidence source are eligible. Owner attestation is not independent verification. Probability, qualitative confidence, and evidence sufficiency are separate concepts.</p>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
                   {(metrics.calibrationBands || []).map((band) => (
