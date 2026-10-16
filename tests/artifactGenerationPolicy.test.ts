@@ -27,7 +27,7 @@ test('parses records using the union of keys actually present in source data', (
 });
 
 test('parses explicitly fenced JSON emitted by the model as structured data', () => {
-  const parsed = parseArtifactTableContent('```json\\n[{"brand":"Brand A","website":"https://brand-a.example"}]\\n```');
+  const parsed = parseArtifactTableContent('```json\n[{"brand":"Brand A","website":"https://brand-a.example"}]\n```');
   assert.deepEqual(parsed.headers, ['brand', 'website']);
   assert.deepEqual(parsed.rows, [['Brand A', 'https://brand-a.example']]);
 });
