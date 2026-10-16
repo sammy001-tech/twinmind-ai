@@ -899,6 +899,7 @@ class NeonDatabaseService {
     eligibleCount: number;
     sampleSizeSufficient: boolean; // requires eligibleCount >= 5
     brierScore: number | null; // (1/N) * sum((predicted_prob - outcome)^2)
+    overconfidenceLevel: number | null;
     outcomeCounts: Record<string, number>;
   }> {
     if (!this.pool || !this.isConnected) {
