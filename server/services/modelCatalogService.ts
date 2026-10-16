@@ -172,7 +172,7 @@ class ModelCatalogService {
       const eligible: string[] = [];
 
       for await (const model of pager) {
-        const id = model.name?.replace(/^models\\//, '') || '';
+                const id = model.name?.replace(/^models\//, '') || '';
         const methods = Array.isArray(model.supportedGenerationMethods)
           ? model.supportedGenerationMethods
           : [];
