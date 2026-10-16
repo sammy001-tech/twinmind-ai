@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { Bot, InputFile, InlineKeyboard, webhookCallback } from 'grammy';
 import { GoogleGenAI } from '@google/genai';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
@@ -951,7 +951,7 @@ class TelegramBotManager {
           if (turnResult.suggestedActions && turnResult.suggestedActions.length > 0) {
             dynamicKeyboard = new InlineKeyboard();
             for (const act of turnResult.suggestedActions) {
-              const actKey = `dyn_act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+              const actKey = `dyn_act_${randomUUID()}`;
               this.dynamicActionCallbacks.set(actKey, {
                 payload: act.payload,
                 action: act.action,
