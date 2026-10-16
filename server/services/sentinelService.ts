@@ -183,7 +183,7 @@ class AdversarialSentinelService {
 
         DECISION: "${title}"
         RECOMMENDATION: "${recommendation}"
-        RECORDED CONFIDENCE VALUE: ${decision.confidence} (database value; not assumed to be calibrated probability).
+        RECORDED CONFIDENCE VALUE: ${typeof decision.confidence === 'number' && Number.isFinite(decision.confidence) ? decision.confidence : 'not recorded'} (database value; not assumed to be calibrated probability).
 
         RETRIEVED EXTERNAL SOURCES (not independently verified merely by retrieval):
         ${evidence}
