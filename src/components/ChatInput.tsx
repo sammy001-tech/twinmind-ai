@@ -203,7 +203,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   return (
-    <div className="w-full max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 sticky bottom-0 z-20">
+    <div className="w-full shrink-0 max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 relative z-20">
       {/* Hidden File Input supporting photos, images, and text documents */}
       <input
         type="file"
