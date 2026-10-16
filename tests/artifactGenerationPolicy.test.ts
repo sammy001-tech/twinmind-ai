@@ -1,6 +1,7 @@
 import test from 'node:test';
 import path from 'node:path';
 import { getArtifactStorageDirectory, getArtifactStorageScope, resolveArtifactFilePath } from '../server/utils/artifactStorage.ts';
+import { isArtifactGenerationRequest, resolveArtifactFormat } from '../server/utils/artifactFormat.ts';
 import assert from 'node:assert/strict';
 import {
   parseArtifactTableContent,
@@ -12,6 +13,45 @@ import {
   removeDuplicateArtifactDownloadLines,
   removeUnverifiedArtifactSuccessClaims,
 } from '../src/utils/artifacts.ts';
+
+test('resolves the target output format rather than the source format', () => {
+  assert.deepEqual(
+    resolveArtifactFormat('Convert the existing Excel file to PDF', 'xlsx'),
+    { format: 'pdf', source: 'explicit-request' },
+  );
+  assert.deepEqual(
+    resolveArtifactFormat('Provide this prospect list in an Excel file', 'csv'),
+    { format: 'xlsx', source: 'explicit-request' },
+  );
+});
+
+test('uses a valid model tool format only when the request does not specify one', () => {
+  assert.deepEqual(
+    resolveArtifactFormat('Create a report from the current analysis', 'pdf'),
+    { format: 'pdf', source: 'model-tool-argument' },
+  );
+});
+
+test('fails explicitly when no output format is specified', () => {
+  assert.deepEqual(
+    resolveArtifactFormat('Create a file from the current analysis', undefined),
+    {
+      error: 'ARTIFACT_FORMAT_REQUIRED',
+      message: 'Specify the output format (PDF, XLSX, CSV, or Markdown). No default file format was selected.',
+    },
+  );
+});
+
+test('rejects ambiguous output formats rather than choosing a default', () => {
+  const result = resolveArtifactFormat('Create an Excel and PDF report', undefined);
+  assert.ok('error' in result);
+  if ('error' in result) assert.equal(result.error, 'ARTIFACT_FORMAT_AMBIGUOUS');
+});
+
+test('detects file requests without treating comparison questions as generation requests', () => {
+  assert.equal(isArtifactGenerationRequest('Provide this prospect list in an Excel file and format it professionally.'), true);
+  assert.equal(isArtifactGenerationRequest('What is the difference between Excel and PDF?'), false);
+});
 
 test('parses records using the union of keys actually present in source data', () => {
   const parsed = parseArtifactTableContent([
