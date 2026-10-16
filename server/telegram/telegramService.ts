@@ -10,6 +10,7 @@ import { knowledgeService } from '../db/knowledgeService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
+import { resolveArtifactFilePath } from '../utils/artifactStorage.ts';
 
 export interface TelegramConfig {
   token: string;
@@ -1255,11 +1256,15 @@ class TelegramBotManager {
     for (const tool of toolsExecuted) {
       if (tool.toolName === 'generateArtifact' && tool.result && (tool.result.fileName || tool.result.filePath)) {
         try {
-          const fileName = tool.result.fileName || path.basename(tool.result.filePath || '');
-          const cleanName = path.basename(fileName);
-          const fullPath = tool.result.filePath && fs.existsSync(tool.result.filePath)
-            ? tool.result.filePath
-            : path.join(process.cwd(), 'public', 'artifacts', cleanName);
+          const storedFileName = typeof tool.result.fileName === 'string' && tool.result.fileName
+            ? path.basename(tool.result.fileName)
+            : path.basename(typeof tool.result.filePath === 'string' ? tool.result.filePath : '');
+          const cleanName = path.basename(
+            typeof tool.result.displayName === 'string' && tool.result.displayName
+              ? tool.result.displayName
+              : storedFileName,
+          );
+          const fullPath = resolveArtifactFilePath(storedFileName);
 
           if (fs.existsSync(fullPath)) {
             const isExcel = cleanName.endsWith('.xlsx') || cleanName.endsWith('.xls');
