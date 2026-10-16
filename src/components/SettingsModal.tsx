@@ -171,7 +171,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [dbStatus, setDbStatus] = useState<{
     configured: boolean;
     connected: boolean;
-    source: 'environment' | 'settings' | 'none';
+    source: 'environment' | 'none';
     maskedUrl: string | null;
     tables: { conversations: number | null; decisions: number | null; twin_events: number | null };
     error: string | null;
@@ -1863,7 +1863,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {dbStatus?.connected && (
                 <span className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
-                  Connected ({dbStatus.source === 'environment' ? '.env' : 'Settings'})
+                  Connected ({dbStatus.source === 'environment' ? 'DATABASE_URL environment setting' : 'source unavailable'})
                 </span>
               )}
               {renderKeyStatusBadge("neon_db", isTestingDb)}
