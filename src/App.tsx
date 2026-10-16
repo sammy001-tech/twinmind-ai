@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
+import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
 import { ChatInput } from './components/ChatInput.tsx';
 import { DecisionAnalyzerModal } from './components/DecisionAnalyzerModal.tsx';
 import { DecisionCalibrationDashboard } from './components/DecisionCalibrationDashboard.tsx';
@@ -1224,6 +1225,8 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            <ArtifactStorageNotice />
 
             {/* Messages Feed or Context-Grounded Empty State */}
             <div className="relative flex-1 min-h-0">
