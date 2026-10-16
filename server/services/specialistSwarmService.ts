@@ -26,9 +26,8 @@ import {
   SwarmSessionStatus,
   SwarmBudgetExceededError,
 } from '../utils/swarmResourceManager.ts';
-import PDFDocument from 'pdfkit';
-import { parse as json2csv } from 'json2csv';
-import ExcelJS from 'exceljs';
+import { artifactAccessService } from './artifactAccessService.ts';
+import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -268,294 +267,108 @@ class SpecialistSwarmService {
    */
   public async executeGenerateArtifact(
     type: 'pdf' | 'md' | 'csv' | 'xlsx' | 'excel',
-    content: any,
+    content: unknown,
     fileName: string,
     budget?: SwarmToolBudget,
-    requestedTheme?: string
-  ): Promise<{ status: 'success' | 'error'; url: string; fileName: string; type: string; themeName?: string; error?: string; durationMs: number }> {
+    _requestedTheme?: string
+  ): Promise<{
+    status: 'success' | 'error';
+    url: string;
+    fileName: string;
+    type: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    generatedAt?: string;
+    validationStatus?: 'validated';
+    themeName?: string;
+    error?: string;
+    durationMs: number;
+  }> {
     const startTime = Date.now();
-    if (budget) {
-      budget.claim('generateArtifact', 1);
-    }
+    let temporaryPath = '';
+    let finalPath = '';
 
     try {
-      const publicDir = path.join(process.cwd(), 'public', 'artifacts');
-      if (!fs.existsSync(publicDir)) {
-        fs.mkdirSync(publicDir, { recursive: true });
+      if (budget) budget.claim('generateArtifact', 1);
+
+      const normalizedType = normalizeArtifactFormat(type);
+      if (typeof fileName !== 'string' || !fileName.trim()) {
+        throw new Error('ARTIFACT_FILENAME_REQUIRED');
       }
 
-      // Dynamic Generative Color Theme Engine (Zero hard-coded theme presets)
-      const hslToHex = (h: number, s: number, l: number): string => {
-        l /= 100;
-        const a = (s * Math.min(l, 1 - l)) / 100;
-        const f = (n: number) => {
-          const k = (n + h / 30) % 12;
-          const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-          return Math.round(255 * color).toString(16).padStart(2, '0');
-        };
-        return `#${f(0)}${f(8)}${f(4)}`.toUpperCase();
-      };
-
-      const fullText = (String(content) + ' ' + fileName + ' ' + (requestedTheme || '')).toLowerCase();
-
-      // Compute dynamic base Hue (0-360) mathematically based on content semantics or string hash
-      let hue = 215;
-      let themeName = 'Dynamic Executive';
-
-      if (/finance|revenue|profit|growth|esg|investment|capital|budget|sustainability|eco|sales|financial|wealth/i.test(fullText)) {
-        hue = 155; // Emerald Green
-        themeName = 'Generative Emerald';
-      } else if (/tech|software|api|data|code|ai|cloud|cyber|developer|system|digital|network/i.test(fullText)) {
-        hue = 230; // Deep Indigo Blue
-        themeName = 'Generative Tech Indigo';
-      } else if (/health|medical|pharma|bio|clinic|patient|care|wellness/i.test(fullText)) {
-        hue = 185; // Medical Teal
-        themeName = 'Generative Teal';
-      } else if (/legal|contract|governance|policy|compliance|institutional|audit|security|defense/i.test(fullText)) {
-        hue = 210; // Deep Navy
-        themeName = 'Generative Deep Navy';
-      } else if (/marketing|creative|design|brand|campaign|media|retail|art/i.test(fullText)) {
-        hue = 25; // Warm Terracotta / Amber
-        themeName = 'Generative Warm Amber';
-      } else if (/energy|solar|power|oil|gas|mining|utility/i.test(fullText)) {
-        hue = 45; // Golden Energy
-        themeName = 'Generative Solar Gold';
-      } else {
-        // Deterministic hash to generate a unique bespoke hue for any topic
-        let hash = 0;
-        const str = fileName + fullText.slice(0, 150);
-        for (let i = 0; i < str.length; i++) {
-          hash = str.charCodeAt(i) + ((hash << 5) - hash);
-        }
-        hue = Math.abs(hash) % 360;
-        themeName = `Generative Custom (Hue ${hue}°)`;
+      const suppliedName = fileName.trim();
+      if (path.basename(suppliedName) !== suppliedName || suppliedName === '.' || suppliedName === '..') {
+        throw new Error('INVALID_ARTIFACT_FILENAME');
       }
 
-      // Generate full corporate palette mathematically via HSL color theory
-      const primaryHex = hslToHex(hue, 55, 20);
-      const h1Hex = hslToHex(hue, 65, 12);
-      const h2Hex = hslToHex(hue, 60, 22);
-      const accentHex = hslToHex(hue, 70, 40);
-      const footerTextHex = hslToHex(hue, 30, 60);
-      const zebraHex = hslToHex(hue, 40, 97);
+      const withoutExtension = suppliedName.replace(/\.(pdf|csv|xlsx|xls|md)$/i, '');
+      const safeStem = withoutExtension
+        .replace(/[^a-z0-9._-]/gi, '_')
+        .replace(/^[._-]+|[._-]+$/g, '');
+      if (!safeStem) throw new Error('INVALID_ARTIFACT_FILENAME');
 
-      const theme = {
-        name: themeName,
-        primaryHex,
-        headerFillArgb: `FF${primaryHex.replace('#', '')}`,
-        headerTextArgb: 'FFFFFFFF',
-        zebraFillArgb: `FF${zebraHex.replace('#', '')}`,
-        h1Hex,
-        h2Hex,
-        accentHex,
-        footerTextHex,
-      };
+      const displayFileName = safeStem + '.' + normalizedType;
+      const generated = await generateArtifactBuffer(normalizedType, content, displayFileName);
+      if (!generated.buffer.length) throw new Error('ARTIFACT_VALIDATION_FAILED: generated file is empty');
 
-      const safeFileName = fileName.replace(/[^a-z0-9\._-]/gi, '_');
-      const timestamp = Date.now();
-      const finalFileName = `${timestamp}_${safeFileName}`;
-      const filePath = path.join(publicDir, finalFileName);
-      const publicUrl = `/artifacts/${finalFileName}`;
+      const publicDir = path.resolve(process.cwd(), 'public', 'artifacts');
+      await fs.promises.mkdir(publicDir, { recursive: true });
 
-      if (type === 'md') {
-        let mdText = String(content);
-        if (!mdText.startsWith('#')) {
-          const rawTitle = safeFileName.replace(/_/g, ' ').replace(/\.md$/i, '').replace(/^[0-9]+_/, '');
-          mdText = `# ${rawTitle}\n\n*Generated by TwinMind AI • Brand Theme: ${theme.name} • ${new Date().toLocaleString()}*\n\n---\n\n${mdText}`;
+      const finalFileName = Date.now() + '_' + randomUUID() + '_' + displayFileName;
+      finalPath = path.join(publicDir, finalFileName);
+      temporaryPath = path.join(publicDir, '.' + finalFileName + '.' + randomUUID() + '.tmp');
+
+      // Fail closed if secure download signing is not configured. Never return a
+      // permanent public link for a user-generated artifact.
+      const downloadUrl = artifactAccessService.createSignedPath(finalFileName);
+
+      await fs.promises.writeFile(temporaryPath, generated.buffer, { flag: 'wx', mode: 0o600 });
+      await fs.promises.rename(temporaryPath, finalPath);
+      temporaryPath = '';
+
+      const savedBuffer = await fs.promises.readFile(finalPath);
+      const savedStats = await fs.promises.stat(finalPath);
+      if (!savedStats.isFile() || savedStats.size === 0 || savedStats.size !== generated.buffer.length) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted file size did not match the generated output');
+      }
+      if (!savedBuffer.equals(generated.buffer)) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted file contents did not match the generated output');
+      }
+
+      if (normalizedType === 'pdf' && savedBuffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted PDF signature is invalid');
+      }
+      if (normalizedType === 'xlsx') {
+        const workbookCheck = new ExcelJS.Workbook();
+        await workbookCheck.xlsx.load(savedBuffer);
+        if (workbookCheck.worksheets.length === 0 || !workbookCheck.worksheets.some((sheet) => sheet.rowCount > 0)) {
+          throw new Error('ARTIFACT_VALIDATION_FAILED: persisted workbook has no readable worksheet data');
         }
-        fs.writeFileSync(filePath, mdText);
-      } else if (type === 'csv') {
-        const csv = typeof content === 'string' ? content : json2csv(content);
-        fs.writeFileSync(filePath, csv);
-      } else if (type === 'xlsx' || type === 'excel') {
-        const workbook = new ExcelJS.Workbook();
-        const sheet = workbook.addWorksheet('Analysis Report', {
-          views: [{ showGridLines: true }],
-        });
-
-        if (Array.isArray(content) && content.length > 0 && typeof content[0] === 'object') {
-          const keys = Object.keys(content[0]);
-          sheet.columns = keys.map((k) => ({
-            header: k.toUpperCase().replace(/_/g, ' '),
-            key: k,
-            width: Math.max(20, k.length + 6),
-          }));
-          sheet.addRows(content);
-        } else {
-          // Parse string/text/CSV/Markdown table content into structured rows
-          const lines = String(content)
-            .split('\n')
-            .map((l) => l.trim())
-            .filter((l) => l.length > 0);
-
-          const rows: string[][] = [];
-          for (const line of lines) {
-            // Skip markdown table divider rows like |---|---|
-            if (/^\|?\s*:?-+:?\s*\|/i.test(line) && line.includes('-')) continue;
-
-            if (line.includes('|')) {
-              const cells = line.split('|').map((c) => c.trim()).filter((c, idx, arr) => {
-                // Ignore empty outer elements from leading/trailing pipes
-                if ((idx === 0 || idx === arr.length - 1) && c === '') return false;
-                return true;
-              });
-              if (cells.length > 0) rows.push(cells);
-            } else if (line.includes('\t')) {
-              rows.push(line.split('\t').map((c) => c.trim().replace(/^["']|["']$/g, '')));
-            } else if (line.includes(',')) {
-              rows.push(line.split(',').map((c) => c.trim().replace(/^["']|["']$/g, '')));
-            } else if (!line.startsWith('#')) {
-              rows.push([line]);
-            }
-          }
-
-          if (rows.length > 0) {
-            const firstRow = rows[0];
-            const maxCols = Math.max(...rows.map((r) => r.length));
-            sheet.columns = Array.from({ length: maxCols }).map((_, i) => {
-              const colHeader = firstRow[i] ? firstRow[i].replace(/^#+\s*/, '') : `Column ${i + 1}`;
-              return {
-                header: colHeader.toUpperCase(),
-                key: `col_${i}`,
-                width: Math.max(22, colHeader.length + 6),
-              };
-            });
-
-            rows.slice(1).forEach((r) => {
-              const rowObj: Record<string, string> = {};
-              r.forEach((cellVal, idx) => {
-                rowObj[`col_${idx}`] = cellVal;
-              });
-              sheet.addRow(rowObj);
-            });
-          }
-        }
-
-        // Apply visual styling to Header Row matching Theme
-        const headerRow = sheet.getRow(1);
-        headerRow.font = { bold: true, color: { argb: theme.headerTextArgb }, size: 11, name: 'Calibri' };
-        headerRow.fill = {
-          type: 'pattern',
-          pattern: 'solid',
-          fgColor: { argb: theme.headerFillArgb },
-        };
-        headerRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-        headerRow.height = 28;
-
-        // Style data rows with subtle borders, theme zebra striping, and alignment
-        sheet.eachRow((row, rowNumber) => {
-          if (rowNumber === 1) return;
-          row.height = 22;
-          const isEven = rowNumber % 2 === 0;
-          row.eachCell((cell) => {
-            cell.font = { size: 10, name: 'Calibri', color: { argb: 'FF334155' } };
-            cell.alignment = { vertical: 'middle', wrapText: true };
-            cell.border = {
-              top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-              left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-              bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-              right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-            };
-            if (isEven) {
-              cell.fill = {
-                type: 'pattern',
-                pattern: 'solid',
-                fgColor: { argb: theme.zebraFillArgb },
-              };
-            }
-          });
-        });
-
-        await workbook.xlsx.writeFile(filePath);
-      } else if (type === 'pdf') {
-        const doc = new PDFDocument({ margin: 50, bufferPages: true });
-        const stream = fs.createWriteStream(filePath);
-        doc.pipe(stream);
-
-        // Header Banner Accent Line matching Theme
-        doc.rect(0, 0, 612, 12).fill(theme.primaryHex);
-
-        // Document Title Banner
-        const rawTitle = safeFileName.replace(/_/g, ' ').replace(/\.pdf$/i, '').replace(/^[0-9]+_/, '');
-        doc.y = 40;
-        doc.fontSize(22).font('Helvetica-Bold').fillColor(theme.h1Hex).text(rawTitle, { align: 'left' });
-        doc.moveDown(0.3);
-        doc.fontSize(9).font('Helvetica').fillColor('#64748B').text(`Generated by TwinMind AI • Brand Theme: ${theme.name} • ${new Date().toLocaleString()}`, { align: 'left' });
-        doc.moveDown(0.6);
-
-        // Divider Rule with accent tint
-        doc.strokeColor(theme.accentHex).lineWidth(1.5).moveTo(50, doc.y).lineTo(562, doc.y).stroke();
-        doc.moveDown(1.0);
-
-        // Render formatted content line by line
-        const lines = String(content).split('\n');
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) {
-            doc.moveDown(0.3);
-            continue;
-          }
-
-          if (trimmed.startsWith('# ')) {
-            doc.moveDown(0.4);
-            doc.fontSize(16).font('Helvetica-Bold').fillColor(theme.h1Hex).text(trimmed.replace(/^#\s+/, ''));
-            doc.moveDown(0.4);
-          } else if (trimmed.startsWith('## ')) {
-            doc.moveDown(0.3);
-            doc.fontSize(13).font('Helvetica-Bold').fillColor(theme.h2Hex).text(trimmed.replace(/^##\s+/, ''));
-            doc.moveDown(0.3);
-          } else if (trimmed.startsWith('### ')) {
-            doc.moveDown(0.2);
-            doc.fontSize(11).font('Helvetica-Bold').fillColor(theme.accentHex).text(trimmed.replace(/^###\s+/, ''));
-            doc.moveDown(0.2);
-          } else if (trimmed.startsWith('> ')) {
-            const quoteText = trimmed.replace(/^>\s+/, '').replace(/\*\*(.*?)\*\*/g, '$1');
-            doc.fontSize(9.5).font('Helvetica-Oblique').fillColor(theme.accentHex).text(`"${quoteText}"`, { indent: 15, lineGap: 2 });
-            doc.moveDown(0.2);
-          } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-            const bulletText = trimmed.replace(/^[-*]\s+/, '').replace(/\*\*(.*?)\*\*/g, '$1');
-            doc.fontSize(10).font('Helvetica').fillColor('#334155').text(`•   ${bulletText}`, { indent: 12, lineGap: 3 });
-            doc.moveDown(0.15);
-          } else {
-            const plainText = trimmed.replace(/\*\*(.*?)\*\*/g, '$1');
-            doc.fontSize(10).font('Helvetica').fillColor('#334155').text(plainText, { lineGap: 3.5 });
-            doc.moveDown(0.15);
-          }
-        }
-
-        // Add page numbers in footer across all buffered pages
-        const range = doc.bufferedPageRange();
-        for (let i = range.start; i < range.start + range.count; i++) {
-          doc.switchToPage(i);
-          doc.fontSize(8).font('Helvetica').fillColor(theme.footerTextHex).text(
-            `TwinMind AI • Theme: ${theme.name} • Page ${i + 1} of ${range.count}`,
-            50,
-            750,
-            { align: 'center', width: 512 }
-          );
-        }
-
-        doc.end();
-        await new Promise<void>((resolve, reject) => {
-          stream.on('finish', () => resolve());
-          stream.on('error', (err) => reject(err));
-        });
+      }
+      if ((normalizedType === 'md' || normalizedType === 'csv') && !savedBuffer.toString('utf8').replace(/^\uFEFF/, '').trim()) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted text file is empty');
       }
 
       return {
         status: 'success',
-        url: publicUrl,
+        url: downloadUrl,
         fileName: finalFileName,
-        type,
-        themeName: theme.name,
+        type: normalizedType,
+        mimeType: generated.mimeType,
+        sizeBytes: savedStats.size,
+        generatedAt: generated.generatedAt,
+        validationStatus: 'validated',
+        themeName: 'TwinMind Professional',
         durationMs: Date.now() - startTime,
       };
     } catch (err) {
+      if (temporaryPath) await fs.promises.unlink(temporaryPath).catch(() => undefined);
+      if (finalPath) await fs.promises.unlink(finalPath).catch(() => undefined);
       return {
         status: 'error',
         url: '',
         fileName: '',
-        type,
+        type: typeof type === 'string' ? type : 'unknown',
         error: err instanceof Error ? err.message : String(err),
         durationMs: Date.now() - startTime,
       };
