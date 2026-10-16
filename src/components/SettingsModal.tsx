@@ -1862,7 +1862,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Hybrid setup: reads directly from <code className="text-amber-700 dark:text-amber-300 font-mono">DATABASE_URL</code> in your environment/<code className="text-amber-700 dark:text-amber-300 font-mono">.env</code> file, or configure your private Neon PostgreSQL connection string below. Zero hardcoding.
+            Database connections are managed only through the server-side <code className="text-amber-700 dark:text-amber-300 font-mono">DATABASE_URL</code> deployment secret. The field below tests a candidate connection temporarily; it does not save, replace, or clear deployment configuration.
           </p>
 
           {dbStatus?.connected && (
@@ -1917,8 +1917,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   onChange={(e) => setDbUrlInput(e.target.value)}
                   placeholder={
                     dbStatus?.maskedUrl
-                      ? `Configured (${dbStatus.maskedUrl})`
-                      : 'postgresql://user:pass@ep-xyz.neon.tech/neondb?sslmode=require'
+                      ? `Active connection: ${dbStatus.maskedUrl} (read-only)`
+                      : 'Enter a candidate URL for a temporary connection test'
                   }
                   className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
