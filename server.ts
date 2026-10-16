@@ -1,5 +1,5 @@
 import express from 'express';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -651,6 +651,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       model,
       threadId, // Persistent multi-thread conversation ID
       threadTitle, // Optional title for this thread
+      customGeminiKey,
       customGroqKey,
       customMistralKey,
       customTavilyKey,
@@ -661,10 +662,10 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const effectiveThreadId = threadId || `thread-${Date.now()}`;
+    const effectiveThreadId = typeof threadId === 'string' && threadId.trim() ? threadId.trim() : `thread-${randomUUID()}`;
     const firstUserMsg = messages.find((m: { role: string }) => m.role === 'user');
     const effectiveThreadTitle =
-      threadTitle || (firstUserMsg?.content ? firstUserMsg.content.slice(0, 48) : 'New Conversation');
+      threadTitle || (firstUserMsg?.content ? firstUserMsg.content.slice(0, 48) : '');
 
     // Ensure thread exists in Neon database
 
@@ -787,6 +788,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         channel: (channel as any) || 'web',
         threadId: effectiveThreadId,
         customTavilyKey,
+        customGeminiKey,
         providerOverride: targetProvider as any,
         modelOverride: targetModel,
         customGroqKey,
@@ -863,6 +865,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         nickname: effectiveNickname,
         selectedVoice: effectiveVoice,
         activeThreadTitle: effectiveThreadTitle,
+        customGeminiKey,
         customGroqKey,
         customMistralKey,
         customTavilyKey,
@@ -920,7 +923,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           session_id: effectiveThreadId,
           channel: (channel as 'web' | 'telegram' | 'whatsapp') || 'web',
           role: 'user',
-          content: lastUserMsgToSave.content || '[Attached Photo/Image]',
+          content: typeof lastUserMsgToSave.content === 'string' ? lastUserMsgToSave.content : '',
+          metadata: lastUserMsgToSave.imageData ? { hasImage: true, mimeType: lastUserMsgToSave.imageData.mimeType } : undefined,
           provider: targetProvider,
           model: targetModel,
         });
