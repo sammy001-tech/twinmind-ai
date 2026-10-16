@@ -6,15 +6,15 @@ import { neonDb } from './neonService.ts';
 const SETTINGS_FILE_PATH = path.join(process.cwd(), 'twin-settings.json');
 
 const DEFAULT_SETTINGS: AppSettings = {
-  brandName: process.env.APP_BRAND_NAME || process.env.VITE_APP_BRAND_NAME || 'TwinMind AI',
-  activeProvider: (process.env.ACTIVE_PROVIDER as 'gemini' | 'groq' | 'mistral') || 'gemini',
+  brandName: process.env.APP_BRAND_NAME || process.env.VITE_APP_BRAND_NAME || '',
+  activeProvider: (process.env.ACTIVE_PROVIDER as 'gemini' | 'groq' | 'mistral' | '') || '',
   activeModel: process.env.ACTIVE_MODEL || process.env.GEMINI_MODEL || '',
   providerModels: {
     gemini: process.env.GEMINI_MODEL || '',
     groq: process.env.GROQ_MODEL || '',
     mistral: process.env.MISTRAL_MODEL || '',
   },
-  voice: process.env.TTS_VOICE || 'Fenrir',
+  voice: process.env.TTS_VOICE || '',
   userName: process.env.USER_NAME || '',
   nickname: process.env.USER_NICKNAME || '',
   customGeminiKey: process.env.GEMINI_API_KEY || '',
@@ -31,7 +31,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   userPhoneNumber: process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '',
   enableWhatsAppAlerts: false,
   enforceTwilioSignature: true,
-  proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'whatsapp',
+  proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'none',
   themeMode: 'system',
 };
 
@@ -64,8 +64,10 @@ class SettingsManager {
           };
           // Ensure activeModel matches current provider if not explicitly set
           if (!this.currentSettings.activeModel) {
-            const prov = this.currentSettings.activeProvider || 'gemini';
-            this.currentSettings.activeModel = this.currentSettings.providerModels[prov as keyof typeof this.currentSettings.providerModels] || '';
+            const prov = this.currentSettings.activeProvider;
+            this.currentSettings.activeModel = prov
+              ? (this.currentSettings.providerModels[prov as keyof typeof this.currentSettings.providerModels] || '')
+              : '';
           }
         }
       }
@@ -80,14 +82,15 @@ class SettingsManager {
    */
   private saveToDisk() {
     try {
-      const { 
-        customGeminiKey, 
-        customGroqKey, 
-        customMistralKey, 
-        customTavilyKey, 
+      const {
+        customGeminiKey,
+        customGroqKey,
+        customMistralKey,
+        customTavilyKey,
         twilioAuthToken,
-        ...safeSettings 
-      } = this.currentSettings;
+        telegramToken,
+        ...safeSettings
+      } = this.currentSettings as AppSettings & { telegramToken?: string };
 
       fs.writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(safeSettings, null, 2), 'utf-8');
     } catch (err) {
@@ -158,8 +161,8 @@ class SettingsManager {
       }
     }
 
-    // Security: Filter out masked placeholders from the patch to avoid overwriting real keys
-    const filteredPatch = { ...patch };
+    // Ignore client-sent masks so an unchanged secret cannot be replaced with its display placeholder.
+    const filteredPatch = { ...patch } as Partial<AppSettings> & { telegramToken?: string };
     const isMasked = (val?: string) => typeof val === 'string' && (val.includes('...') || val === '********');
 
     if (isMasked(filteredPatch.customGeminiKey)) delete filteredPatch.customGeminiKey;
@@ -167,6 +170,7 @@ class SettingsManager {
     if (isMasked(filteredPatch.customMistralKey)) delete filteredPatch.customMistralKey;
     if (isMasked(filteredPatch.customTavilyKey)) delete filteredPatch.customTavilyKey;
     if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
+    if (isMasked(filteredPatch.telegramToken)) delete filteredPatch.telegramToken;
 
     this.currentSettings = {
       ...this.currentSettings,
@@ -194,27 +198,49 @@ class SettingsManager {
    */
   public getSanitizedSettings(overrides: Partial<AppSettings> = {}) {
     const s = { ...this.getSettings(), ...overrides };
-    
+    const runtime = s as AppSettings & {
+      telegramToken?: string;
+      telegramMode?: string;
+      telegramWebhookUrl?: string;
+      telegramOwnerId?: string;
+    };
+
     const mask = (key?: string) => {
-      if (!key || key.length < 8) return key ? '********' : '';
+      if (!key) return '';
+      if (key.length < 8) return '********';
       return `${key.slice(0, 4)}...${key.slice(-4)}`;
     };
 
+    // Explicit client DTO: unknown persisted properties and raw secrets are never spread into responses.
     return {
-      ...s,
-      // Mask sensitive keys
-      customGeminiKey: s.customGeminiKey ? mask(s.customGeminiKey) : '',
-      customGroqKey: s.customGroqKey ? mask(s.customGroqKey) : '',
-      customMistralKey: s.customMistralKey ? mask(s.customMistralKey) : '',
-      customTavilyKey: s.customTavilyKey ? mask(s.customTavilyKey) : '',
-      twilioAuthToken: s.twilioAuthToken ? '********' : '',
-
-      // Include env-resolved values for display if settings are empty
+      brandName: s.brandName || '',
+      activeProvider: s.activeProvider,
+      activeModel: s.activeModel || '',
+      providerModels: { ...s.providerModels },
+      voice: s.voice || '',
+      userName: s.userName || '',
+      nickname: s.nickname || '',
+      customGeminiKey: mask(s.customGeminiKey),
+      customGroqKey: mask(s.customGroqKey),
+      customMistralKey: mask(s.customMistralKey),
+      customTavilyKey: mask(s.customTavilyKey),
+      autoPlayVoice: s.autoPlayVoice,
+      voiceSpeed: s.voiceSpeed,
+      customPrompts: s.customPrompts || [],
+      activeThreadId: s.activeThreadId ?? null,
       twilioAccountSid: s.twilioAccountSid || process.env.TWILIO_ACCOUNT_SID || '',
+      twilioAuthToken: s.twilioAuthToken ? '********' : '',
       twilioWhatsAppNumber: s.twilioWhatsAppNumber || process.env.TWILIO_WHATSAPP_NUMBER || '',
       userPhoneNumber: s.userPhoneNumber || process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '',
-
-      // Connectivity Flags (Strict Zero-Fallback Policy)
+      enableWhatsAppAlerts: s.enableWhatsAppAlerts,
+      enforceTwilioSignature: s.enforceTwilioSignature,
+      proactiveAlertChannel: s.proactiveAlertChannel,
+      keyTestStatuses: s.keyTestStatuses,
+      themeMode: s.themeMode,
+      telegramToken: runtime.telegramToken ? '********' : '',
+      telegramMode: runtime.telegramMode || '',
+      telegramWebhookUrl: runtime.telegramWebhookUrl || '',
+      hasTelegramToken: Boolean(runtime.telegramToken || process.env.TELEGRAM_BOT_TOKEN),
       hasGeminiKey: Boolean(s.customGeminiKey || process.env.GEMINI_API_KEY),
       hasGroqKey: Boolean(s.customGroqKey || process.env.GROQ_API_KEY),
       hasMistralKey: Boolean(s.customMistralKey || process.env.MISTRAL_API_KEY),

@@ -82,7 +82,7 @@ export const GEMINI_TWIN_TOOLS: any[] = [
   {
     name: 'generateArtifact',
     description:
-      'Generate a professional document or spreadsheet (PDF, Excel .xlsx, CSV, or Markdown) based on current conversation context or specific data provided.',
+      'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -184,7 +184,7 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
     function: {
       name: 'generateArtifact',
       description:
-        'Generate a professional document or spreadsheet (PDF, Excel .xlsx, CSV, or Markdown) based on current conversation context or specific data provided.',
+        'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
       parameters: {
         type: 'object',
         properties: {
@@ -255,9 +255,18 @@ class TwinAgentService {
   constructor() {
   }
 
+  private resolveUsableCredential(...candidates: Array<string | undefined>): string {
+    for (const candidate of candidates) {
+      const key = (candidate || '').trim().replace(/^["']|["']$/g, '');
+      if (!key || key.includes('...') || key === '********') continue;
+      return key;
+    }
+    return '';
+  }
+
   public getGeminiClient(customKey?: string): GoogleGenAI {
     const s = settingsManager.getSettings();
-    const apiKey = (customKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const apiKey = this.resolveUsableCredential(customKey, s.customGeminiKey, process.env.GEMINI_API_KEY);
     if (!apiKey) {
       throw new Error('GEMINI_API_KEY is not configured on the server. Please check your credentials in Settings.');
     }
@@ -287,12 +296,16 @@ class TwinAgentService {
     jsonMode?: boolean;
   }): Promise<string> {
     const s = settingsManager.getSettings();
-    const effectiveProvider = (options.provider || s.activeProvider || 'gemini').toLowerCase();
+    const effectiveProvider = (options.provider || s.activeProvider || '').toLowerCase();
+    if (!['gemini', 'groq', 'mistral'].includes(effectiveProvider)) {
+      throw new Error('PROVIDER_CONFIGURATION_REQUIRED: configure an active supported provider');
+    }
     const temperature = options.temperature ?? 0.7;
 
     // Provider 1: Groq LPUs
     if (effectiveProvider === 'groq') {
-      const key = options.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY;
+      const key = this.resolveUsableCredential(options.customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY);
+      if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:groq');
       if (key) {
         const model = await modelCatalogService.resolveModelForProvider('groq', options.model || s.providerModels.groq, key);
         const messages: any[] = [];
@@ -329,13 +342,16 @@ class TwinAgentService {
           { operationName: 'GroqCompletion' }
         );
 
-        return res.choices?.[0]?.message?.content?.trim() || '';
+        const content = res.choices?.[0]?.message?.content?.trim() || '';
+        if (!content) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no completion');
+        return content;
       }
     }
 
     // Provider 2: Mistral AI
     if (effectiveProvider === 'mistral') {
-      const key = options.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY;
+      const key = this.resolveUsableCredential(options.customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
+      if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:mistral');
       if (key) {
         const model = await modelCatalogService.resolveModelForProvider('mistral', options.model || s.providerModels.mistral, key);
         const messages: any[] = [];
@@ -372,12 +388,14 @@ class TwinAgentService {
           { operationName: 'MistralCompletion' }
         );
 
-        return res.choices?.[0]?.message?.content?.trim() || '';
+        const content = res.choices?.[0]?.message?.content?.trim() || '';
+        if (!content) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no completion');
+        return content;
       }
     }
 
-    // Provider 3: Google Gemini (Default / Fallback)
-    const geminiKey = (options.customGeminiKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    // Provider 3: Google Gemini
+    const geminiKey = this.resolveUsableCredential(options.customGeminiKey, s.customGeminiKey, process.env.GEMINI_API_KEY);
     if (!geminiKey) {
       throw new Error(`No valid API key found for provider "${effectiveProvider}". Please configure your API key in Settings.`);
     }
@@ -388,7 +406,7 @@ class TwinAgentService {
     });
     const model = await modelCatalogService.resolveModelForProvider(
       'gemini',
-      options.model || s.activeModel || s.providerModels.gemini,
+      options.model || s.providerModels.gemini || (s.activeProvider === 'gemini' ? s.activeModel : ''),
       geminiKey
     );
 
@@ -410,7 +428,9 @@ class TwinAgentService {
       { operationName: 'GeminiCompletion' }
     );
 
-    return res.text?.trim() || '';
+    const content = res.text?.trim() || '';
+    if (!content) throw new Error('AI_OUTPUT_EMPTY: Gemini returned no completion');
+    return content;
   }
 
   /**
@@ -865,7 +885,7 @@ Respond in valid JSON:
       conversationHistory = [],
       userName = settingsManager.getSettings().userName || '',
       nickname = settingsManager.getSettings().nickname || '',
-      selectedVoice = 'Fenrir',
+      selectedVoice = settingsManager.getSettings().voice || '',
       activeThreadTitle = '',
       customGroqKey,
       customMistralKey,
@@ -878,19 +898,19 @@ Respond in valid JSON:
 
     const s = settingsManager.getSettings();
 
-    // DYNAMIC RESOLUTION - NO HARDCODING OF ANY PRIMARY PROVIDER OR MODEL
-    const provider = providerOverride || s.activeProvider || 'gemini';
-    const model = await modelCatalogService.resolveModelForProvider(
-      provider as any,
-      modelOverride ||
-        (provider === 'gemini' ? s.providerModels?.gemini || s.activeModel :
-         provider === 'groq' ? s.providerModels?.groq || s.activeModel :
-         s.providerModels?.mistral || s.activeModel)
-    );
-
-    if (!model) {
-      throw new Error(`No model configured for provider "${provider}". Please check Brain Settings.`);
+    // Provider, credentials, and model must be explicitly configured for this operation.
+    const provider = providerOverride || s.activeProvider;
+    if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+      throw new Error('PROVIDER_CONFIGURATION_REQUIRED: configure an active supported provider');
     }
+    const configuredModel = modelOverride || s.providerModels?.[provider] || (s.activeProvider === provider ? s.activeModel : '');
+    const providerApiKey = provider === 'gemini'
+      ? this.resolveUsableCredential(options.customGeminiKey, s.customGeminiKey, process.env.GEMINI_API_KEY)
+      : provider === 'groq'
+        ? this.resolveUsableCredential(customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY)
+        : this.resolveUsableCredential(customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
+    if (!providerApiKey) throw new Error(`PROVIDER_CREDENTIALS_MISSING:${provider}`);
+    const model = await modelCatalogService.resolveModelForProvider(provider, configuredModel, providerApiKey);
 
     // 1. Explicit Concurrent Retrieval: Vault + Learned Context + Calibration Metrics
     let recalledKnowledge: Array<{ id: string | number; title: string; content: string; category: string; similarity?: number }> = [];
@@ -939,28 +959,49 @@ Respond in valid JSON:
         result = await this.executeExecutiveSummary(args.timeframe ? String(args.timeframe) : undefined);
       } else if (name === 'generateArtifact') {
         const { specialistSwarmService } = await import('./specialistSwarmService.ts');
-        const userPromptLower = userPrompt.toLowerCase();
-        let targetType: 'pdf' | 'md' | 'csv' | 'xlsx' = (args.type as any) || 'md';
 
-        if (userPromptLower.includes('excel') || userPromptLower.includes('xlsx')) {
-          targetType = 'xlsx';
-        } else if (userPromptLower.includes('pdf')) {
-          targetType = 'pdf';
-        } else if (userPromptLower.includes('csv') || userPromptLower.includes('spreadsheet')) {
-          targetType = 'csv';
-        } else if (userPromptLower.includes('markdown') || userPromptLower.includes(' md ')) {
-          targetType = 'md';
+        const normalizeMentionedFormat = (value: string): 'pdf' | 'md' | 'csv' | 'xlsx' | null => {
+          const normalized = value.toLowerCase();
+          if (normalized === 'excel' || normalized === 'xlsx' || normalized === 'xls') return 'xlsx';
+          if (normalized === 'pdf') return 'pdf';
+          if (normalized === 'csv') return 'csv';
+          if (normalized === 'markdown' || normalized === 'md') return 'md';
+          return null;
+        };
+
+        const userPromptLower = userPrompt.toLowerCase();
+        const destinationMatch = userPromptLower.match(
+          /\b(?:to|into|as|in|formatted as|format as)\s+(?:an?\s+)?(excel|xlsx|xls|pdf|csv|markdown|md)\b/i
+        );
+        const requestedFileMatch = userPromptLower.match(
+          /\b(excel|xlsx|xls|pdf|csv|markdown|md)\s+(?:file|spreadsheet|workbook|document)\b/i
+        );
+        const promptFormat = normalizeMentionedFormat(
+          destinationMatch?.[1] || requestedFileMatch?.[1] || ''
+        );
+        const argumentFormat = normalizeMentionedFormat(typeof args.type === 'string' ? args.type : '');
+        const fileNameInput = typeof args.fileName === 'string' ? args.fileName.trim() : '';
+        const extensionMatch = fileNameInput.match(/\.(pdf|csv|xlsx|xls|md)$/i);
+        const filenameFormat = extensionMatch ? normalizeMentionedFormat(extensionMatch[1]) : null;
+        const targetType = promptFormat || argumentFormat || filenameFormat;
+
+        if (!targetType) {
+          throw new Error('ARTIFACT_FORMAT_REQUIRED: choose PDF, XLSX, CSV, or Markdown. No default format was substituted.');
+        }
+        if (!fileNameInput) {
+          throw new Error('ARTIFACT_FILENAME_REQUIRED: the generator needs a descriptive file name.');
+        }
+        if (typeof args.content !== 'string' || !args.content.trim()) {
+          throw new Error('ARTIFACT_CONTENT_REQUIRED: no usable content was supplied to the file generator.');
         }
 
-        let fileName = (args.fileName as string) || `Report_${Date.now()}`;
-        // Strip existing extension if any and append targetType
-        fileName = fileName.replace(/\.(pdf|csv|xlsx|xls|md|txt|doc|docx)$/i, '');
-        fileName = `${fileName}.${targetType}`;
+        const fileNameStem = fileNameInput.replace(/\.(pdf|csv|xlsx|xls|md)$/i, '');
+        if (!fileNameStem.trim()) throw new Error('ARTIFACT_FILENAME_REQUIRED');
 
         result = await specialistSwarmService.executeGenerateArtifact(
           targetType,
           args.content,
-          fileName
+          fileNameStem + '.' + targetType
         );
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };
@@ -1058,7 +1099,8 @@ Respond in valid JSON:
 
         // If no tool call was requested by the model, we have our final synthesized response!
         if (!functionCalls || functionCalls.length === 0) {
-          const finalReply = response.text?.trim() || 'No response returned from model.';
+          const finalReply = response.text?.trim() || '';
+          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Gemini returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
@@ -1130,6 +1172,7 @@ Respond in valid JSON:
       );
 
       const finalReply = finalSynthesis.text?.trim() || '';
+      if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Gemini final synthesis returned no reply');
       const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
 
       // Background Memory Extraction (Autonomous Learning)
@@ -1196,7 +1239,8 @@ Respond in valid JSON:
         const toolCalls = message?.tool_calls;
 
         if (!toolCalls || toolCalls.length === 0) {
-          const finalReply = message?.content?.trim() || 'No response returned from Groq.';
+          const finalReply = message?.content?.trim() || '';
+          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Groq returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
@@ -1250,6 +1294,7 @@ Respond in valid JSON:
       });
       const finalData = await finalRes.json();
       const finalReplyGroq = finalData.choices?.[0]?.message?.content?.trim() || '';
+      if (!finalReplyGroq) throw new Error('AI_OUTPUT_EMPTY: Groq final synthesis returned no reply');
       const suggestedActionsGroq = this.extractSuggestedActions(finalReplyGroq, userPrompt, toolsExecuted);
       
       // Background Memory Extraction (Autonomous Learning)
@@ -1317,6 +1362,7 @@ Respond in valid JSON:
 
         if (!toolCalls || toolCalls.length === 0) {
           const finalReply = message?.content?.trim() || '';
+          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Mistral returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
@@ -1370,6 +1416,7 @@ Respond in valid JSON:
       });
       const finalData = await finalRes.json();
       const finalReplyMistral = finalData.choices?.[0]?.message?.content?.trim() || '';
+      if (!finalReplyMistral) throw new Error('AI_OUTPUT_EMPTY: Mistral final synthesis returned no reply');
       const suggestedActionsMistral = this.extractSuggestedActions(finalReplyMistral, userPrompt, toolsExecuted);
       
       // Background Memory Extraction (Autonomous Learning)

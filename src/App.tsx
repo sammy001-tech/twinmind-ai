@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
+import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
 import { ChatInput } from './components/ChatInput.tsx';
 import { DecisionAnalyzerModal } from './components/DecisionAnalyzerModal.tsx';
 import { DecisionCalibrationDashboard } from './components/DecisionCalibrationDashboard.tsx';
@@ -29,9 +30,12 @@ import {
   Loader2,
   AlertTriangle,
   ArrowRight,
+  ArrowDown,
   Edit3,
   Plus,
 } from 'lucide-react';
+import { getChatScrollState } from './utils/chatScroll.ts';
+import { normalizeDynamicPromptTemplates } from './utils/dynamicPrompts.ts';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
@@ -40,19 +44,49 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
+  const [promptTemplatesStatus, setPromptTemplatesStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+  const [promptTemplatesError, setPromptTemplatesError] = useState<string | null>(null);
+  const promptRequestIdRef = useRef(0);
 
   const fetchPrompts = async (refresh = false) => {
+    const requestId = ++promptRequestIdRef.current;
+    setPromptTemplatesStatus('loading');
+    setPromptTemplatesError(null);
+
     try {
       const url = refresh ? `/api/suggested-prompts?refresh=${Date.now()}` : '/api/suggested-prompts';
       const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.prompts) {
-          setPromptTemplates(data.prompts);
-        }
+      const data: unknown = await res.json().catch(() => null);
+      const payload = data && typeof data === 'object' && !Array.isArray(data)
+        ? data as Record<string, unknown>
+        : null;
+
+      if (!res.ok || !payload || payload.success !== true) {
+        const message = typeof payload?.error === 'string' && payload.error.trim()
+          ? payload.error
+          : `Dynamic prompt service returned HTTP ${res.status} without a usable explanation.`;
+        throw new Error(message);
       }
+
+      const normalizedPrompts = normalizeDynamicPromptTemplates(payload.prompts);
+      if (normalizedPrompts.length === 0) {
+        throw new Error(
+          'The dynamic prompt service returned no usable prompts. No substitute prompts were generated.',
+        );
+      }
+
+      if (requestId !== promptRequestIdRef.current) return;
+      setPromptTemplates(normalizedPrompts);
+      setPromptTemplatesStatus('ready');
+      setPromptTemplatesError(null);
     } catch (err) {
-      console.warn('Failed to fetch dynamic suggested prompts:', err);
+      if (requestId !== promptRequestIdRef.current) return;
+      setPromptTemplates([]);
+      setPromptTemplatesStatus('unavailable');
+      setPromptTemplatesError(
+        err instanceof Error ? err.message : 'Dynamic prompt generation is unavailable.',
+      );
+      console.warn('Dynamic suggested prompts are unavailable:', err);
     }
   };
 
@@ -66,12 +100,12 @@ export default function App() {
   const [isThreadDrawerOpen, setIsThreadDrawerOpen] = useState(false);
 
   // App Brand Name & User Identity (Dynamically loaded directly from database)
-  const [brandName, setBrandName] = useState<string>('TwinMind AI');
+  const [brandName, setBrandName] = useState<string>('');
   const [userName, setUserName] = useState<string>('');
   const [nickname, setNickname] = useState<string>('');
 
   // Multi-Model Brain: Per-provider Model Selection (Dynamically loaded from database)
-  const [activeProvider, setActiveProvider] = useState<string>('gemini');
+  const [activeProvider, setActiveProvider] = useState<string>('');
 
   const [providerModels, setProviderModels] = useState<{
     gemini: string;
@@ -85,7 +119,7 @@ export default function App() {
 
   const activeModel = providerModels[activeProvider as keyof typeof providerModels] || '';
 
-  const [voice, setVoice] = useState<string>('Fenrir');
+  const [voice, setVoice] = useState<string>('');
   const [customGeminiKey, setCustomGeminiKey] = useState<string>('');
   const [customGroqKey, setCustomGroqKey] = useState<string>('');
   const [customMistralKey, setCustomMistralKey] = useState<string>('');
@@ -255,12 +289,13 @@ export default function App() {
             content: m.content,
             timestamp: m.created_at
               ? new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            createdAt: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
+              : '',
+            createdAt: m.created_at ? new Date(m.created_at).getTime() : undefined,
             channel: m.channel,
-            modelInfo: m.provider || m.model ? { provider: m.provider || 'gemini', model: m.model || '' } : undefined,
+            modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
           }));
+          pendingThreadRestoreRef.current = threadId;
           setMessages(loaded);
           setActiveThreadId(threadId);
           syncSettingsToServer({ activeThreadId: threadId });
@@ -278,6 +313,10 @@ export default function App() {
 
   const handleNewThread = () => {
     const newId = `thread-${Date.now()}`;
+    pendingThreadRestoreRef.current = newId;
+    isFollowingLatestRef.current = true;
+    jumpToLatestInProgressRef.current = false;
+    setShowScrollToLatest(false);
     setActiveThreadId(newId);
     syncSettingsToServer({ activeThreadId: newId });
     setMessages([]);
@@ -423,10 +462,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
+  const isFollowingLatestRef = useRef(true);
+  const jumpToLatestInProgressRef = useRef(false);
+  const pendingThreadRestoreRef = useRef<string | null>(null);
+  const threadScrollPositionsRef = useRef<Map<string, number>>(new Map());
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
 
   const displayName = nickname.trim() || userName.trim();
-  const initialLetter = (userName.trim() || brandName.trim() || 'T').charAt(0).toUpperCase();
+  const initialLetter = (userName.trim() || brandName.trim()).charAt(0).toUpperCase();
 
   const handleSaveNickname = (newName: string, newNickname: string) => {
     setUserName(newName);
@@ -488,13 +533,125 @@ export default function App() {
     syncSettingsToServer({ customTavilyKey: key });
   };
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const handleMessagesScroll = () => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const scrollState = getChatScrollState({
+      scrollHeight: container.scrollHeight,
+      scrollTop: container.scrollTop,
+      clientHeight: container.clientHeight,
+    });
+
+    if (jumpToLatestInProgressRef.current) {
+      setShowScrollToLatest(scrollState.shouldShowJumpToLatest);
+      if (scrollState.isAtLatest) {
+        jumpToLatestInProgressRef.current = false;
+        isFollowingLatestRef.current = true;
+      }
+    } else {
+      isFollowingLatestRef.current = scrollState.isAtLatest;
+      setShowScrollToLatest(scrollState.shouldShowJumpToLatest);
+    }
+
+    if (activeThreadId) {
+      threadScrollPositionsRef.current.set(activeThreadId, container.scrollTop);
+    }
+  };
+
+  const interruptProgrammaticScroll = () => {
+    jumpToLatestInProgressRef.current = false;
+  };
+
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth', forceFollow = false) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    if (forceFollow) {
+      isFollowingLatestRef.current = true;
+      jumpToLatestInProgressRef.current = behavior === 'smooth';
+    }
+
+    container.scrollTo({ top: container.scrollHeight, behavior });
+
+    if (behavior === 'auto') {
+      jumpToLatestInProgressRef.current = false;
+      isFollowingLatestRef.current = true;
+      setShowScrollToLatest(false);
+    }
+
+    if (activeThreadId) {
+      threadScrollPositionsRef.current.set(
+        activeThreadId,
+        Math.max(0, container.scrollHeight - container.clientHeight),
+      );
+    }
   };
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, isLoading]);
+    if (activeTab !== 'chat') return;
+
+    const requestedThreadId = pendingThreadRestoreRef.current;
+    const shouldRestoreThread = Boolean(
+      requestedThreadId && requestedThreadId === activeThreadId,
+    );
+
+    const frame = window.requestAnimationFrame(() => {
+      const container = messagesContainerRef.current;
+      if (!container) return;
+
+      if (shouldRestoreThread && requestedThreadId) {
+        if (pendingThreadRestoreRef.current !== requestedThreadId) return;
+        pendingThreadRestoreRef.current = null;
+        jumpToLatestInProgressRef.current = false;
+
+        const savedScrollTop = threadScrollPositionsRef.current.get(requestedThreadId);
+        if (savedScrollTop !== undefined) {
+          container.scrollTop = Math.min(
+            savedScrollTop,
+            Math.max(0, container.scrollHeight - container.clientHeight),
+          );
+          handleMessagesScroll();
+        } else {
+          scrollToBottom('auto', true);
+        }
+        return;
+      }
+
+      const savedScrollTop = activeThreadId
+        ? threadScrollPositionsRef.current.get(activeThreadId)
+        : undefined;
+      if (!isFollowingLatestRef.current && savedScrollTop !== undefined) {
+        container.scrollTop = Math.min(
+          savedScrollTop,
+          Math.max(0, container.scrollHeight - container.clientHeight),
+        );
+      } else if (isFollowingLatestRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+      handleMessagesScroll();
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, isLoading, activeThreadId, activeTab]);
+
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    const content = messagesContentRef.current;
+    if (activeTab !== 'chat' || !container || !content || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (isFollowingLatestRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+      handleMessagesScroll();
+    });
+
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [activeTab, activeThreadId]);
 
   // Handle sending a chat message with live Server-Sent Events (SSE) streaming and dynamic model dispatch
   const handleSendMessage = async (
@@ -509,6 +666,9 @@ export default function App() {
 
     setActiveTab('chat');
     setErrorMessage(null);
+    isFollowingLatestRef.current = true;
+    jumpToLatestInProgressRef.current = false;
+    setShowScrollToLatest(false);
 
     const now = Date.now();
     const currentThreadId = activeThreadId || `thread-${now}`;
@@ -641,6 +801,17 @@ export default function App() {
               if (parsed.savedMeta) {
                 ensureAssistantMessage();
                 const { userDbId, assistantDbId } = parsed.savedMeta;
+                const persistence = parsed.savedMeta.persistence;
+                if (persistence) {
+                  const failedItems = Object.entries(persistence)
+                    .filter(([, status]) => status === 'failed')
+                    .map(([item]) => item);
+                  if (failedItems.length > 0) {
+                    setErrorMessage(
+                      `Reply received, but database persistence failed for: ${failedItems.join(', ')}. The current conversation may not be available after a refresh.`
+                    );
+                  }
+                }
                 setMessages((prev) =>
                   prev.map((msg) => {
                     if (msg.id === userMsg.id && userDbId) return { ...msg, dbId: userDbId };
@@ -776,6 +947,17 @@ export default function App() {
             if (parsed.savedMeta) {
               ensureAssistantMessage();
               const { userDbId, assistantDbId } = parsed.savedMeta;
+              const persistence = parsed.savedMeta.persistence;
+              if (persistence) {
+                const failedItems = Object.entries(persistence)
+                  .filter(([, status]) => status === 'failed')
+                  .map(([item]) => item);
+                if (failedItems.length > 0) {
+                  setErrorMessage(
+                    `Reply received, but database persistence failed for: ${failedItems.join(', ')}. The current conversation may not be available after a refresh.`
+                  );
+                }
+              }
               setMessages((prev) =>
                 prev.map((msg) => {
                   if (msg.id === userMsg.id && userDbId) return { ...msg, dbId: userDbId };
@@ -913,7 +1095,7 @@ export default function App() {
   };
 
   return (
-    <div className={`h-screen flex flex-col font-sans overflow-hidden overflow-x-hidden ${channelContainerClass}`}>
+    <div className={`h-[100dvh] flex flex-col font-sans overflow-hidden overflow-x-hidden ${channelContainerClass}`}>
       {/* Top Header: Clean, Uncrowded */}
       <Header
         brandName={brandName}
@@ -1044,14 +1226,26 @@ export default function App() {
               </div>
             )}
 
-            {/* Messages Feed or Concept-Matched Empty State */}
-            <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-3 space-y-1 flex flex-col">
+            <ArtifactStorageNotice />
+
+            {/* Messages Feed or Context-Grounded Empty State */}
+            <div className="relative flex-1 min-h-0">
+              <div
+                ref={messagesContainerRef}
+                onScroll={handleMessagesScroll}
+                onWheel={interruptProgrammaticScroll}
+                onTouchStart={interruptProgrammaticScroll}
+                onPointerDown={interruptProgrammaticScroll}
+                className="chat-messages-viewport h-full min-h-0 overflow-y-auto overflow-x-hidden px-3 sm:px-4 py-3"
+              >
+                <div ref={messagesContentRef} className="min-h-full w-full min-w-0 flex flex-col space-y-1">
               {messages.length === 0 ? (
                 <EmptyState
-                  displayName={displayName}
-                  onSelectStarter={(text, enableSwarm) => {
-                    handleSendMessage(text, false, undefined, undefined, enableSwarm);
-                  }}
+                  promptTemplates={promptTemplates}
+                  promptStatus={promptTemplatesStatus}
+                  promptError={promptTemplatesError}
+                  onSelectPrompt={(text) => handleSendMessage(text)}
+                  onRefreshPrompts={() => fetchPrompts(true)}
                 />
               ) : (
                 <>
@@ -1074,12 +1268,24 @@ export default function App() {
                   {isLoading && displayMessages[displayMessages.length - 1]?.role !== 'assistant' && (
                     <div className="flex items-center gap-2 text-xs text-slate-400 ml-2 py-2">
                       <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                      <span>Thinking through this with you, {displayName}...</span>
+                      <span>{displayName ? `Thinking through this with you, ${displayName}...` : 'Thinking through your request...'}</span>
                     </div>
                   )}
-
-                  <div ref={messagesEndRef} />
                 </>
+              )}
+                </div>
+              </div>
+              {showScrollToLatest && displayMessages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => scrollToBottom('smooth', true)}
+                  aria-label="Jump to latest message"
+                  title="Jump to latest message"
+                  className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-600/70 bg-slate-900/90 text-slate-100 shadow-xl shadow-black/30 backdrop-blur-md transition hover:border-amber-400/70 hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 motion-reduce:transition-none"
+                >
+                  <ArrowDown className="h-5 w-5" aria-hidden="true" />
+                  <span className="sr-only">Jump to latest message</span>
+                </button>
               )}
             </div>
 

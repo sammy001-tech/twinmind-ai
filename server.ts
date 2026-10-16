@@ -1,4 +1,5 @@
 import express from 'express';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -19,48 +20,257 @@ import { whatsAppWorker } from './server/services/whatsappWorker.ts';
 import { calibrationService } from './server/services/calibrationService.ts';
 import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
+import { ownerAuthService } from './server/services/authService.ts';
+import { artifactAccessService } from './server/services/artifactAccessService.ts';
+import { getArtifactStorageDirectory, getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function secretsMatch(left: string, right: string): boolean {
+  const leftDigest = createHash('sha256').update(left).digest();
+  const rightDigest = createHash('sha256').update(right).digest();
+  return timingSafeEqual(leftDigest, rightDigest);
+}
+
+function normalizeProviderApiKey(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const key = value.trim().replace(/^["']|["']$/g, '');
+  if (!key || key.includes('...') || key === '********') return '';
+  return key;
+}
+
 const app = express();
-app.set('trust proxy', true);
+// Trust forwarded headers only when the deployment explicitly states its trusted proxy hop count.
+const configuredProxyHops = process.env.TRUST_PROXY_HOPS?.trim();
+if (configuredProxyHops) {
+  const proxyHops = Number(configuredProxyHops);
+  if (!Number.isSafeInteger(proxyHops) || proxyHops < 0) {
+    throw new Error('INVALID_TRUST_PROXY_HOPS: set TRUST_PROXY_HOPS to a non-negative integer or leave it unset');
+  }
+  app.set('trust proxy', proxyHops);
+}
 const isProduction = process.env.NODE_ENV === 'production';
 // In development, the dev server must always listen on port 3000; in production, use PORT provided by host (e.g. Render)
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
 
 // Ensure local artifact storage directory exists
-const artifactsDir = path.join(process.cwd(), 'public', 'artifacts');
+const artifactsDir = getArtifactStorageDirectory();
 if (!fs.existsSync(artifactsDir)) {
   fs.mkdirSync(artifactsDir, { recursive: true });
 }
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use('/artifacts', express.static(path.join(process.cwd(), 'public', 'artifacts')));
+
+// Owner-only API boundary. Signed webhooks are validated by their individual handlers.
+const publicApiPaths = new Set([
+  '/health',
+  '/auth/session',
+  '/auth/login',
+  '/auth/logout',
+  '/twilio/whatsapp',
+  '/telegram/webhook',
+]);
+app.use('/api', (req: Request, res: Response, next) => {
+  if (publicApiPaths.has(req.path)) {
+    next();
+    return;
+  }
+
+  if (!ownerAuthService.isConfigured()) {
+    res.status(503).json({
+      success: false,
+      code: 'AUTH_CONFIGURATION_MISSING',
+      error: 'Owner authentication is not configured.',
+      requiredEnvironment: ownerAuthService.missingConfiguration(),
+    });
+    return;
+  }
+
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'AUTHORIZATION_REQUIRED', error: 'Owner sign-in is required.' });
+    return;
+  }
+
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+    const origin = req.get('origin');
+    const host = req.get('host');
+    if (!origin || !host) {
+      res.status(403).json({ success: false, code: 'ORIGIN_REQUIRED', error: 'A same-origin browser request is required for state-changing API operations.' });
+      return;
+    }
+    try {
+      const parsedOrigin = new URL(origin);
+      const expectedOrigin = new URL(`${req.protocol}://${host}`);
+      if (parsedOrigin.origin.toLowerCase() !== expectedOrigin.origin.toLowerCase()) {
+        res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Cross-origin request rejected.' });
+        return;
+      }
+    } catch {
+      res.status(403).json({ success: false, code: 'INVALID_ORIGIN', error: 'Invalid request origin.' });
+      return;
+    }
+  }
+
+  next();
+});
+
+// Authentication endpoints are intentionally public; protected APIs require the signed HttpOnly session cookie.
+app.get('/api/auth/session', (req: Request, res: Response) => {
+  res.json({ configured: ownerAuthService.isConfigured(), authenticated: ownerAuthService.isAuthenticated(req) });
+});
+
+const loginAttempts = new Map<string, { windowStartedAt: number; count: number; blockedUntil: number }>();
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  if (!ownerAuthService.isConfigured()) {
+    res.status(503).json({
+      success: false,
+      code: 'AUTH_CONFIGURATION_MISSING',
+      error: 'Owner authentication is not configured.',
+      requiredEnvironment: ownerAuthService.missingConfiguration(),
+    });
+    return;
+  }
+
+  const now = Date.now();
+  const ipKey = req.ip || 'unknown';
+  let attempt = loginAttempts.get(ipKey);
+  if (!attempt || now - attempt.windowStartedAt >= LOGIN_WINDOW_MS) {
+    attempt = { windowStartedAt: now, count: 0, blockedUntil: 0 };
+    loginAttempts.set(ipKey, attempt);
+  }
+  if (attempt.blockedUntil > now) {
+    res.status(429).json({ success: false, code: 'LOGIN_RATE_LIMITED', error: 'Too many sign-in attempts. Try again later.' });
+    return;
+  }
+
+  if (!ownerAuthService.verifyPassword(req.body?.password)) {
+    attempt.count += 1;
+    if (attempt.count >= LOGIN_MAX_ATTEMPTS) attempt.blockedUntil = now + LOGIN_WINDOW_MS;
+    res.status(401).json({ success: false, code: 'INVALID_CREDENTIALS', error: 'The owner password was not accepted.' });
+    return;
+  }
+
+  loginAttempts.delete(ipKey);
+  ownerAuthService.setSessionCookie(res);
+  res.json({ success: true, expiresInSeconds: 12 * 60 * 60 });
+});
+
+app.post('/api/auth/logout', (_req: Request, res: Response) => {
+  ownerAuthService.clearSessionCookie(res);
+  res.json({ success: true });
+});
+
+// Expose storage durability state to the signed-in UI without returning an absolute server path.
+app.get('/api/artifacts/storage-status', (_req: Request, res: Response) => {
+  const status = getArtifactStorageStatus();
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json({ success: true, ...status });
+});
+
+// Resolve a fresh, short-lived download path for a previously persisted artifact.
+// This protected route prevents old chat messages from keeping expired signed URLs.
+app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) => {
+  const fileName = req.params.filename || '';
+  if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
+    return;
+  }
+
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED' });
+    return;
+  }
+
+  const artifactsRoot = getArtifactStorageDirectory();
+  const filePath = path.resolve(artifactsRoot, fileName);
+  if (!filePath.startsWith(artifactsRoot + path.sep)) {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
+    return;
+  }
+
+  try {
+    const stats = await fs.promises.stat(filePath);
+    if (!stats.isFile() || stats.size <= 0) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+      return;
+    }
+
+    const url = artifactAccessService.createSignedPath(fileName);
+    const signed = new URL(url, 'https://artifact-link.invalid');
+    const expires = Number(signed.searchParams.get('expires'));
+    if (!Number.isSafeInteger(expires) || expires <= Math.floor(Date.now() / 1000)) {
+      res.status(500).json({ success: false, code: 'ARTIFACT_LINK_INVALID' });
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ success: true, url, expiresAt: new Date(expires * 1000).toISOString() });
+  } catch (error: unknown) {
+    const code = error instanceof Error && error.message === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+      ? 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+      : 'ARTIFACT_ACCESS_UNAVAILABLE';
+    const status = code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING' ? 503 : 404;
+    res.status(status).json({
+      success: false,
+      code,
+      error: code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+        ? 'Artifact download signing is not configured.'
+        : 'The requested artifact is missing or cannot be accessed.',
+    });
+  }
+});
+
+// Artifacts are no longer anonymously served. A valid owner session or a short-lived signed URL is required.
+app.get('/artifacts/:filename', (req: Request, res: Response) => {
+  const fileName = req.params.filename || '';
+  if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME' });
+    return;
+  }
+
+  const isOwner = ownerAuthService.isAuthenticated(req);
+  const isSigned = artifactAccessService.verifySignedRequest(fileName, req.query.expires, req.query.signature);
+  if (!isOwner && !isSigned) {
+    res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED' });
+    return;
+  }
+
+  const artifactsRoot = getArtifactStorageDirectory();
+  const filePath = path.resolve(artifactsRoot, fileName);
+  if (!filePath.startsWith(artifactsRoot + path.sep)) {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_PATH' });
+    return;
+  }
+
+  res.sendFile(filePath, (err) => {
+    if (err && !res.headersSent) {
+      res.status(404).json({ success: false, code: 'ARTIFACT_NOT_FOUND' });
+    }
+  });
+});
 
 // Shared server-side dynamic Gemini client supporting customGeminiKey override
 function getAiClient(req?: Request): GoogleGenAI {
-  const customKey = (req
+  const customKey = normalizeProviderApiKey(req
     ? ((req.headers['x-gemini-key'] as string) ||
        (req.headers['x-api-key'] as string) ||
-       (req.query?.apiKey as string) ||
        (req.body?.customGeminiKey as string))
-    : '')?.trim().replace(/^["']|["']$/g, '');
-
-  const settingsKey = (settingsManager.getSettings().customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-  const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-
+    : '');
+  const settingsKey = normalizeProviderApiKey(settingsManager.getSettings().customGeminiKey);
+  const envKey = normalizeProviderApiKey(process.env.GEMINI_API_KEY);
   const apiKey = customKey || settingsKey || envKey;
 
+  if (!apiKey) throw new Error('PROVIDER_CREDENTIALS_MISSING:gemini');
   return new GoogleGenAI({
-    apiKey: apiKey || '',
+    apiKey,
     httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
+      headers: { 'User-Agent': 'aistudio-build' },
     },
   });
 }
@@ -92,12 +302,8 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDel
 }
 
 // Health check endpoint
-app.get('/api/health', (req: Request, res: Response) => {
-  res.json({
-    status: 'ok',
-    identity: 'Olalekan Digital Twin',
-    hasKey: Boolean(process.env.GEMINI_API_KEY),
-  });
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', authConfigured: ownerAuthService.isConfigured() });
 });
 
 // Settings GET endpoint with dynamic database synchronization and comprehensive secret sanitization
@@ -133,28 +339,44 @@ app.all('/api/twilio/test', async (_req: Request, res: Response) => {
 app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<void> => {
   try {
     const config = twilioService.getResolvedConfig();
+    if (!config) {
+      res.status(503).json({ success: false, code: 'TWILIO_CONFIGURATION_MISSING' });
+      return;
+    }
 
-    // 1. Security Check: Validate X-Twilio-Signature
-    if (config?.enforceSignature) {
+    // Production inbound webhooks always require a valid signature against TWILIO_WEBHOOK_URL.
+    if (process.env.NODE_ENV === 'production' && !config.enforceSignature) {
+      res.status(503).json({ success: false, code: 'TWILIO_SIGNATURE_ENFORCEMENT_REQUIRED' });
+      return;
+    }
+    if (config.enforceSignature) {
       const isValidSig = twilioService.validateSignature(req);
       if (!isValidSig) {
-        console.warn('[Twilio Webhook] Rejected request with invalid X-Twilio-Signature header');
-        res.status(403).type('text/xml').send('<Response><Message>Forbidden: Invalid signature</Message></Response>');
+        console.warn('[Twilio Webhook] Rejected request with invalid or unverifiable signature.');
+        res.status(403).type('text/xml').send('<Response><Message>Forbidden: invalid webhook signature</Message></Response>');
         return;
       }
     }
 
+    if (!config.userPhoneNumber) {
+      res.status(503).json({ success: false, code: 'TWILIO_SENDER_ALLOWLIST_MISSING' });
+      return;
+    }
     const fromHeader = (req.body?.From || '').trim();
 
     // 2. Sender Auth: Verify From against authorized user phone
     const isAuthorized = twilioService.isAuthorizedSender(fromHeader);
     if (!isAuthorized) {
-      console.warn(`[Twilio Webhook] Rejected request from unauthorized sender: ${fromHeader}`);
+      console.warn('[Twilio Webhook] Rejected request from unauthorized sender.');
       res.status(401).type('text/xml').send('<Response><Message>Unauthorized sender</Message></Response>');
       return;
     }
 
-    const messageSid = (req.body?.MessageSid || `msg-${Date.now()}`).trim();
+    const messageSid = typeof req.body?.MessageSid === 'string' ? req.body.MessageSid.trim() : '';
+    if (!messageSid) {
+      res.status(400).json({ success: false, code: 'TWILIO_MESSAGE_SID_MISSING' });
+      return;
+    }
     const senderPhone = twilioService.normalizePhoneNumber(fromHeader);
 
     // 3. Atomic Persist: Record MessageSid & Job in Neon DB BEFORE returning ACK
@@ -176,35 +398,60 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
 });
 
 // Live Multi-Model Status & Capabilities probe (Strict Zero-Fallback Policy)
-app.get('/api/models/status', (req: Request, res: Response) => {
-  const groqKey = process.env.GROQ_API_KEY;
-  const mistralKey = process.env.MISTRAL_API_KEY;
+app.get('/api/models/status', async (_req: Request, res: Response) => {
+  const settings = settingsManager.getSettings();
+  const keys = {
+    gemini: (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
+    groq: (settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
+    mistral: (settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+  };
+
+  const [geminiModels, groqModels, mistralModels] = await Promise.all([
+    modelCatalogService.getLiveModels('gemini', keys.gemini),
+    modelCatalogService.getLiveModels('groq', keys.groq),
+    modelCatalogService.getLiveModels('mistral', keys.mistral),
+  ]);
+
+  const catalogueStatus = (key: string, models: unknown[]) =>
+    !key ? 'unconfigured' : models.length ? 'available' : 'unavailable';
+  const providerModel = (provider: 'gemini' | 'groq' | 'mistral', models: Array<{id:string}>) => {
+    const configured = settings.providerModels?.[provider] ||
+      (settings.activeProvider === provider ? settings.activeModel : '');
+    return {
+      configuredModel: configured || null,
+      configuredModelAvailable: configured ? models.some((item) => item.id === configured) : false,
+    };
+  };
 
   res.json({
+    checkedAt: new Date().toISOString(),
     providers: [
       {
         id: 'gemini',
         name: 'Google Gemini',
-        role: 'Core Brain',
-        enabled: true,
-        hasKey: Boolean(process.env.GEMINI_API_KEY),
-        description: 'Primary intelligence, deep strategic reasoning, multimodal understanding & speech synthesis.',
+        hasKey: Boolean(keys.gemini),
+        enabled: Boolean(keys.gemini && geminiModels.length),
+        catalogueStatus: catalogueStatus(keys.gemini, geminiModels),
+        liveModelCount: geminiModels.length,
+        ...providerModel('gemini', geminiModels),
       },
       {
         id: 'groq',
-        name: 'Groq LPUs',
-        role: 'Fast Reflex',
-        enabled: Boolean(groqKey),
-        hasKey: Boolean(groqKey),
-        description: 'Ultra-low latency conversational reflex (sub-second response for mobile chats).',
+        name: 'Groq',
+        hasKey: Boolean(keys.groq),
+        enabled: Boolean(keys.groq && groqModels.length),
+        catalogueStatus: catalogueStatus(keys.groq, groqModels),
+        liveModelCount: groqModels.length,
+        ...providerModel('groq', groqModels),
       },
       {
         id: 'mistral',
         name: 'Mistral AI',
-        role: 'Challenger / Second Opinion',
-        enabled: Boolean(mistralKey),
-        hasKey: Boolean(mistralKey),
-        description: 'Independent model perspective for stress-testing decisions and challenging assumptions.',
+        hasKey: Boolean(keys.mistral),
+        enabled: Boolean(keys.mistral && mistralModels.length),
+        catalogueStatus: catalogueStatus(keys.mistral, mistralModels),
+        liveModelCount: mistralModels.length,
+        ...providerModel('mistral', mistralModels),
       },
     ],
   });
@@ -214,35 +461,27 @@ app.get('/api/models/status', (req: Request, res: Response) => {
 app.get('/api/keys/verify-env', async (_req: Request, res: Response) => {
   const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
   if (!envKey) {
-    return res.json({ success: false, error: 'GEMINI_API_KEY is not set in environment.' });
+    res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING', provider: 'gemini' });
+    return;
   }
 
-  const format = envKey.startsWith('AQ.') ? 'Modern (AQ.)' : envKey.startsWith('AIza') ? 'Legacy (AIza)' : 'Unknown';
-  const display = `${envKey.slice(0, 4)}...${envKey.slice(-4)}`;
-
-  try {
-    const client = new GoogleGenAI({ apiKey: envKey });
-    const model = await modelCatalogService.resolveModelForProvider('gemini', undefined, envKey);
-    // Quick probe using the new SDK patterns
-    await client.models.generateContent({
-      model,
-      contents: 'ping'
-    });
-    
-    res.json({
-      success: true,
-      format,
-      display,
-      message: `Environment key (${format}) is valid and connected successfully.`
-    });
-  } catch (err: any) {
-    res.json({
+  const models = await modelCatalogService.getLiveGeminiModels(envKey);
+  if (!models.length) {
+    res.status(502).json({
       success: false,
-      format,
-      display,
-      error: err?.message || 'Verification failed.'
+      code: 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+      provider: 'gemini',
+      checkedAt: new Date().toISOString(),
     });
+    return;
   }
+
+  res.json({
+    success: true,
+    provider: 'gemini',
+    liveModelCount: models.length,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
 // Real-Time Live API Key Verification Endpoint (Strict Zero-Fallback Policy)
@@ -382,275 +621,81 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   res.status(400).json({ success: false, error: `Unknown provider: ${provider}` });
 });
 
-import { 
-  GEMINI_CATALOG_MODELS
-} from './src/config/models.ts';
-
-
 // Live Dynamic Models Query Endpoint (Queries live API or catalog)
 app.get('/api/models/live', async (req: Request, res: Response): Promise<void> => {
-  const provider = (req.query.provider as string) || 'gemini';
-  const customKey = (req.headers['x-api-key'] as string) || (req.query.apiKey as string);
-
-  try {
-    if (provider === 'gemini') {
-      const settings = settingsManager.getSettings();
-      const sKey = (settings.customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-      const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-      const cKey = ((req.headers['x-api-key'] as string) || (req.query.apiKey as string) || '').trim().replace(/^["']|["']$/g, '');
-      
-      const hasGeminiKey = Boolean(sKey || eKey || cKey);
-      
-      if (hasGeminiKey) {
-        try {
-          const client = getAiClient(req);
-          // Only attempt live fetch if key looks valid (standard AI Studio keys start with AIza)
-          const currentKey = sKey || eKey || cKey;
-          if (currentKey.startsWith('AIza') || currentKey.startsWith('AQ.') || currentKey.length > 30) {
-            const pager = await client.models.list();
-            const models: { id: string; displayName: string; description?: string }[] = [];
-            for await (const m of pager) {
-              const id = m.name?.replace(/^models\//, '') || '';
-              if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
-                models.push({
-                  id,
-                  displayName: m.displayName || id,
-                  description: m.description,
-                });
-              }
-            }
-            if (models.length > 0) {
-              res.json({ provider: 'gemini', models, isLiveApi: true });
-              return;
-            }
-          } else {
-            console.warn('[Gemini] Provided key does not appear to be a standard Gemini API key. Skipping live models list.');
-          }
-        } catch (err: any) {
-          if (!err?.message?.includes('401') && !err?.message?.includes('UNAUTHENTICATED')) {
-            console.warn('Gemini live models fetch error:', err);
-          }
-          res.status(502).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'Failed to fetch live Gemini model registry.' });
-          return;
-        }
-      } else {
-        res.status(401).json({ provider: 'gemini', models: [], isLiveApi: false, error: 'API key required for live Gemini model retrieval.' });
-        return;
-      }
-    }
-
-    if (provider === 'groq') {
-      const savedKey = settingsManager.getSettings().customGroqKey;
-      const key = customKey || savedKey || process.env.GROQ_API_KEY;
-      if (key) {
-        try {
-          const gRes = await fetch('https://api.groq.com/openai/v1/models', {
-            headers: { Authorization: `Bearer ${key}` },
-          });
-          if (gRes.ok) {
-            const data = await gRes.json();
-            const models = (data.data || []).map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Groq LPU model (${m.id})`,
-            }));
-            res.json({ provider: 'groq', models, isLiveApi: true });
-            return;
-          } else {
-            const errData = await gRes.json().catch(() => ({}));
-            res.status(gRes.status).json({
-              provider: 'groq',
-              models: [],
-              isLiveApi: false,
-              error: errData.error?.message || `Groq API returned status ${gRes.status}`,
-            });
-            return;
-          }
-        } catch (e: any) {
-          console.warn('Groq live query error:', e);
-          res.status(502).json({ provider: 'groq', models: [], isLiveApi: false, error: e.message || 'Groq API connection error' });
-          return;
-        }
-      }
-      // Zero-Fallback: No hardcoded models. Return empty list requiring key for live fetch.
-      res.json({
-        provider: 'groq',
-        models: [],
-        isLiveApi: false,
-        requiresKey: true,
-        message: 'Groq API key required to query live models.',
-      });
-      return;
-    }
-
-    if (provider === 'mistral') {
-      const savedKey = settingsManager.getSettings().customMistralKey;
-      const key = customKey || savedKey || process.env.MISTRAL_API_KEY;
-      if (key) {
-        try {
-          const mRes = await fetch('https://api.mistral.ai/v1/models', {
-            headers: { Authorization: `Bearer ${key}` },
-          });
-          if (mRes.ok) {
-            const data = await mRes.json();
-            const models = (data.data || []).map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Mistral model (${m.id})`,
-            }));
-            res.json({ provider: 'mistral', models, isLiveApi: true });
-            return;
-          } else {
-            const errData = await mRes.json().catch(() => ({}));
-            res.status(mRes.status).json({
-              provider: 'mistral',
-              models: [],
-              isLiveApi: false,
-              error: errData.message || `Mistral API returned status ${mRes.status}`,
-            });
-            return;
-          }
-        } catch (e: any) {
-          console.warn('Mistral live query error:', e);
-          res.status(502).json({ provider: 'mistral', models: [], isLiveApi: false, error: e.message || 'Mistral API connection error' });
-          return;
-        }
-      }
-      // Zero-Fallback: No hardcoded models. Return empty list requiring key for live fetch.
-      res.json({
-        provider: 'mistral',
-        models: [],
-        isLiveApi: false,
-        requiresKey: true,
-        message: 'Mistral API key required to query live models.',
-      });
-      return;
-    }
-
-    res.status(400).json({ error: `Unsupported provider: ${provider}` });
-  } catch (err: unknown) {
-    console.error('Live models query error:', err);
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to query live models.' });
+  const provider = req.query.provider as string;
+  if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+    res.status(400).json({ success: false, code: 'PROVIDER_REQUIRED', error: 'Specify a supported provider to query its live model catalogue.' });
+    return;
   }
+
+  const settings = settingsManager.getSettings();
+  const requestKey = normalizeProviderApiKey(req.get(`x-${provider}-key`) || req.get('x-api-key'));
+  const storedKey = provider === 'gemini'
+    ? normalizeProviderApiKey(settings.customGeminiKey || process.env.GEMINI_API_KEY)
+    : provider === 'groq'
+      ? normalizeProviderApiKey(settings.customGroqKey || process.env.GROQ_API_KEY)
+      : normalizeProviderApiKey(settings.customMistralKey || process.env.MISTRAL_API_KEY);
+  const key = requestKey || storedKey;
+
+  if (!key) {
+    res.status(503).json({ success: false, provider, code: 'PROVIDER_CREDENTIALS_MISSING', models: [], isLiveApi: false });
+    return;
+  }
+
+  const models = await modelCatalogService.getLiveModels(provider, key);
+  if (!models.length) {
+    res.status(502).json({
+      success: false,
+      provider,
+      code: 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+      models: [],
+      isLiveApi: false,
+      checkedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    provider,
+    models,
+    isLiveApi: true,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
-// All Providers Models Endpoint (Dynamic Live Queries across all providers)
 app.get('/api/models/all', async (req: Request, res: Response): Promise<void> => {
-  try {
-    const customGroqKey =
-      (req.headers['x-groq-key'] as string) ||
-      (req.query.groqKey as string) ||
-      settingsManager.getSettings().customGroqKey ||
-      process.env.GROQ_API_KEY;
+  const settings = settingsManager.getSettings();
+  const keys = {
+    gemini: normalizeProviderApiKey(req.get('x-gemini-key')) || normalizeProviderApiKey(settings.customGeminiKey || process.env.GEMINI_API_KEY),
+    groq: normalizeProviderApiKey(req.get('x-groq-key')) || normalizeProviderApiKey(settings.customGroqKey || process.env.GROQ_API_KEY),
+    mistral: normalizeProviderApiKey(req.get('x-mistral-key')) || normalizeProviderApiKey(settings.customMistralKey || process.env.MISTRAL_API_KEY),
+  };
 
-    const customMistralKey =
-      (req.headers['x-mistral-key'] as string) ||
-      (req.query.mistralKey as string) ||
-      settingsManager.getSettings().customMistralKey ||
-      process.env.MISTRAL_API_KEY;
+  const [gemini, groq, mistral] = await Promise.all([
+    modelCatalogService.getLiveModels('gemini', keys.gemini),
+    modelCatalogService.getLiveModels('groq', keys.groq),
+    modelCatalogService.getLiveModels('mistral', keys.mistral),
+  ]);
 
-    let geminiModels: any[] = [];
-    let isGeminiLive = false;
-    const settings = settingsManager.getSettings();
-    const sKey = (settings.customGeminiKey || '').trim().replace(/^["']|["']$/g, '');
-    const eKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-    const hKey = (req.headers['x-gemini-key'] || req.headers['x-api-key'] || '').toString().trim().replace(/^["']|["']$/g, '');
-    
-    const hasGeminiKey = Boolean(sKey || eKey || hKey);
-    
-    if (hasGeminiKey) {
-      try {
-        const currentKey = sKey || eKey || hKey;
-        // Only attempt live fetch if key looks valid
-        if (currentKey.startsWith('AIza') || currentKey.startsWith('AQ.') || currentKey.length > 30) {
-          const pager = await getAiClient(req).models.list();
-          const liveModels: { id: string; displayName: string; description?: string }[] = [];
-          for await (const m of pager) {
-            const id = m.name?.replace(/^models\//, '') || '';
-            if (id && !id.includes('embedding') && !id.includes('aqa') && !id.includes('imagen')) {
-              liveModels.push({
-                id,
-                displayName: m.displayName || id,
-                description: m.description,
-              });
-            }
-          }
-          if (liveModels.length > 0) {
-            geminiModels = liveModels;
-            isGeminiLive = true;
-          }
-        }
-      } catch (e: any) {
-        if (!e?.message?.includes('401') && !e?.message?.includes('UNAUTHENTICATED')) {
-          console.warn('Error fetching Gemini models in all:', e);
-        }
-      }
-    }
-
-    let groqModels: { id: string; displayName: string; description?: string }[] = [];
-    let isGroqLive = false;
-    if (customGroqKey) {
-      try {
-        const gRes = await fetch('https://api.groq.com/openai/v1/models', {
-          headers: { Authorization: `Bearer ${customGroqKey}` },
-        });
-        if (gRes.ok) {
-          const data = await gRes.json();
-          if (Array.isArray(data.data) && data.data.length > 0) {
-            groqModels = data.data.map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Groq LPU model (${m.id})`,
-            }));
-            isGroqLive = true;
-          }
-        }
-      } catch (e) {
-        console.warn('Groq live query error in /api/models/all:', e);
-      }
-    }
-
-    let mistralModels: { id: string; displayName: string; description?: string }[] = [];
-    let isMistralLive = false;
-    if (customMistralKey) {
-      try {
-        const mRes = await fetch('https://api.mistral.ai/v1/models', {
-          headers: { Authorization: `Bearer ${customMistralKey}` },
-        });
-        if (mRes.ok) {
-          const data = await mRes.json();
-          if (Array.isArray(data.data) && data.data.length > 0) {
-            mistralModels = data.data.map((m: { id: string }) => ({
-              id: m.id,
-              displayName: m.id,
-              description: `Live Mistral model (${m.id})`,
-            }));
-            isMistralLive = true;
-          }
-        }
-      } catch (e) {
-        console.warn('Mistral live query error in /api/models/all:', e);
-      }
-    }
-
-    res.json({
-      gemini: geminiModels,
-      groq: groqModels,
-      mistral: mistralModels,
-      isLive: {
-        gemini: isGeminiLive,
-        groq: isGroqLive,
-        mistral: isMistralLive,
-      },
-      counts: {
-        gemini: geminiModels.length,
-        groq: groqModels.length,
-        mistral: mistralModels.length,
-      },
-    });
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Failed to load models catalog.' });
-  }
+  res.json({
+    gemini,
+    groq,
+    mistral,
+    checkedAt: new Date().toISOString(),
+    isLive: {
+      gemini: Boolean(keys.gemini && gemini.length),
+      groq: Boolean(keys.groq && groq.length),
+      mistral: Boolean(keys.mistral && mistral.length),
+    },
+    counts: { gemini: gemini.length, groq: groq.length, mistral: mistral.length },
+    configured: {
+      gemini: Boolean(keys.gemini),
+      groq: Boolean(keys.groq),
+      mistral: Boolean(keys.mistral),
+    },
+  });
 });
 
 // Live Streaming Chat endpoint with Server-Sent Events (SSE) and Router
@@ -659,13 +704,14 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     const {
       messages,
       channel = 'web',
-      userName = 'Olalekan',
+      userName: requestedUserName,
       nickname = '',
       userContext, // User Context payload containing nickname, activeModel, and selectedVoice
-      provider = 'gemini',
-      model, // dynamic model ID selected directly by Olalekan
+      provider: requestedProvider,
+      model,
       threadId, // Persistent multi-thread conversation ID
       threadTitle, // Optional title for this thread
+      customGeminiKey,
       customGroqKey,
       customMistralKey,
       customTavilyKey,
@@ -676,41 +722,38 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const effectiveThreadId = threadId || `thread-${Date.now()}`;
+    const effectiveThreadId = typeof threadId === 'string' && threadId.trim() ? threadId.trim() : `thread-${randomUUID()}`;
     const firstUserMsg = messages.find((m: { role: string }) => m.role === 'user');
     const effectiveThreadTitle =
-      threadTitle || (firstUserMsg?.content ? firstUserMsg.content.slice(0, 48) : 'New Conversation');
+      threadTitle || (firstUserMsg?.content ? firstUserMsg.content.slice(0, 48) : '');
 
     // Ensure thread exists in Neon database
-    neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel }).catch(() => {});
 
     const currentSettings = settingsManager.getSettings();
+    const userName = (typeof requestedUserName === 'string' && requestedUserName.trim())
+      ? requestedUserName.trim()
+      : (currentSettings.userName || '');
+    const provider = requestedProvider || currentSettings.activeProvider;
+    if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'PROVIDER_CONFIGURATION_REQUIRED', error: 'Configure an active AI provider in Settings.' });
+      return;
+    }
 
     // Resolve effective user configuration details for complete self-awareness
     const effectiveNickname = userContext?.nickname || nickname || currentSettings.nickname || '';
-    const effectiveUserName = userContext?.userName || userName || currentSettings.userName || 'Olalekan';
-    const effectiveVoice = userContext?.selectedVoice || currentSettings.voice || 'Fenrir';
+    const effectiveUserName = userContext?.userName || userName || currentSettings.userName || '';
+    const effectiveVoice = userContext?.selectedVoice || currentSettings.voice || '';
 
-    // Dynamic resolution of provider and model selected by user
-    let targetProvider = provider;
-    let targetModel = model;
-
-    if (!targetProvider || targetProvider === 'auto') {
-      targetProvider = currentSettings.activeProvider || 'gemini';
-      targetModel = model || currentSettings.activeModel;
-    }
+    // Never reuse a model identifier saved for a different provider or silently select another model.
+    const targetProvider = provider;
+    const targetModel = model || currentSettings.providerModels[targetProvider] ||
+      (currentSettings.activeProvider === targetProvider ? currentSettings.activeModel : '');
 
     if (!targetModel) {
-      targetModel = currentSettings.activeModel || (currentSettings.providerModels as Record<string, string>)[targetProvider];
-    }
-
-    if (!targetModel) {
-      targetModel = telegramBotManager.getConfig().activeModel;
-    }
-
-    if (!targetModel) {
-      res.status(400).json({
-        error: `No active model configured for provider "${targetProvider}". Please configure your model in Settings.`,
+      res.status(503).json({
+        success: false,
+        code: 'MODEL_CONFIGURATION_REQUIRED',
+        error: `Configure an explicit model for provider "${targetProvider}" before starting a chat.`,
       });
       return;
     }
@@ -805,6 +848,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         channel: (channel as any) || 'web',
         threadId: effectiveThreadId,
         customTavilyKey,
+        customGeminiKey,
         providerOverride: targetProvider as any,
         modelOverride: targetModel,
         customGroqKey,
@@ -841,20 +885,53 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = swarmSession.synthesis || fullReply;
 
-      // Extract artifacts from session traces for persistence and client UI
-      const artifacts: any[] = [];
-      swarmSession.traces.forEach((trace) => {
-        trace.tools.forEach((tool) => {
-          if (tool.toolName === 'generateArtifact' && tool.status === 'success') {
-            const res = tool.output as any;
-            if (res.url) {
-              artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-            }
-          }
-        });
-      });
+      // Only expose artifacts when the generator confirms successful validation and durable file persistence.
+      const artifactToolResults = swarmSession.traces.flatMap((trace) =>
+        trace.tools
+          .filter((tool) => tool.toolName === 'generateArtifact')
+          .map((tool) => ({ traceStatus: tool.status, output: tool.output as Record<string, unknown> | null })),
+      );
+      const artifacts: Array<Record<string, unknown>> = [];
+      const artifactFailures: string[] = [];
 
-      // Pass artifacts to client via SSE for immediate display
+      for (const entry of artifactToolResults) {
+        const output = entry.output;
+        const valid = entry.traceStatus === 'success'
+          && output?.status === 'success'
+          && output.validationStatus === 'validated'
+          && typeof output.fileName === 'string'
+          && typeof output.displayName === 'string'
+          && typeof output.type === 'string'
+          && typeof output.url === 'string'
+          && output.url.startsWith('/artifacts/')
+          && typeof output.sizeBytes === 'number'
+          && output.sizeBytes > 0;
+        if (valid) {
+          artifacts.push({
+            name: output.fileName,
+            displayName: output.displayName,
+            url: output.url,
+            type: output.type,
+            mimeType: output.mimeType,
+            sizeBytes: output.sizeBytes,
+            generatedAt: output.generatedAt,
+            validationStatus: output.validationStatus,
+          });
+        } else {
+          artifactFailures.push(
+            typeof output?.error === 'string' && output.error.trim()
+              ? output.error
+              : 'Artifact output did not include verified, validated file metadata.',
+          );
+        }
+      }
+
+      if (artifactFailures.length > 0) {
+        const details = [...new Set(artifactFailures)].join('; ');
+        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+      }
+
+      // Pass only validated artifacts to the client via SSE for immediate display
       if (artifacts.length > 0) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
@@ -881,6 +958,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         nickname: effectiveNickname,
         selectedVoice: effectiveVoice,
         activeThreadTitle: effectiveThreadTitle,
+        customGeminiKey,
         customGroqKey,
         customMistralKey,
         customTavilyKey,
@@ -897,18 +975,50 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       clearInterval(heartbeatTimer);
       fullReply = turnResult.reply;
 
-      // Extract artifacts from executed tools for single-agent mode
-      const artifacts: any[] = [];
-      turnResult.toolsExecuted.forEach((tool) => {
-        if (tool.toolName === 'generateArtifact' && (tool.result as any)?.status === 'success') {
-          const res = tool.result as any;
-          if (res.url) {
-            artifacts.push({ name: res.fileName, url: res.url, type: res.type });
-          }
-        }
-      });
+      // Only surface generated files that passed real format and saved-file validation.
+      const artifactToolResults = turnResult.toolsExecuted.filter((tool) => tool.toolName === 'generateArtifact');
+      const artifacts: Array<Record<string, unknown>> = [];
+      const artifactFailures: string[] = [];
 
-      // Pass artifacts to client via SSE
+      for (const tool of artifactToolResults) {
+        const output = tool.result && typeof tool.result === 'object'
+          ? tool.result as Record<string, unknown>
+          : null;
+        const valid = output?.status === 'success'
+          && output.validationStatus === 'validated'
+          && typeof output.fileName === 'string'
+          && typeof output.displayName === 'string'
+          && typeof output.type === 'string'
+          && typeof output.url === 'string'
+          && output.url.startsWith('/artifacts/')
+          && typeof output.sizeBytes === 'number'
+          && output.sizeBytes > 0;
+        if (valid) {
+          artifacts.push({
+            name: output.fileName,
+            displayName: output.displayName,
+            url: output.url,
+            type: output.type,
+            mimeType: output.mimeType,
+            sizeBytes: output.sizeBytes,
+            generatedAt: output.generatedAt,
+            validationStatus: output.validationStatus,
+          });
+        } else {
+          artifactFailures.push(
+            typeof output?.error === 'string' && output.error.trim()
+              ? output.error
+              : 'Artifact output did not include verified, validated file metadata.',
+          );
+        }
+      }
+
+      if (artifactFailures.length > 0) {
+        const details = [...new Set(artifactFailures)].join('; ');
+        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+      }
+
+      // Pass only validated artifacts to the client via SSE
       if (artifacts.length > 0) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
@@ -925,7 +1035,9 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       (req as any)._artifacts = artifacts;
     }
 
-    // Persist messages to Neon Postgres if configured
+    if (!fullReply.trim()) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no chat reply');
+
+    // Persist messages to Neon Postgres and report the result.
     let userDbId: number | undefined;
     let assistantDbId: number | undefined;
 
@@ -936,7 +1048,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           session_id: effectiveThreadId,
           channel: (channel as 'web' | 'telegram' | 'whatsapp') || 'web',
           role: 'user',
-          content: lastUserMsgToSave.content || '[Attached Photo/Image]',
+          content: typeof lastUserMsgToSave.content === 'string' ? lastUserMsgToSave.content : '',
+          metadata: lastUserMsgToSave.imageData ? { hasImage: true, mimeType: lastUserMsgToSave.imageData.mimeType } : undefined,
           provider: targetProvider,
           model: targetModel,
         });
@@ -960,10 +1073,15 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       }
     }
 
-    // Refresh thread record in chat_threads
-    neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel }).catch(() => {});
+    // Persist the thread record and surface the result; missing database state is not reported as saved.
+    let threadPersisted = false;
+    try {
+      threadPersisted = await neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel });
+    } catch (dbErr) {
+      console.warn('[NeonDB] Thread persistence failed:', dbErr instanceof Error ? dbErr.message : 'unknown error');
+    }
 
-    // Emit saved IDs so client can attach real database IDs immediately
+    // Emit saved IDs plus explicit persistence status so the UI cannot mistake an unavailable database for success.
     res.write(
       `data: ${JSON.stringify({
         savedMeta: {
@@ -971,6 +1089,15 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           assistantDbId,
           threadId: effectiveThreadId,
           threadTitle: effectiveThreadTitle,
+          persistence: {
+            thread: threadPersisted ? 'persisted' : 'failed',
+            userMessage: lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData)
+              ? (userDbId !== undefined ? 'persisted' : 'failed')
+              : 'not_required',
+            assistantMessage: fullReply
+              ? (assistantDbId !== undefined ? 'persisted' : 'failed')
+              : 'empty_output',
+          },
         },
       })}\n\n`
     );
@@ -1000,16 +1127,39 @@ app.post('/api/swarm/execute', async (req: Request, res: Response): Promise<void
       return;
     }
 
+    const currentSettings = settingsManager.getSettings();
+    const targetProvider = provider || currentSettings.activeProvider;
+    if (targetProvider !== 'gemini' && targetProvider !== 'groq' && targetProvider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'PROVIDER_CONFIGURATION_REQUIRED' });
+      return;
+    }
+    const targetModel = model || currentSettings.providerModels[targetProvider] ||
+      (currentSettings.activeProvider === targetProvider ? currentSettings.activeModel : '');
+    if (!targetModel) {
+      res.status(503).json({ success: false, code: 'MODEL_CONFIGURATION_REQUIRED', provider: targetProvider });
+      return;
+    }
+
     const session = await specialistSwarmService.executeSwarmTurn({
       userPrompt: prompt.trim(),
       channel,
       customTavilyKey,
-      providerOverride: provider || settingsManager.getSettings().activeProvider,
-      modelOverride: model || settingsManager.getSettings().activeModel,
+      providerOverride: targetProvider,
+      modelOverride: targetModel,
       customGroqKey,
       customMistralKey,
+      customGeminiKey: req.body.customGeminiKey,
     });
 
+    if (session.status !== 'completed') {
+      res.status(503).json({
+        success: false,
+        code: 'SWARM_EXECUTION_INCOMPLETE',
+        status: session.status,
+        session,
+      });
+      return;
+    }
     res.json({ success: true, session });
   } catch (err: unknown) {
     console.error('Swarm execution error:', err);
@@ -1054,8 +1204,12 @@ app.post('/api/threads', async (req: Request, res: Response): Promise<void> => {
       res.status(400).json({ error: 'Thread ID and title are required.' });
       return;
     }
-    await neonDb.saveThread({ id, title, channel });
-    res.json({ success: true, message: 'Thread saved.' });
+    const persisted = await neonDb.saveThread({ id, title, channel });
+    if (!persisted) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Thread was not saved to the database.' });
+      return;
+    }
+    res.json({ success: true, persistence: 'persisted' });
   } catch (err: unknown) {
     res.status(500).json({ error: 'Failed to save thread' });
   }
@@ -1070,8 +1224,12 @@ app.put('/api/threads/:id/title', async (req: Request, res: Response): Promise<v
       res.status(400).json({ error: 'Title cannot be empty.' });
       return;
     }
-    await neonDb.saveThread({ id, title: title.trim() });
-    res.json({ success: true, message: 'Thread renamed.' });
+    const persisted = await neonDb.saveThread({ id, title: title.trim() });
+    if (!persisted) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Thread title change was not saved to the database.' });
+      return;
+    }
+    res.json({ success: true, persistence: 'persisted' });
   } catch (err: unknown) {
     res.status(500).json({ error: 'Failed to rename thread' });
   }
@@ -1143,61 +1301,92 @@ app.post('/api/analyze-decision', async (req: Request, res: Response): Promise<v
     const {
       dilemma,
       channel = 'web',
-      userName = 'Olalekan',
-      nickname = '',
+      userName: requestedUserName,
+      nickname: requestedNickname,
       model,
-      includeChallenger = true,
+      provider: requestedProvider,
+      includeChallenger,
       customMistralKey,
     } = req.body;
 
-    if (!dilemma || typeof dilemma !== 'string') {
-      res.status(400).json({ error: 'Dilemma or decision prompt is required.' });
+    if (typeof dilemma !== 'string' || !dilemma.trim()) {
+      res.status(400).json({ success: false, code: 'INVALID_DECISION_INPUT', error: 'A non-empty decision prompt is required.' });
       return;
     }
-
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(500).json({ error: 'GEMINI_API_KEY is missing on server.' });
-      return;
-    }
-
-    const systemInstruction = `${buildSystemPrompt(channel, userName, nickname)}
-    
-TASK SPECIFICATION:
-You are analyzing a situation or decision using Olalekan's 7-part Advice Framework (Section 7 and Section 3 of your Master System Prompt).
-Break down the issue with total authenticity: practical, analytical, cost-conscious, separating facts from assumptions, substance over hype, identifying trade-offs and the realistic next step.
-
-CRITICAL ENHANCEMENT: Assess your Confidence & Evidence Level.
-- Indicate confidence level: "High", "Medium", or "Low"
-- Explain why: based on verified information X vs unresolved assumption Y.
-
-Respond strictly in valid JSON format with the following keys:
-{
-  "actualSituation": "Concise summary of what the situation actually is (separating facts from assumptions)",
-  "confidenceLevel": "High" | "Medium" | "Low",
-  "confidenceReason": "Why: Based on verified information X; assumption Y remains unresolved.",
-  "whatMattersMost": "The core priority or leverage point that really matters",
-  "realisticOptions": ["Option A with brief realism check", "Option B with brief realism check"],
-  "tradeOffs": "Clear analysis of costs, risks, opportunity costs, and diminishing returns",
-  "principalRisks": "The main risks or hidden assumptions to watch out for",
-  "recommendedAction": "The grounded, practical recommended course of action (substance over hype)",
-  "nextPracticalStep": "The immediate, realistic next step to take with currently available resources",
-  "clarifyingQuestion": "A concise question if any critical fact is missing, otherwise empty string"
-}`;
 
     const currentSettings = settingsManager.getSettings();
-    const primaryModel = model || currentSettings.activeModel || currentSettings.providerModels.gemini || telegramBotManager.getConfig().activeModel;
-    if (!primaryModel) {
-      res.status(400).json({
-        error: 'No active model configured for decision analysis. Please configure your model in Settings.',
+    const provider = requestedProvider || currentSettings.activeProvider;
+    if (provider !== 'gemini') {
+      res.status(409).json({
+        success: false,
+        code: 'PROVIDER_UNSUPPORTED_FOR_ENDPOINT',
+        error: 'This endpoint currently implements Gemini analysis only. Select Gemini explicitly or use the multi-provider chat endpoint.',
       });
       return;
     }
 
-    // Step 1: Core analysis via dynamic model
+    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
+      normalizeProviderApiKey(req.get('x-api-key')) ||
+      normalizeProviderApiKey(req.body?.customGeminiKey) ||
+      normalizeProviderApiKey(currentSettings.customGeminiKey) ||
+      normalizeProviderApiKey(process.env.GEMINI_API_KEY);
+
+    if (!geminiKey) {
+      res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
+      return;
+    }
+
+    const configuredModel = model ||
+      currentSettings.providerModels?.gemini ||
+      (currentSettings.activeProvider === 'gemini' ? currentSettings.activeModel : '');
+
+    if (!configuredModel) {
+      res.status(503).json({ success: false, code: 'MODEL_CONFIGURATION_REQUIRED:gemini' });
+      return;
+    }
+
+    const primaryModel = await modelCatalogService.resolveModelForProvider('gemini', configuredModel, geminiKey);
+    const userName = typeof requestedUserName === 'string' && requestedUserName.trim()
+      ? requestedUserName.trim()
+      : (currentSettings.userName || '');
+    const nickname = typeof requestedNickname === 'string' && requestedNickname.trim()
+      ? requestedNickname.trim()
+      : (currentSettings.nickname || '');
+
+    const systemInstruction = buildSystemPrompt({
+      channel,
+      userName,
+      nickname,
+      activeModel: primaryModel,
+      activeProvider: 'gemini',
+      selectedVoice: currentSettings.voice || '',
+    });
+
+    const analysisPrompt = `Analyze the following decision using evidence-bound reasoning.
+Separate facts from assumptions, compare realistic options and trade-offs, and identify practical next steps.
+Do not invent personal facts, sources, historical data, or user preferences.
+Return only one valid JSON object with these keys:
+{
+  "actualSituation": "string",
+  "confidenceLevel": "High" | "Medium" | "Low",
+  "confidenceScore": "integer from 0 to 100, or null when a defensible estimate is not possible",
+  "confidenceReason": "string describing verified evidence and unresolved assumptions",
+  "whatMattersMost": "string",
+  "realisticOptions": ["string"],
+  "tradeOffs": "string",
+  "principalRisks": "string",
+  "recommendedAction": "string",
+  "nextPracticalStep": "string",
+  "clarifyingQuestion": "string; empty only when no critical fact is missing"
+}
+confidenceScore is a model estimate, not an empirically calibrated probability. Do not map confidenceLevel to a numeric score.
+Decision to analyze:
+${dilemma}`;
+
     const response = await callWithRetry(() =>
       getAiClient(req).models.generateContent({
         model: primaryModel,
-        contents: dilemma,
+        contents: analysisPrompt,
         config: {
           systemInstruction,
           responseMimeType: 'application/json',
@@ -1205,154 +1394,183 @@ Respond strictly in valid JSON format with the following keys:
       })
     );
 
-    const jsonText = response.text?.trim() || '{}';
+    const jsonText = response.text?.trim() || '';
+    if (!jsonText) throw new Error('AI_OUTPUT_EMPTY: decision model returned no usable output');
+
     let parsed: any;
     try {
       parsed = JSON.parse(jsonText);
     } catch {
-      parsed = { raw: jsonText };
+      throw new Error('AI_OUTPUT_INVALID_JSON: decision model did not return a valid JSON object');
     }
 
-    // Step 2: Optional Challenger Second Opinion
-    if (includeChallenger) {
-      const challengerPrompt = `You are an independent reasoning auditor acting as an objective challenger to Olalekan's digital twin analysis.
-User Dilemma: "${dilemma}"
-Primary Analysis Recommendation: "${parsed.recommendedAction || ''}"
-Identified Trade-Offs: "${parsed.tradeOffs || ''}"
-Identified Risks: "${parsed.principalRisks || ''}"
+    const requiredStrings = [
+      'actualSituation',
+      'confidenceLevel',
+      'confidenceReason',
+      'whatMattersMost',
+      'tradeOffs',
+      'principalRisks',
+      'recommendedAction',
+      'nextPracticalStep',
+      'clarifyingQuestion',
+    ];
+    const validConfidence = ['High', 'Medium', 'Low'].includes(parsed.confidenceLevel);
+    const validScore = parsed.confidenceScore === null ||
+      (Number.isInteger(parsed.confidenceScore) && parsed.confidenceScore >= 0 && parsed.confidenceScore <= 100);
+    if (!parsed || typeof parsed !== 'object' ||
+        requiredStrings.some((key) => typeof parsed[key] !== 'string') ||
+        !Array.isArray(parsed.realisticOptions) ||
+        !parsed.realisticOptions.every((item: unknown) => typeof item === 'string') ||
+        !validConfidence || !validScore) {
+      throw new Error('AI_OUTPUT_SCHEMA_INVALID: decision model output failed schema validation');
+    }
 
-Critique this analysis without being contrary for the sake of it.
-Identify:
-1. What unexamined assumption is being taken for granted?
-2. What alternative scenario was under-weighted?
-3. Where could the recommendation encounter unexpected friction or diminishing returns?
+    // The challenger is optional and only runs when explicitly requested. It never silently
+    // substitutes a second Gemini call and labels it an independent provider.
+    if (includeChallenger === true) {
+      const mistralKey = (customMistralKey || currentSettings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim();
+      const challengerConfiguredModel = req.body?.challengerModel ||
+        currentSettings.providerModels?.mistral ||
+        (currentSettings.activeProvider === 'mistral' ? currentSettings.activeModel : '');
 
-Respond in valid JSON:
-{
-  "agreementLevel": "High Agreement" | "Partial Disagreement" | "Alternative Perspective",
-  "points": ["Point 1", "Point 2", "Point 3"]
-}`;
-
-      const effectiveMistralKey = customMistralKey || process.env.MISTRAL_API_KEY;
-
-      if (effectiveMistralKey) {
-        // Execute real live Mistral call as independent challenger
+      if (!mistralKey || !challengerConfiguredModel) {
+        parsed.challengerStatus = {
+          status: 'unavailable',
+          code: 'CHALLENGER_CONFIGURATION_MISSING',
+        };
+      } else {
         try {
-          const mRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
+          const challengerModel = await modelCatalogService.resolveModelForProvider('mistral', challengerConfiguredModel, mistralKey);
+          const challengerPrompt = `Critically review this decision analysis using only the supplied text. Do not invent facts or evidence.
+Decision: ${dilemma}
+Primary analysis: ${JSON.stringify(parsed)}
+Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreement", "Alternative Perspective") and "points" (array of evidence-based strings).`;
+          const challengerResponse = await fetch('https://api.mistral.ai/v1/chat/completions', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${effectiveMistralKey}`,
+              Authorization: `Bearer ${mistralKey}`,
             },
             body: JSON.stringify({
-              model: await modelCatalogService.resolveModelForProvider('mistral', currentSettings.providerModels?.mistral, effectiveMistralKey),
+              model: challengerModel,
               messages: [{ role: 'user', content: challengerPrompt }],
               response_format: { type: 'json_object' },
             }),
           });
-          if (mRes.ok) {
-            const mData = await mRes.json();
-            const cContent = mData.choices?.[0]?.message?.content;
-            if (cContent) {
-              const cParsed = JSON.parse(cContent);
-              parsed.challengerCritique = {
-                model: 'Mistral (Independent Challenger)',
-                points: cParsed.points || [],
-                agreementLevel: cParsed.agreementLevel || 'Alternative Perspective',
-              };
+
+          if (!challengerResponse.ok) {
+            parsed.challengerStatus = {
+              status: 'unavailable',
+              code: 'CHALLENGER_PROVIDER_ERROR',
+              httpStatus: challengerResponse.status,
+            };
+          } else {
+            const challengerData: any = await challengerResponse.json();
+            const challengerText = challengerData.choices?.[0]?.message?.content?.trim() || '';
+            if (!challengerText) {
+              parsed.challengerStatus = { status: 'failed', code: 'CHALLENGER_OUTPUT_EMPTY' };
+            } else {
+              const critique = JSON.parse(challengerText);
+              const allowedAgreement = ['High Agreement', 'Partial Disagreement', 'Alternative Perspective'];
+              if (!allowedAgreement.includes(critique.agreementLevel) ||
+                  !Array.isArray(critique.points) ||
+                  !critique.points.every((point: unknown) => typeof point === 'string')) {
+                parsed.challengerStatus = { status: 'failed', code: 'CHALLENGER_OUTPUT_SCHEMA_INVALID' };
+              } else {
+                parsed.challengerCritique = { model: challengerModel, points: critique.points, agreementLevel: critique.agreementLevel };
+                parsed.challengerStatus = { status: 'complete' };
+              }
             }
           }
-        } catch (mErr) {
-          console.warn('Mistral challenger check skipped:', mErr);
-        }
-      }
-
-      // If Mistral is not configured, run independent challenger pass dynamically
-      if (!parsed.challengerCritique) {
-        try {
-          const challengerModel = primaryModel;
-          const geminiChallenger = await callWithRetry(() =>
-            getAiClient(req).models.generateContent({
-              model: challengerModel,
-              contents: challengerPrompt,
-              config: {
-                responseMimeType: 'application/json',
-              },
-            })
-          );
-          const cText = geminiChallenger.text?.trim() || '{}';
-          const cParsed = JSON.parse(cText);
-          parsed.challengerCritique = {
-            model: `${challengerModel} (Challenger Audit)`,
-            points: cParsed.points || [],
-            agreementLevel: cParsed.agreementLevel || 'Alternative Perspective',
+        } catch (challengerError) {
+          parsed.challengerStatus = {
+            status: 'unavailable',
+            code: 'CHALLENGER_RESOLUTION_FAILED',
+            error: challengerError instanceof Error ? challengerError.message : 'Challenger resolution failed',
           };
-        } catch (gErr) {
-          console.warn('Challenger pass error:', gErr);
         }
       }
+    } else {
+      parsed.challengerStatus = { status: 'not_requested' };
     }
 
-    // Persist decision analysis to Neon Postgres if available
-    neonDb.saveDecision({
+    const decisionId = await neonDb.saveDecision({
       title: dilemma.slice(0, 100),
-      situation: parsed.actualSituation || dilemma,
-      options: parsed.realisticOptions || [],
-      recommendation: parsed.recommendedAction || '',
-      confidence: parsed.confidenceLevel === 'High' ? 90 : parsed.confidenceLevel === 'Medium' ? 70 : 50,
+      situation: parsed.actualSituation,
+      options: parsed.realisticOptions,
+      recommendation: parsed.recommendedAction,
+      confidence: parsed.confidenceScore,
       full_analysis: parsed,
-      channel: channel || 'web',
-    }).catch((dbErr) => console.warn('[NeonDB] Save decision deferred:', dbErr));
+      channel,
+    });
 
-    res.json({ success: true, analysis: parsed });
+    res.json({
+      success: true,
+      analysis: parsed,
+      persistence: decisionId === null
+        ? { status: 'failed', code: 'PERSISTENCE_FAILED' }
+        : { status: 'persisted', decisionId },
+    });
   } catch (err: unknown) {
-    console.error('Decision analysis error:', err);
-    const errorMessage = err instanceof Error ? err.message : 'Analysis failed.';
-    res.status(500).json({ error: errorMessage });
+    const message = err instanceof Error ? err.message : 'Decision analysis failed';
+    console.error('[DecisionAnalysis] Request failed:', message);
+    res.status(502).json({
+      success: false,
+      code: message.split(':')[0] || 'DECISION_ANALYSIS_FAILED',
+      error: message,
+    });
   }
 });
 
 // Text-to-Speech (Voice Note generation) using dynamic model resolution
 app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { text, voice = 'Fenrir' } = req.body;
-    if (!text || typeof text !== 'string') {
-      res.status(400).json({ error: 'Text string is required.' });
+    const { text, voice: requestedVoice } = req.body;
+    if (typeof text !== 'string' || !text.trim()) {
+      res.status(400).json({ success: false, code: 'INVALID_TTS_INPUT', error: 'Text is required.' });
       return;
     }
 
-    if (!process.env.GEMINI_API_KEY) {
-      res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
+    const settings = settingsManager.getSettings();
+    const voice = (typeof requestedVoice === 'string' ? requestedVoice : settings.voice || '').trim();
+    if (!voice) {
+      res.status(503).json({ success: false, code: 'VOICE_CONFIGURATION_REQUIRED', error: 'Select a supported speech voice before requesting audio.' });
       return;
     }
 
-    // Clean markdown symbols for smooth reading and process real-time message dynamically
+    const geminiKey = normalizeProviderApiKey(req.get('x-gemini-key')) ||
+      normalizeProviderApiKey(req.get('x-api-key')) ||
+      normalizeProviderApiKey(req.body?.customGeminiKey) ||
+      normalizeProviderApiKey(settings.customGeminiKey) ||
+      normalizeProviderApiKey(process.env.GEMINI_API_KEY);
+    if (!geminiKey) {
+      res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING:gemini' });
+      return;
+    }
+
     const cleanText = text
-      .replace(/```[\s\S]*?```/g, ' code block snippet ')
+      .replace(/```[\s\S]*?```/g, ' ')
       .replace(/`([^`]+)`/g, '$1')
       .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-      .replace(/[*_#>-]/g, ' ');
+      .replace(/[*_#>-]/g, ' ')
+      .trim();
+    if (!cleanText) {
+      res.status(400).json({ success: false, code: 'TTS_TEXT_EMPTY_AFTER_CLEANING' });
+      return;
+    }
 
-    // Fully dynamic output token budget based on real-time message length
-    const dynamicOutputTokens = Math.min(8192, Math.max(1024, Math.ceil(text.length * 2.5)));
-
+    const dynamicOutputTokens = Math.ceil(cleanText.length * 2.5);
     const response = await callWithRetry(async () => {
-      const model = await modelCatalogService.resolveSpecializedModel('tts');
+      const model = await modelCatalogService.resolveSpecializedModel('tts', geminiKey);
       return getAiClient(req).models.generateContent({
         model,
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: cleanText }],
-          },
-        ],
+        contents: [{ role: 'user', parts: [{ text: cleanText }] }],
         config: {
           responseModalities: ['AUDIO'],
           maxOutputTokens: dynamicOutputTokens,
           speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voice }, // 'Fenrir', 'Puck', 'Charon', 'Kore', 'Zephyr'
-            },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } },
           },
         },
       });
@@ -1360,71 +1578,64 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
 
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) {
-      res.status(500).json({ error: 'No audio returned from speech model.' });
+      res.status(502).json({ success: false, code: 'TTS_OUTPUT_UNAVAILABLE', error: 'The selected model returned no audio data.' });
       return;
     }
 
-    res.json({
-      audioDataUrl: `data:audio/wav;base64,${base64Audio}`,
-    });
+    res.json({ success: true, audioDataUrl: `data:audio/wav;base64,${base64Audio}` });
   } catch (err: unknown) {
-    console.error('TTS error:', err);
-    const errorMessage = err instanceof Error ? err.message : 'Speech synthesis failed.';
-    res.status(500).json({ error: errorMessage });
+    const message = err instanceof Error ? err.message : 'Speech synthesis failed.';
+    console.error('[TTS] Request failed:', message);
+    res.status(502).json({ success: false, code: message.split(':')[0] || 'TTS_FAILED', error: message });
   }
 });
 
 // =========================================================================
 // Unified App Settings Persistence (Zero hardcoding, survives restarts & Neon)
 // =========================================================================
-app.get('/api/settings', async (req: Request, res: Response) => {
-  const settings = await settingsManager.syncFromDatabase();
-  res.json({ success: true, settings });
-});
-
-app.post('/api/settings', async (req: Request, res: Response) => {
-  try {
-    const updated = await settingsManager.updateSettings(req.body);
-    // Keep Telegram bot in sync with provider & activeModel
-    if (req.body.activeProvider || req.body.activeModel) {
-      telegramBotManager.updateConfig({
-        ...(req.body.activeProvider ? { activeProvider: req.body.activeProvider } : {}),
-        ...(req.body.activeModel ? { activeModel: req.body.activeModel } : {}),
-      }).catch(() => {});
-    }
-    res.json({ success: true, settings: updated });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to update settings' });
-  }
-});
+// The canonical settings GET/POST handlers are defined near the top of this file.
 
 // Voice Note Audio Transcription & Executive Summary Generation
 app.post('/api/audio/transcribe-and-summarize', async (req: Request, res: Response): Promise<void> => {
   try {
     const { audioBase64, mimeType, prompt } = req.body;
-    if (!audioBase64) {
-      res.status(400).json({ success: false, error: 'audioBase64 data is required.' });
+    if (typeof audioBase64 !== 'string' || !audioBase64.trim()) {
+      res.status(400).json({ success: false, code: 'AUDIO_INPUT_REQUIRED' });
+      return;
+    }
+    if (typeof mimeType !== 'string' || !mimeType.trim()) {
+      res.status(400).json({ success: false, code: 'AUDIO_MIME_TYPE_REQUIRED' });
       return;
     }
 
     const settings = settingsManager.getSettings();
-    const provider = settings.activeProvider || 'gemini';
-    const model = settings.activeModel || settings.providerModels?.[provider] || '';
+    const provider = settings.activeProvider;
+    if (provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'PROVIDER_CONFIGURATION_REQUIRED' });
+      return;
+    }
+    const model = settings.providerModels?.[provider] ||
+      (settings.activeProvider === provider ? settings.activeModel : '');
+    if (!model) {
+      res.status(503).json({ success: false, code: 'MODEL_CONFIGURATION_REQUIRED', provider });
+      return;
+    }
 
-    const effectivePrompt =
-      prompt ||
-      'Listen to this voice memo / audio recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast.';
+    const taskPrompt = typeof prompt === 'string' && prompt.trim()
+      ? prompt.trim()
+      : 'Transcribe the supplied audio accurately. Summarize only content actually present in the recording, distinguish uncertain speech from clear speech, and do not invent missing words, speakers, action items, dates, or commitments.';
 
     const turnResult = await twinAgentService.executeTurn({
-      userPrompt: effectivePrompt,
-      audioData: {
-        mimeType: mimeType || 'audio/webm',
-        data: audioBase64,
-      },
+      userPrompt: taskPrompt,
+      audioData: { mimeType: mimeType.trim(), data: audioBase64 },
       channel: 'web',
-      providerOverride: provider as any,
+      providerOverride: provider,
       modelOverride: model,
     });
+    if (typeof turnResult.reply !== 'string' || !turnResult.reply.trim()) {
+      res.status(502).json({ success: false, code: 'AI_OUTPUT_EMPTY' });
+      return;
+    }
 
     res.json({
       success: true,
@@ -1434,8 +1645,9 @@ app.post('/api/audio/transcribe-and-summarize', async (req: Request, res: Respon
       provider: turnResult.provider,
       model: turnResult.model,
     });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : String(err) });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Audio transcription failed';
+    res.status(502).json({ success: false, code: message.split(':')[0], error: message });
   }
 });
 
@@ -1493,6 +1705,12 @@ app.post('/api/telegram/sync-commands', async (req: Request, res: Response) => {
 
 // Webhook endpoint (used when mode is set to 'webhook')
 app.post('/api/telegram/webhook', (req: Request, res: Response, next) => {
+  const expectedSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+  const suppliedSecret = req.get('x-telegram-bot-api-secret-token') || '';
+  if (!expectedSecret || !suppliedSecret || !secretsMatch(expectedSecret, suppliedSecret)) {
+    res.status(403).json({ success: false, code: 'TELEGRAM_WEBHOOK_UNAUTHORIZED' });
+    return;
+  }
   return telegramBotManager.getWebhookCallback()(req, res, next);
 });
 
@@ -1730,101 +1948,7 @@ app.get('/api/experiments', async (req: Request, res: Response): Promise<void> =
   }
 });
 
-// Admin-Authenticated Isolated 10-Point Negative Matrix Test Runner Endpoint
-app.post('/api/admin/test/negative-matrix', async (req: Request, res: Response): Promise<void> => {
-  const adminToken = req.headers['x-admin-token'] as string;
-  const isDevEnvironment = process.env.NODE_ENV !== 'production' || req.hostname === 'localhost' || req.hostname === '127.0.0.1';
-
-  if (!isDevEnvironment && adminToken !== process.env.ADMIN_TOKEN) {
-    res.status(403).json({
-      success: false,
-      error: '403 Forbidden: Negative test matrix runner requires valid x-admin-token header in production.',
-    });
-    return;
-  }
-
-  // Execute deterministic assertion matrix against isolated mock handlers & real DB methods
-  const testResults = [
-    {
-      testId: 1,
-      title: 'Unsupported Numerical Claim',
-      status: 'Passed',
-      assertion: 'Server downgrades unbacked numerical claims from [Verified] to [Hypothesis - Source Unverified].',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 2,
-      title: 'Missing Knowledge Vault Context',
-      status: 'Passed',
-      assertion: 'Explicitly returns contextStatus: "unavailable" when vector search yields 0 matches; zero metrics fabricated.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 3,
-      title: 'Conflicting Project Records',
-      status: 'Passed',
-      assertion: 'Flagged conflicts trigger Evidence Sufficiency score downgrade.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 4,
-      title: 'Missing Baseline Metric',
-      status: 'Passed',
-      assertion: 'Recommendations lacking baseline metrics default to unmeasured Hypothesis status.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 5,
-      title: 'Provider Outage (503 / 429)',
-      status: 'Passed',
-      assertion: 'Transparent failure states returned without substituting mock model data.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 6,
-      title: 'Mismatched JSON Schema Repair',
-      status: 'Passed',
-      assertion: 'JSON extraction fallback safely extracts structured payloads without fabricating evidence.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 7,
-      title: 'Session User Authorization Boundary',
-      status: 'Passed',
-      assertion: 'Endpoints require valid x-user-email header and reject unauthenticated reviews.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 8,
-      title: 'Duplicate Review Idempotency Guard',
-      status: 'Passed',
-      assertion: 'Idempotency key re-use with different payload returns 409 Conflict.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 9,
-      title: 'Append-Only History Immutability',
-      status: 'Passed',
-      assertion: 'New outcome observations append to decision_reviews without mutating original decision or prior reviews.',
-      verifiedAt: new Date().toISOString(),
-    },
-    {
-      testId: 10,
-      title: 'Historical Calibration Score Gating',
-      status: 'Passed',
-      assertion: 'Brier calibration score requires >= 5 eligible observations; sampleSizeSufficient enforced.',
-      verifiedAt: new Date().toISOString(),
-    },
-  ];
-
-  res.json({
-    success: true,
-    totalTests: testResults.length,
-    passedCount: testResults.filter((t) => t.status === 'Passed').length,
-    failedCount: 0,
-    results: testResults,
-  });
-});
+// Automated checks live in the test runner and CI; no endpoint reports unexecuted checks as passed.
 
 // =========================================================================
 // Vector-Based Knowledge Storage Endpoints (Neon pgvector & Gemini Embedding)
@@ -1930,35 +2054,67 @@ app.post('/api/knowledge/categories/delete', async (req: Request, res: Response)
 app.get('/api/suggested-prompts', async (_req: Request, res: Response) => {
   try {
     const docs = await knowledgeService.listDocuments();
-    const settings = settingsManager.getSettings();
-    const brandName = settings.brandName || 'TwinMind AI';
-    const userName = settings.userName || 'User';
-    const docTitles = docs.map((d) => d.title).join(', ');
+    if (!docs.length) {
+      res.status(409).json({
+        success: false,
+        code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE',
+        error: 'No stored knowledge records are available to ground suggested prompts.',
+      });
+      return;
+    }
 
-    const promptText = `Generate 4 highly intelligent, context-aware, completely dynamic suggested chat prompts for ${brandName} (personal digital twin and thinking partner for ${userName}). 
-Knowledge base topics available: ${docTitles || 'General personal development, business strategy, technology, and decision frameworks'}.
-Return a JSON object with a "prompts" array containing exactly 4 objects. Each object must have:
-- "badge": short category name (e.g. "Strategy", "Reflections", "Decision", "Growth", "Insights")
-- "title": short title (max 5 words)
-- "prompt": the full detailed prompt text for the user to send to their digital twin
-- "description": brief subtitle explaining what the prompt explores`;
+    const settings = settingsManager.getSettings();
+    const provider = settings.activeProvider;
+    const model = settings.activeModel || (provider ? settings.providerModels?.[provider] : '');
+    if ((provider !== 'gemini' && provider !== 'groq' && provider !== 'mistral') || !model) {
+      res.status(503).json({
+        success: false,
+        code: 'MODEL_CONFIGURATION_REQUIRED',
+        error: 'Configure an active provider and explicit model to generate suggested prompts.',
+      });
+      return;
+    }
+
+    const docTitles = docs.map((doc) => doc.title).filter((title) => typeof title === 'string' && title.trim());
+    if (!docTitles.length) {
+      res.status(409).json({
+        success: false,
+        code: 'KNOWLEDGE_CONTEXT_UNAVAILABLE',
+        error: 'Stored knowledge records have no usable titles to ground suggested prompts.',
+      });
+      return;
+    }
+
+    const identityContext = [settings.brandName?.trim(), settings.userName?.trim()]
+      .filter((value) => Boolean(value))
+      .join(' / ');
+    const promptText = `Generate 4 useful suggested chat prompts grounded strictly in the following stored knowledge record titles.
+${identityContext ? `Configured workspace identity: ${identityContext}.\\n` : ''}Knowledge record titles: ${JSON.stringify(docTitles)}.
+Do not invent facts about the user or assume details absent from these records. Return a JSON object with a "prompts" array of exactly 4 objects. Each object must contain "badge", "title", "prompt", and "description".`;
 
     const resText = await twinAgentService.generateCompletion({
       prompt: promptText,
-      provider: settings.activeProvider,
-      model: settings.activeModel,
+      provider,
+      model,
       jsonMode: true,
     });
 
-    const parsed = JSON.parse(resText || '{}');
-    if (parsed.prompts && Array.isArray(parsed.prompts) && parsed.prompts.length > 0) {
-      res.json({ success: true, prompts: parsed.prompts });
-      return;
+    if (!resText.trim()) throw new Error('AI_OUTPUT_EMPTY: suggested prompt model returned no usable content');
+    const parsed = JSON.parse(resText);
+    if (!Array.isArray(parsed.prompts) || parsed.prompts.length !== 4 ||
+        parsed.prompts.some((item: any) => !item || typeof item.badge !== 'string' ||
+          typeof item.title !== 'string' || typeof item.prompt !== 'string' ||
+          typeof item.description !== 'string')) {
+      throw new Error('AI_OUTPUT_SCHEMA_INVALID: suggested prompts response did not match the required schema');
     }
-    throw new Error('Invalid AI response structure for suggested prompts');
+
+    res.json({ success: true, prompts: parsed.prompts });
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : 'Suggested prompts generation failed';
-    res.status(500).json({ success: false, error: errorMsg });
+    res.status(502).json({
+      success: false,
+      code: 'SUGGESTED_PROMPTS_GENERATION_FAILED',
+      error: err instanceof Error ? err.message : 'Suggested prompts generation failed',
+    });
   }
 });
 
@@ -2118,289 +2274,181 @@ app.post('/api/scrape', async (req: Request, res: Response): Promise<void> => {
 
 // Multi-Agent Debate & Devil's Advocate Endpoint (Strict Zero-Fallback & Evidence-Audited)
 app.post('/api/debate', async (req: Request, res: Response): Promise<void> => {
-  const { topic } = req.body;
-  if (!topic) {
-    res.status(400).json({ success: false, error: 'Debate topic is required' });
-    return;
-  }
   try {
-    const s = settingsManager.getSettings();
-    const effectiveMistralKey = req.body.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY;
-    const effectiveGroqKey = req.body.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY;
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    if (!topic) {
+      res.status(400).json({ success: false, code: 'DEBATE_TOPIC_REQUIRED' });
+      return;
+    }
 
+    const settings = settingsManager.getSettings();
+    const keys = {
+      gemini: (req.body.customGeminiKey || settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim(),
+      groq: (req.body.customGroqKey || settings.customGroqKey || process.env.GROQ_API_KEY || '').trim(),
+      mistral: (req.body.customMistralKey || settings.customMistralKey || process.env.MISTRAL_API_KEY || '').trim(),
+    };
+    const missingCredentials = Object.entries(keys).filter(([, key]) => !key).map(([provider]) => provider);
+    if (missingCredentials.length) {
+      res.status(503).json({
+        success: false,
+        code: 'DEBATE_PROVIDER_CREDENTIALS_MISSING',
+        missingProviders: missingCredentials,
+      });
+      return;
+    }
+
+    const configuredModels = {
+      gemini: settings.providerModels.gemini || (settings.activeProvider === 'gemini' ? settings.activeModel : ''),
+      groq: settings.providerModels.groq || (settings.activeProvider === 'groq' ? settings.activeModel : ''),
+      mistral: settings.providerModels.mistral || (settings.activeProvider === 'mistral' ? settings.activeModel : ''),
+    };
+    const missingModels = Object.entries(configuredModels).filter(([, model]) => !model).map(([provider]) => provider);
+    if (missingModels.length) {
+      res.status(503).json({
+        success: false,
+        code: 'DEBATE_MODEL_CONFIGURATION_MISSING',
+        missingProviders: missingModels,
+      });
+      return;
+    }
+
+    // Each role is bound to its explicitly configured provider. No cross-provider fallback is permitted.
     const [geminiModel, groqModel, mistralModel] = await Promise.all([
-      modelCatalogService.resolveModelForProvider('gemini', s.providerModels.gemini),
-      modelCatalogService.resolveModelForProvider('groq', s.providerModels.groq, effectiveGroqKey),
-      modelCatalogService.resolveModelForProvider('mistral', s.providerModels.mistral, effectiveMistralKey),
+      modelCatalogService.resolveModelForProvider('gemini', configuredModels.gemini, keys.gemini),
+      modelCatalogService.resolveModelForProvider('groq', configuredModels.groq, keys.groq),
+      modelCatalogService.resolveModelForProvider('mistral', configuredModels.mistral, keys.mistral),
     ]);
 
-    // Pass 1: Search Knowledge Vault for verified evidence
-    let knowledgeDocs: Array<{ id?: string | number; title: string; content: string }> = [];
-    let contextStatus: 'available' | 'unavailable' = 'unavailable';
+    const requestedSynthesisProvider = req.body.provider || settings.activeProvider;
+    if (requestedSynthesisProvider !== 'gemini' && requestedSynthesisProvider !== 'groq' && requestedSynthesisProvider !== 'mistral') {
+      res.status(503).json({ success: false, code: 'SYNTHESIS_PROVIDER_CONFIGURATION_REQUIRED' });
+      return;
+    }
+    const synthesisModel = req.body.model || configuredModels[requestedSynthesisProvider];
+    const synthesisKey = keys[requestedSynthesisProvider];
+    const liveSynthesisModel = await modelCatalogService.resolveModelForProvider(
+      requestedSynthesisProvider,
+      synthesisModel,
+      synthesisKey
+    );
 
+    let knowledgeDocs: Array<{ id?: string | number; title: string; content: string }> = [];
+    let knowledgeStatus: 'available' | 'no_matching_records' | 'query_failed' = 'no_matching_records';
     try {
       knowledgeDocs = await knowledgeService.search(topic, 3, 0.35);
-      if (knowledgeDocs.length > 0) {
-        contextStatus = 'available';
-      }
-    } catch (kErr) {
-      console.warn('Knowledge Vault search warning for debate:', kErr);
-      contextStatus = 'unavailable';
+      knowledgeStatus = knowledgeDocs.length ? 'available' : 'no_matching_records';
+    } catch (error) {
+      knowledgeStatus = 'query_failed';
+      console.warn('[Debate] Knowledge retrieval failed:', error instanceof Error ? error.message : 'unknown error');
     }
 
-    const groundTruthContext = contextStatus === 'available'
-      ? `VERIFIED KNOWLEDGE VAULT RECORDS:\n${knowledgeDocs.map((d) => `- [Source ID: ${d.id || 'doc'}] "${d.title}": ${d.content.slice(0, 300)}`).join('\n')}\n`
-      : 'EXPLICIT STATUS: Knowledge Vault returned 0 matching documents or was unavailable. NO PRE-EXISTING VERIFIED RECORDS EXIST FOR THIS TOPIC.\n';
+    const sourceContext = knowledgeStatus === 'available'
+      ? knowledgeDocs.map((doc) => {
+          const sourceId = doc.id === undefined || doc.id === null ? '' : ' [record id: ' + doc.id + ']';
+          return '- ' + doc.title + sourceId + ': ' + doc.content.slice(0, 2000);
+        }).join('\n')
+      : '';
 
-    const evidenceRules = `
-EVIDENCE STANDARDS & CLAIM VALIDATION CONTRACTS:
-1. Every claim MUST be explicitly tagged with one of: [Verified], [Inferred], [Hypothesis], [Unknown].
-2. [Verified] requires referencing a specific matching record from the VERIFIED KNOWLEDGE VAULT RECORDS above.
-${contextStatus === 'unavailable' ? '3. CRITICAL: Zero Knowledge Vault records were retrieved. You MUST NOT label any statement or numerical metric as [Verified]. Tag claims as [Hypothesis] or [Unknown].' : ''}
-4. DO NOT invent or simulate unverified figures (user counts, revenue, conversion rates) as verified facts.
-5. If no baseline metric exists in the sources, label proposed targets as [Conditional Hypothesis - Missing Baseline].
-`;
+    const evidenceContext = [
+      'Knowledge retrieval status: ' + knowledgeStatus + '.',
+      sourceContext ? 'Retrieved stored records (these establish what is stored, not independent external verification):\n' + sourceContext : '',
+      'Do not claim that knowledge retrieval occurred successfully unless the status says available.',
+      'Distinguish sourced statements from inferences, hypotheses, and unknowns. Do not invent user metrics, baselines, sources, or historical data.',
+      'When source data is missing, describe the uncertainty and state what data would be needed to resolve it.',
+    ].filter(Boolean).join('\n\n');
 
-    // Server-Side Claim Downgrade Validator
-    const enforceClaimValidation = (text: string): string => {
-      if (contextStatus === 'unavailable') {
-        // Downgrade any ungrounded [Verified] tags to [Hypothesis - Source Unverified]
-        return text.replace(/\[Verified\]/g, '[Hypothesis - Source Unverified]');
-      }
-      return text;
-    };
+    const callProvider = (
+      provider: 'gemini' | 'groq' | 'mistral',
+      model: string,
+      prompt: string
+    ) => twinAgentService.generateCompletion({
+      prompt,
+      provider,
+      model,
+      customGeminiKey: keys.gemini,
+      customGroqKey: keys.groq,
+      customMistralKey: keys.mistral,
+    });
 
-    let partialRun = false;
-    const targetProvider = req.body.provider || s.activeProvider || 'gemini';
-    const targetModel = req.body.model || s.activeModel;
+    const proPrompt = [
+      'Analyze the proposed decision as a constructive advocate. Present the strongest reasonable case, practical value drivers, constraints, and a testable validation plan. Do not make up evidence or metrics.',
+      'Topic: ' + topic,
+      evidenceContext,
+    ].join('\n\n');
+    const contrarianPrompt = [
+      'Act as an independent adversarial reviewer. Identify the strongest unsupported assumption, downside risks, second-order consequences, and evidence that would disprove the preferred option. Do not invent facts or claim unsupported certainty.',
+      'Topic: ' + topic,
+      evidenceContext,
+    ].join('\n\n');
+    const realistPrompt = [
+      'Assess execution feasibility. Identify dependencies, available-resource constraints, realistic sequencing, costs, operational risks, and measurable criteria that require an observed baseline. Do not fabricate existing resources or metrics.',
+      'Topic: ' + topic,
+      evidenceContext,
+    ].join('\n\n');
 
-    // Pass 2: Pro Advocate (Uses user active provider/model or Gemini)
-    const proPrompt = `You are the Pro / Optimist Advocate in a multi-agent decision debate.
-Debate Topic: "${topic}"
-
-${groundTruthContext}
-${evidenceRules}
-
-Present a strong, structured, evidence-backed argument supporting this topic or direction.
-Include:
-1. Core Strategic Thesis (with explicit evidence tags)
-2. Key Value Drivers & Evidence
-3. Proposed Validation Plan & Minimum Success Thresholds
-Be rigorous, concise, and honest about assumptions.`;
-
-    let proArg = '';
-    let proAgentName = `${targetProvider.toUpperCase()} Pro Advocate`;
-    try {
-      const proResText = await twinAgentService.generateCompletion({
-        prompt: proPrompt,
-        provider: targetProvider,
-        model: targetModel,
-        customGeminiKey: req.body.customGeminiKey,
-        customGroqKey: req.body.customGroqKey,
-        customMistralKey: req.body.customMistralKey,
-      });
-      proArg = enforceClaimValidation(proResText || 'No argument generated.');
-    } catch (err) {
-      partialRun = true;
-      proArg = `[Provider Error] Pro Advocate pass unavailable: ${err instanceof Error ? err.message : String(err)}`;
+    const [proArgRaw, contrarianRaw, realistRaw] = await Promise.all([
+      callProvider('gemini', geminiModel, proPrompt),
+      callProvider('mistral', mistralModel, contrarianPrompt),
+      callProvider('groq', groqModel, realistPrompt),
+    ]);
+    const proArg = proArgRaw.trim();
+    const contrarianArg = contrarianRaw.trim();
+    const realistArg = realistRaw.trim();
+    if (!proArg || !contrarianArg || !realistArg) {
+      throw new Error('AI_OUTPUT_EMPTY: one or more debate roles returned no usable content');
     }
 
-    // Pass 3: Mistral / Independent Devil's Advocate (Rigorous Cross-Examination & Challenge)
-    const contrarianPrompt = `You are the Contrarian / Devil's Advocate in a multi-agent decision debate.
-Debate Topic: "${topic}"
+    const synthesisPrompt = [
+      'Synthesize the three live analyses below into a provisional decision review. Separate retrieved-source statements from inferences and unresolved assumptions. Do not invent baseline metrics, probabilities, user identity, historical decisions, or evidence. Explicitly mention when information is insufficient. Do not manufacture a confidence score. Include an immediate next step and the evidence required to validate it.',
+      'Topic: ' + topic,
+      'Retrieved-source status: ' + knowledgeStatus,
+      'Evidence context:\n' + evidenceContext,
+      'ADVOCATE (' + geminiModel + '):\n' + proArg,
+      'ADVERSARIAL REVIEWER (' + mistralModel + '):\n' + contrarianArg,
+      'EXECUTION REALIST (' + groqModel + '):\n' + realistArg,
+    ].join('\n\n');
 
-Pro Advocate Position:
-${proArg}
-
-${groundTruthContext}
-${evidenceRules}
-
-Conduct a rigorous cross-examination of the Pro Advocate's argument:
-1. Identify Pro Advocate's strongest UNSUPPORTED claim or assumption and directly challenge it.
-2. Identify hidden risks, second-order downsides, and potential points of failure.
-3. State what testable evidence or data would be required to prove or disprove the Pro Advocate's hypothesis.
-Tag every claim as [Verified], [Inferred], [Hypothesis], or [Unknown]. Be incisive and candid.`;
-
-    let mistralArg = '';
-    let mistralAgentName = 'Mistral Devil\'s Advocate';
-    let mistralModelUsed = mistralModel;
-    if (effectiveMistralKey) {
-      try {
-        const mistralRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${effectiveMistralKey}` },
-          body: JSON.stringify({
-            model: mistralModel,
-            messages: [{ role: 'user', content: contrarianPrompt }],
-            temperature: 0.7,
-            max_tokens: 500,
-          }),
-        });
-        if (mistralRes.ok) {
-          const data = await mistralRes.json();
-          mistralArg = enforceClaimValidation(data.choices?.[0]?.message?.content?.trim() || '');
-        }
-      } catch (mErr) {
-        console.warn('Mistral round error:', mErr);
-      }
-    }
-    if (!mistralArg) {
-      try {
-        const contrarianResText = await twinAgentService.generateCompletion({
-          prompt: contrarianPrompt,
-          provider: targetProvider,
-          model: targetModel,
-          customGeminiKey: req.body.customGeminiKey,
-          customGroqKey: req.body.customGroqKey,
-          customMistralKey: req.body.customMistralKey,
-        });
-        mistralArg = enforceClaimValidation(contrarianResText || 'No contrarian critique generated.');
-        mistralAgentName = effectiveMistralKey ? 'Mistral Devil\'s Advocate' : `Independent Devil's Advocate (${targetProvider.toUpperCase()})`;
-        mistralModelUsed = effectiveMistralKey ? mistralModel : `${targetModel || targetProvider}`;
-      } catch (err) {
-        partialRun = true;
-        mistralArg = '[Provider Error] Devil\'s Advocate pass unavailable due to API rate limit or outage.';
-      }
-    }
-
-    // Pass 4: Groq / Independent Realist Cross-Examiner (Pragmatic Execution & Commitments Check)
-    const realistPrompt = `You are the Pragmatic Realist & Execution Cross-Examiner in a multi-agent decision debate.
-Debate Topic: "${topic}"
-
-Pro Advocate Case:
-${proArg}
-
-Contrarian Challenge:
-${mistralArg}
-
-${groundTruthContext}
-${evidenceRules}
-
-Cross-examine both positions on real-world execution realities:
-1. Operational Bottlenecks: Time sinks, complexity, resource requirements, and distraction risks.
-2. Baseline & Threshold Definition: How should baseline metrics and realistic minimum success thresholds be established?
-3. Impact on Existing Commitments: Evaluate trade-offs against current active projects, learning obligations, and ongoing tasks.
-Tag every claim as [Verified], [Inferred], [Hypothesis], or [Unknown].`;
-
-    let groqArg = '';
-    let groqAgentName = 'Groq Realist Cross-Examiner';
-    let groqModelUsed = groqModel;
-    if (effectiveGroqKey) {
-      try {
-        const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${effectiveGroqKey}` },
-          body: JSON.stringify({
-            model: groqModel,
-            messages: [{ role: 'user', content: realistPrompt }],
-            temperature: 0.7,
-            max_tokens: 500,
-          }),
-        });
-        if (groqRes.ok) {
-          const data = await groqRes.json();
-          groqArg = enforceClaimValidation(data.choices?.[0]?.message?.content?.trim() || '');
-        }
-      } catch (gErr) {
-        console.warn('Groq round error:', gErr);
-      }
-    }
-    if (!groqArg) {
-      try {
-        const realistResText = await twinAgentService.generateCompletion({
-          prompt: realistPrompt,
-          provider: targetProvider,
-          model: targetModel,
-          customGeminiKey: req.body.customGeminiKey,
-          customGroqKey: req.body.customGroqKey,
-          customMistralKey: req.body.customMistralKey,
-        });
-        groqArg = enforceClaimValidation(realistResText || 'No execution reality check generated.');
-        groqAgentName = effectiveGroqKey ? 'Groq Realist Cross-Examiner' : `Pragmatic Realist Cross-Examiner (${targetProvider.toUpperCase()})`;
-        groqModelUsed = effectiveGroqKey ? groqModel : `${targetModel || targetProvider}`;
-      } catch (err) {
-        partialRun = true;
-        groqArg = '[Provider Error] Realist Cross-Examiner pass unavailable due to API rate limit or outage.';
-      }
-    }
-
-    // Pass 5: Digital Twin Chief Arbiter (Synthesis Verdict with Evidence Audit & 3-Horizon Breakdown)
-    const synthesisPrompt = `You are Olalekan's Digital Twin acting as Chief Arbiter. Review all debate perspectives:
-
-[PRO ADVOCATE]
-${proArg}
-
-[CONTRARIAN DEVIL'S ADVOCATE]
-${mistralArg}
-
-[PRAGMATIC REALIST]
-${groqArg}
-
-Debate Topic: "${topic}"
-
-Synthesize a provisional, evidence-driven verdict following this EXACT STRUCTURE:
-
-### 1. EVIDENCE AUDIT & CLAIM VERIFICATION
-- Context Status: ${contextStatus}
-- Identify key claims and distinguish [Verified] facts from [Inferred] logic, [Hypothesis] assumptions, and [Unknown] missing variables.
-- Address the Contrarian's primary challenge and state what missing information would change this verdict.
-
-### 2. 3-DIMENSIONAL CONFIDENCE ASSESSMENT
-- Evidence Sufficiency: [High / Moderate / Insufficient] — Explain why based on verified data vs assumptions.
-- Recommendation Confidence: [High / Moderate / Low] — Explain given trade-offs, reversibility, and costs.
-- Prediction Confidence: [High / Moderate / Low] — Explain likelihood of experiment outcome. Note: If Evidence Sufficiency is Insufficient, Prediction Confidence MUST be Low.
-
-### 3. THREE-HORIZON DECISION BREAKDOWN
-- Horizon 1 (Immediate Focus: Next 7-14 Days): What requires urgent operational attention now.
-- Horizon 2 (30-Day Commercial Experiment): What deserves focused validation/investment for the next 30 days, including baseline metrics & success thresholds.
-- Horizon 3 (Long-Term Strategic Value): Which initiative possesses the highest long-term potential and core platform value.
-
-### 4. EXISTING COMMITMENTS & RISK MATRIX
-- Explain how existing obligations (e.g. active projects, learning goals, operational tools) are prioritized or maintained rather than erased.
-- Actionable Immediate Next Practical Step.`;
-
-    let verdict = '';
-    try {
-      const synthesisResText = await twinAgentService.generateCompletion({
-        prompt: synthesisPrompt,
-        provider: targetProvider,
-        model: targetModel,
-        customGeminiKey: req.body.customGeminiKey,
-        customGroqKey: req.body.customGroqKey,
-        customMistralKey: req.body.customMistralKey,
-      });
-      verdict = enforceClaimValidation(synthesisResText || 'No synthesis generated.');
-    } catch (err) {
-      verdict = `Chief Arbiter synthesis error: ${err instanceof Error ? err.message : String(err)}`;
-    }
+    const verdict = (await callProvider(requestedSynthesisProvider, liveSynthesisModel, synthesisPrompt)).trim();
+    if (!verdict) throw new Error('AI_OUTPUT_EMPTY: configured synthesis provider returned no usable content');
 
     const rounds = [
-      { agent: proAgentName, model: targetModel || geminiModel, role: 'Pro / Optimist Advocate', text: proArg },
-      { agent: mistralAgentName, model: mistralModelUsed, role: 'Contrarian / Skeptic', text: mistralArg },
-      { agent: groqAgentName, model: groqModelUsed, role: 'Execution Realist', text: groqArg },
-      { agent: `Digital Twin Chief Arbiter (${targetProvider.toUpperCase()})`, model: targetModel || geminiModel, role: 'Chief Arbiter Verdict', text: verdict },
+      { agent: 'Advocate', provider: 'gemini', model: geminiModel, role: 'Advocate', text: proArg, status: 'complete' },
+      { agent: 'Adversarial reviewer', provider: 'mistral', model: mistralModel, role: 'Contrarian', text: contrarianArg, status: 'complete' },
+      { agent: 'Execution realist', provider: 'groq', model: groqModel, role: 'Realist', text: realistArg, status: 'complete' },
+      { agent: 'Synthesis', provider: requestedSynthesisProvider, model: liveSynthesisModel, role: 'Synthesis', text: verdict, status: 'complete' },
     ];
 
-    // Persist immutable decision record to Neon DB
     const savedId = await neonDb.saveDecision({
       title: topic.slice(0, 100),
-      situation: groundTruthContext,
+      situation: evidenceContext,
       recommendation: verdict.slice(0, 500),
-      confidence: contextStatus === 'available' ? 85 : 50,
-      full_analysis: { topic, contextStatus, partialRun, rounds },
+      full_analysis: {
+        topic,
+        knowledgeStatus,
+        providers: { gemini: geminiModel, mistral: mistralModel, groq: groqModel, synthesis: liveSynthesisModel },
+        rounds,
+      },
       channel: 'web',
     });
 
     res.json({
       success: true,
-      decisionId: savedId,
       topic,
-      contextStatus,
-      partialRun,
+      knowledgeStatus,
       rounds,
+      synthesis: verdict,
+      persistence: savedId === null || savedId === undefined
+        ? { status: 'failed', code: 'PERSISTENCE_FAILED' }
+        : { status: 'persisted', decisionId: savedId },
     });
-  } catch (err: unknown) {
-    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Multi-agent debate failed' });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Debate execution failed';
+    console.error('[Debate] Request failed:', message);
+    res.status(503).json({
+      success: false,
+      code: message.split(':')[0] || 'DEBATE_EXECUTION_UNAVAILABLE',
+      error: message,
+    });
   }
 });
 
@@ -2440,7 +2488,7 @@ if (isProduction) {
 }
 
 app.listen(PORT, '0.0.0.0', async () => {
-  console.log(`Olalekan Digital Twin server running on http://0.0.0.0:${PORT}`);
+  console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
   // Start background WhatsApp job worker and lease recovery daemon
   whatsAppWorker.startWorker();
 
@@ -2456,10 +2504,31 @@ app.listen(PORT, '0.0.0.0', async () => {
     sentinelService.runCognitiveRedTeamScan().catch(err => console.error('Periodic sentinel scan error:', err));
   }, 1000 * 60 * 60 * 6);
 
-  // Hydrate settings from Neon DB if available
-  settingsManager.syncFromDatabase().catch((dbErr) => {
-    console.warn('Neon DB settings sync deferred:', dbErr);
-  });
+  // Hydrate settings only after a real database connection succeeds. If Neon is
+  // temporarily unavailable at boot, retry hydration after the DB reconnects.
+  let databaseSettingsHydrated = false;
+  let databaseSettingsHydrationInProgress = false;
+  const hydrateSettingsWhenDatabaseIsReady = async (): Promise<void> => {
+    if (databaseSettingsHydrated || databaseSettingsHydrationInProgress) return;
+    databaseSettingsHydrationInProgress = true;
+    try {
+      const connected = await neonDb.ensureConnected();
+      if (!connected) return;
+      await settingsManager.syncFromDatabase();
+      databaseSettingsHydrated = true;
+      console.log('[NeonDB] Database-backed settings hydration completed.');
+    } catch (dbErr) {
+      console.warn('[NeonDB] Settings hydration deferred:', dbErr instanceof Error ? dbErr.message : 'unknown error');
+    } finally {
+      databaseSettingsHydrationInProgress = false;
+    }
+  };
+
+  void hydrateSettingsWhenDatabaseIsReady();
+  const settingsHydrationTimer = setInterval(() => {
+    void hydrateSettingsWhenDatabaseIsReady();
+  }, 30_000);
+  settingsHydrationTimer.unref?.();
   // Attempt background startup of Telegram bot listener
   try {
     await telegramBotManager.start();

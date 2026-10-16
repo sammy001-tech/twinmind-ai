@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import fs from 'fs';
 import path from 'path';
+import { isRetryableDatabaseError, summarizeDatabaseConnectionError } from '../utils/databaseConnection.ts';
 
 export interface DatabaseStatus {
   configured: boolean;
@@ -8,9 +9,9 @@ export interface DatabaseStatus {
   source: 'environment' | 'settings' | 'none';
   maskedUrl: string | null;
   tables: {
-    conversations: number;
-    decisions: number;
-    twin_events: number;
+    conversations: number | null;
+    decisions: number | null;
+    twin_events: number | null;
   };
   error: string | null;
 }
@@ -54,19 +55,82 @@ class NeonDatabaseService {
   private currentUrl: string | null = null;
   private isConnected = false;
   private lastError: string | null = null;
+  private lastConnectionError: unknown = null;
   private initializedSchema = false;
+  private connectionAttempt: Promise<boolean> | null = null;
+  private readonly maxConnectionAttempts = 3;
+  private readonly reconnectIntervalMs = 30_000;
+  private reconnectTimer: NodeJS.Timeout;
 
   constructor() {
-    this.refreshConnection();
+    void this.ensureConnected();
+    this.reconnectTimer = setInterval(() => {
+      if (this.isConnected || !this.getActiveUrl().url || this.connectionAttempt) return;
+      console.warn('[NeonDB] Database remains disconnected; attempting bounded background reconnection.');
+      void this.ensureConnected();
+    }, this.reconnectIntervalMs);
+    this.reconnectTimer.unref?.();
   }
 
   /**
-   * Determine database URL using strict priority:
-   * 1. process.env.DATABASE_URL (Environment variable / .env)
-   * 2. Stored private configuration in db-config.json (Saved from UI)
-   * 3. Null (Zero fallback / zero hardcoding)
+   * Wait for a shared connection attempt or initiate bounded retries. This prevents
+   * concurrent startup services from racing to create separate PostgreSQL pools.
    */
-  public getActiveUrl(): { url: string | null; source: 'environment' | 'settings' | 'none' } {
+  public ensureConnected(): Promise<boolean> {
+    const { url } = this.getActiveUrl();
+    if (url && this.isConnected && this.pool && this.currentUrl === url) {
+      return Promise.resolve(true);
+    }
+
+    if (this.connectionAttempt) return this.connectionAttempt;
+
+    const attempt = this.connectWithRetries();
+    this.connectionAttempt = attempt;
+    void attempt.finally(() => {
+      if (this.connectionAttempt === attempt) this.connectionAttempt = null;
+    }).catch(() => {
+      // connectWithRetries handles connection errors; this guard prevents a
+      // rejected cleanup chain from becoming an unhandled promise rejection.
+    });
+    return attempt;
+  }
+
+  /**
+   * Backward-compatible entry point for services that explicitly refresh the
+   * connection. It shares the same in-flight attempt and bounded retry policy.
+   */
+  public refreshConnection(): Promise<boolean> {
+    return this.ensureConnected();
+  }
+
+  private async connectWithRetries(): Promise<boolean> {
+    const { url } = this.getActiveUrl();
+    if (!url) return this.connectOnce();
+
+    for (let attempt = 1; attempt <= this.maxConnectionAttempts; attempt++) {
+      if (await this.connectOnce()) return true;
+
+      const connectionError = this.lastConnectionError;
+      if (attempt >= this.maxConnectionAttempts || !isRetryableDatabaseError(connectionError)) {
+        break;
+      }
+
+      const delayMs = attempt * 1_000;
+      console.warn(
+        `[NeonDB] Transient database connection failure (attempt ${attempt}/${this.maxConnectionAttempts}); retrying in ${delayMs}ms.`
+      );
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+    }
+
+    console.warn('[NeonDB] Initial connection attempts did not succeed; automatic reconnection will retry in the background.');
+    return false;
+  }
+
+  /**
+   * Database connection configuration is deployment-managed and environment-only.
+   * Missing DATABASE_URL remains missing; the application does not persist a URL sent by the UI.
+   */
+  public getActiveUrl(): { url: string | null; source: 'environment' | 'none' } {
     if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim()) {
       return { url: process.env.DATABASE_URL.trim(), source: 'environment' };
     }
@@ -84,63 +148,80 @@ class NeonDatabaseService {
       const user = parsed.username ? parsed.username.slice(0, 3) + '***' : '';
       return `${parsed.protocol}//${user}:****@${parsed.host}${parsed.pathname}`;
     } catch {
-      return 'postgresql://****@neon.tech/***';
+      return 'Invalid connection URL format';
     }
   }
 
   /**
    * Initialize or refresh connection pool
    */
-  public async refreshConnection(): Promise<boolean> {
+  private async connectOnce(): Promise<boolean> {
     const { url, source } = this.getActiveUrl();
 
     if (!url) {
-      if (this.pool) {
-        await this.pool.end().catch(() => {});
-        this.pool = null;
-      }
+      const previousPool = this.pool;
+      this.pool = null;
       this.currentUrl = null;
       this.isConnected = false;
-      this.lastError = 'No DATABASE_URL configured in environment or settings.';
+      this.lastConnectionError = null;
+      this.lastError = 'No DATABASE_URL configured in the deployment environment.';
+      if (previousPool) void previousPool.end().catch(() => {});
       return false;
     }
 
-    // Reuse pool if URL hasn't changed and already connected
-    if (this.pool && this.currentUrl === url && this.isConnected) {
-      return true;
-    }
+    if (this.pool && this.currentUrl === url && this.isConnected) return true;
 
-    // Clean up old pool
-    if (this.pool) {
-      await this.pool.end().catch(() => {});
-      this.pool = null;
-    }
+    const previousUrl = this.currentUrl;
+    const previousPool = this.pool;
+    this.pool = null;
+    this.currentUrl = null;
+    this.isConnected = false;
+    if (previousUrl !== url) this.initializedSchema = false;
+    if (previousPool) void previousPool.end().catch(() => {});
 
+    let nextPool: Pool | null = null;
     try {
-      this.pool = new Pool({
+      nextPool = new Pool({
         connectionString: url,
-        ssl: { rejectUnauthorized: false },
+        ssl: { rejectUnauthorized: true },
         max: 10,
         idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 10000,
+        connectionTimeoutMillis: 15000,
       });
 
-      // Test connection
-      const client = await this.pool.connect();
+      nextPool.on('error', (err: Error) => {
+        if (this.pool !== nextPool) return;
+        this.isConnected = false;
+        this.lastConnectionError = err;
+        const details = summarizeDatabaseConnectionError(err, url);
+        this.lastError = details.causeMessage || details.message;
+        console.error('[NeonDB] Idle PostgreSQL connection error:', JSON.stringify(details));
+      });
+
+      this.pool = nextPool;
+
+      const client = await nextPool.connect();
       client.release();
 
       this.currentUrl = url;
       this.isConnected = true;
+      this.lastConnectionError = null;
       this.lastError = null;
       console.log(`[NeonDB] Successfully connected to Neon PostgreSQL (${source})`);
 
-      // Auto-initialize schema
       await this.initSchema();
       return true;
     } catch (err: unknown) {
       this.isConnected = false;
-      this.lastError = err instanceof Error ? err.message : 'Database connection error';
-      console.error('[NeonDB] Connection failed:', this.lastError);
+      this.lastConnectionError = err;
+      const details = summarizeDatabaseConnectionError(err, url);
+      this.lastError = details.causeMessage || details.message;
+      console.error('[NeonDB] Connection failed:', JSON.stringify(details));
+
+      const failedPool = this.pool === nextPool ? this.pool : nextPool;
+      this.pool = null;
+      this.currentUrl = null;
+      if (failedPool) void failedPool.end().catch(() => {});
       return false;
     }
   }
@@ -335,15 +416,22 @@ class NeonDatabaseService {
     try {
       tempPool = new Pool({
         connectionString: testUrl.trim(),
-        ssl: { rejectUnauthorized: false },
+        ssl: { rejectUnauthorized: true },
         connectionTimeoutMillis: 8000,
       });
 
       const res = await tempPool.query('SELECT version();');
-      const version = res.rows[0]?.version || 'PostgreSQL';
+      const version = res.rows[0]?.version;
+      if (typeof version !== 'string' || !version.trim()) {
+        return { success: false, message: 'Connection succeeded but PostgreSQL returned no server-version metadata.' };
+      }
+      const serverVersion = version.split(' on ')[0]?.trim();
+      if (!serverVersion) {
+        return { success: false, message: 'PostgreSQL server-version metadata was not usable.' };
+      }
       return {
         success: true,
-        message: `Connected successfully! Detected: ${version.split(' on ')[0] || 'PostgreSQL'}`,
+        message: `Connection validated. Server version: ${serverVersion}`,
       };
     } catch (err: unknown) {
       return {
@@ -360,21 +448,11 @@ class NeonDatabaseService {
   /**
    * Save database URL to private settings (Environment variable is preferred)
    */
-  public async saveConfigUrl(url: string): Promise<{ success: boolean; message: string }> {
-    const trimmed = (url || '').trim();
-
-    if (!trimmed) {
-      await this.refreshConnection();
-      return { success: true, message: 'Database configuration cleared.' };
-    }
-
-    // Verify first
-    const testResult = await this.testCustomUrl(trimmed);
-    if (!testResult.success) {
-      return { success: false, message: `Connection test failed: ${testResult.message}` };
-    }
-
-    return { success: false, message: 'Database URL can only be set via DATABASE_URL environment variable for security and zero-hardcoding compliance.' };
+  public async saveConfigUrl(_url: string): Promise<{ success: boolean; message: string }> {
+    return {
+      success: false,
+      message: 'Database connections are managed only through the deployment DATABASE_URL secret. Use the separate connection-test endpoint to validate a candidate URL; this endpoint never stores or clears it.',
+    };
   }
 
   /**
@@ -389,9 +467,9 @@ class NeonDatabaseService {
       source,
       maskedUrl: this.maskUrl(url),
       tables: {
-        conversations: 0,
-        decisions: 0,
-        twin_events: 0,
+        conversations: null,
+        decisions: null,
+        twin_events: null,
       },
       error: this.lastError,
     };
@@ -404,9 +482,17 @@ class NeonDatabaseService {
           this.pool.query('SELECT COUNT(*) FROM twin_events;'),
         ]);
 
-        status.tables.conversations = parseInt(convRes.rows[0]?.count || '0', 10);
-        status.tables.decisions = parseInt(decRes.rows[0]?.count || '0', 10);
-        status.tables.twin_events = parseInt(eventRes.rows[0]?.count || '0', 10);
+        const parseCount = (value: unknown): number | null => {
+          const count = typeof value === 'number'
+            ? value
+            : typeof value === 'string' && value.trim()
+              ? Number(value)
+              : NaN;
+          return Number.isSafeInteger(count) && count >= 0 ? count : null;
+        };
+        status.tables.conversations = parseCount(convRes.rows[0]?.count);
+        status.tables.decisions = parseCount(decRes.rows[0]?.count);
+        status.tables.twin_events = parseCount(eventRes.rows[0]?.count);
       } catch (err: unknown) {
         // Table count query error
         console.warn('[NeonDB] Error getting table counts:', err);
@@ -520,19 +606,20 @@ class NeonDatabaseService {
     return [];
   }
 
-  public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<void> {
+  public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
     const channel = thread.channel || 'web';
-    if (this.pool && this.isConnected) {
-      try {
-        await this.pool.query(
-          `INSERT INTO chat_threads (id, title, channel, updated_at)
-           VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-           ON CONFLICT (id) DO UPDATE SET title = $2, updated_at = CURRENT_TIMESTAMP`,
-          [thread.id, thread.title, channel]
-        );
-      } catch (err) {
-        console.error('[NeonDB] Error saving thread to DB:', err);
-      }
+    try {
+      await this.pool.query(
+        `INSERT INTO chat_threads (id, title, channel, updated_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET title = $2, updated_at = CURRENT_TIMESTAMP`,
+        [thread.id, thread.title, channel]
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error saving thread to DB:', err);
+      return false;
     }
   }
 
@@ -660,7 +747,7 @@ class NeonDatabaseService {
           dec.situation || null,
           JSON.stringify(dec.options || []),
           dec.recommendation || null,
-          dec.confidence || null,
+          dec.confidence ?? null,
           JSON.stringify(dec.full_analysis || {}),
           dec.channel || 'web',
         ]
@@ -697,6 +784,115 @@ class NeonDatabaseService {
     } catch (err) {
       console.error('[NeonDB] Error fetching decisions:', err);
       return [];
+    }
+  }
+
+  /**
+   * Return the next bounded batch of eligible Sentinel decisions that do not
+   * have a durable completed audit record. Deferred audits are held out for
+   * one retry window so failures do not block every later decision.
+   */
+  public async getPendingSentinelDecisions(limit = 15): Promise<DecisionRecord[] | null> {
+    if (!this.pool || !this.isConnected) return null;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('INVALID_SENTINEL_BATCH_SIZE');
+
+    try {
+      const result = await this.pool.query(
+        `SELECT d.*
+         FROM decisions d
+         WHERE NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM twin_events e
+             WHERE e.event_type = 'sentinel_decision_audit'
+               AND e.payload->>'decisionId' = d.id::text
+               AND (
+                 e.payload->>'status' = 'completed'
+                 OR (
+                   e.payload->>'status' = 'deferred'
+                   AND e.created_at > CURRENT_TIMESTAMP - INTERVAL '12 hours'
+                 )
+               )
+           )
+         ORDER BY d.created_at ASC, d.id ASC
+         LIMIT $1`,
+        [limit]
+      );
+
+      return result.rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        situation: row.situation,
+        options: row.options,
+        recommendation: row.recommendation,
+        confidence: row.confidence,
+        full_analysis: row.full_analysis,
+        channel: row.channel,
+        created_at: row.created_at,
+      }));
+    } catch (err) {
+      console.error('[NeonDB] Failed to retrieve pending Sentinel decisions:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Count eligible decisions without a completed audit. Null means that the
+   * database state could not be read; it is not equivalent to an empty queue.
+   */
+  public async getSentinelPendingDecisionCount(): Promise<number | null> {
+    if (!this.pool || !this.isConnected) return null;
+
+    try {
+      const result = await this.pool.query(
+        `SELECT COUNT(*)::int AS pending_count
+         FROM decisions d
+         WHERE NULLIF(BTRIM(d.recommendation), '') IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM twin_events e
+             WHERE e.event_type = 'sentinel_decision_audit'
+               AND e.payload->>'decisionId' = d.id::text
+               AND e.payload->>'status' = 'completed'
+           )`
+      );
+      const count = result.rows[0]?.pending_count;
+      return typeof count === 'number' && Number.isFinite(count) ? count : null;
+    } catch (err) {
+      console.error('[NeonDB] Failed to count pending Sentinel decisions:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Persist Sentinel audit state. A completion is only considered durable when
+   * the insert succeeds and returns its event ID.
+   */
+  public async recordSentinelDecisionAudit(
+    decisionId: number,
+    status: 'completed' | 'deferred',
+    details: Record<string, unknown> = {}
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !Number.isSafeInteger(decisionId) || decisionId < 1) return false;
+
+    const payload = {
+      ...details,
+      decisionId,
+      status,
+      recordedAt: new Date().toISOString(),
+    };
+
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO twin_events (event_type, payload)
+         VALUES ('sentinel_decision_audit', $1)
+         RETURNING id`,
+        [JSON.stringify(payload)]
+      );
+      return (result.rowCount ?? result.rows.length) > 0;
+    } catch (err) {
+      console.warn('[NeonDB] Unable to persist Sentinel audit state:', err instanceof Error ? err.message : 'unknown error');
+      return false;
     }
   }
 
@@ -892,20 +1088,26 @@ class NeonDatabaseService {
    * Compute unbundled Brier score and calibration metrics across finalized decisions
    */
   public async getCalibrationMetrics(): Promise<{
-    totalDecisions: number;
-    totalReviews: number;
+    available: boolean;
+    error?: string;
+    totalDecisions: number | null;
+    totalReviews: number | null;
     eligibleCount: number;
     sampleSizeSufficient: boolean; // requires eligibleCount >= 5
     brierScore: number | null; // (1/N) * sum((predicted_prob - outcome)^2)
+    overconfidenceLevel: number | null;
     outcomeCounts: Record<string, number>;
   }> {
     if (!this.pool || !this.isConnected) {
       return {
-        totalDecisions: 0,
-        totalReviews: 0,
+        available: false,
+        error: 'DATABASE_UNAVAILABLE',
+        totalDecisions: null,
+        totalReviews: null,
         eligibleCount: 0,
         sampleSizeSufficient: false,
         brierScore: null,
+        overconfidenceLevel: null,
         outcomeCounts: {
           'Met Success Threshold': 0,
           'Missed Baseline': 0,
@@ -938,6 +1140,8 @@ class NeonDatabaseService {
       };
 
       let sumSquareError = 0;
+      let sumPredictedProbability = 0;
+      let sumObservedOutcome = 0;
       let eligibleCount = 0;
 
       for (const row of rRes.rows) {
@@ -946,32 +1150,49 @@ class NeonDatabaseService {
 
         // Brier score calculation applies only to binary outcomes (Met Success Threshold = 1, Missed Baseline = 0)
         if (outcome === 'Met Success Threshold' || outcome === 'Missed Baseline') {
-          const predictedProb = (row.confidence || 75) / 100; // normalize 0-100 score to 0.0-1.0
+          const confidence = row.confidence === null || row.confidence === undefined ? NaN : Number(row.confidence);
+          if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) continue;
+          const predictedProb = confidence / 100;
           const actualVal = outcome === 'Met Success Threshold' ? 1 : 0;
           sumSquareError += Math.pow(predictedProb - actualVal, 2);
+          sumPredictedProbability += predictedProb;
+          sumObservedOutcome += actualVal;
           eligibleCount++;
         }
       }
 
       const sampleSizeSufficient = eligibleCount >= 5;
       const brierScore = sampleSizeSufficient && eligibleCount > 0 ? parseFloat((sumSquareError / eligibleCount).toFixed(4)) : null;
+      const meanPredictionBias = sampleSizeSufficient && eligibleCount > 0
+        ? (sumPredictedProbability / eligibleCount) - (sumObservedOutcome / eligibleCount)
+        : null;
+      // 0.5 indicates no mean calibration bias; above 0.5 means predicted probabilities
+      // exceed the observed success rate in the eligible binary-outcome sample.
+      const overconfidenceLevel = meanPredictionBias === null
+        ? null
+        : Math.max(0, Math.min(1, 0.5 + meanPredictionBias / 2));
 
       return {
+        available: true,
         totalDecisions,
         totalReviews,
         eligibleCount,
         sampleSizeSufficient,
         brierScore,
+        overconfidenceLevel,
         outcomeCounts,
       };
     } catch (err) {
       console.error('[NeonDB] Error computing calibration metrics:', err);
       return {
-        totalDecisions: 0,
-        totalReviews: 0,
+        available: false,
+        error: 'CALIBRATION_QUERY_FAILED',
+        totalDecisions: null,
+        totalReviews: null,
         eligibleCount: 0,
         sampleSizeSufficient: false,
         brierScore: null,
+        overconfidenceLevel: null,
         outcomeCounts: {},
       };
     }
@@ -1231,13 +1452,14 @@ class NeonDatabaseService {
   }): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
     try {
-      await this.pool.query(
+      const result = await this.pool.query(
         `INSERT INTO twin_jobs (id, message_sid, sender_phone, payload, status, updated_at)
          VALUES ($1, $2, $3, $4, 'pending', CURRENT_TIMESTAMP)
-         ON CONFLICT (message_sid) DO NOTHING`,
+         ON CONFLICT (message_sid) DO NOTHING
+         RETURNING id`,
         [job.id, job.message_sid, job.sender_phone, JSON.stringify(job.payload)]
       );
-      return true;
+      return (result.rowCount ?? 0) > 0;
     } catch (err) {
       console.error('[NeonDB] Error inserting job:', err);
       return false;
@@ -1247,6 +1469,18 @@ class NeonDatabaseService {
   public async claimNextJob(workerLeaseId: string, heartbeatExpirationMs: number): Promise<any | null> {
     if (!this.pool || !this.isConnected) return null;
     try {
+      // Exhausted leases are terminally failed before a new job is claimed.
+      await this.pool.query(
+        `UPDATE twin_jobs
+         SET status = 'failed',
+             error = 'RETRY_LIMIT_EXCEEDED',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE status = 'processing'
+           AND last_heartbeat_at < CURRENT_TIMESTAMP - ($1 || ' milliseconds')::interval
+           AND attempt_count >= 3`,
+        [heartbeatExpirationMs]
+      );
+
       // Atomic claim using UPDATE ... RETURNING
       // Finds pending jobs OR processing jobs with expired heartbeat
       const res = await this.pool.query(

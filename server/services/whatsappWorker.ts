@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { jobQueueService, type JobRecord } from './jobQueueService.ts';
 import { twilioService } from './twilioService.ts';
 import { intentClassifierService } from './intentClassifier.ts';
@@ -5,10 +6,11 @@ import { confirmationService } from './confirmationService.ts';
 import { twinAgentService } from './twinAgentService.ts';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
+import { artifactAccessService } from './artifactAccessService.ts';
 
 export class WhatsAppWorker {
   private isRunning = false;
-  private workerLeaseId = `worker-${process.pid}-${Math.random().toString(36).slice(2, 6)}`;
+  private workerLeaseId = `worker-${process.pid}-${randomUUID()}`;
 
   /**
    * Start worker polling loop & heartbeat recovery daemon
@@ -41,7 +43,8 @@ export class WhatsAppWorker {
 
       try {
         await this.executeJobPayload(job);
-        await jobQueueService.completeJob(job.jobId, this.workerLeaseId);
+        const completed = await jobQueueService.completeJob(job.jobId, this.workerLeaseId);
+        if (!completed) throw new Error('PERSISTENCE_FAILED: WhatsApp job completion was not durably recorded');
       } finally {
         clearInterval(heartbeatInterval);
       }
@@ -120,8 +123,15 @@ export class WhatsAppWorker {
 
     // 2. If photo is present or message is general text, route to multimodal reasoning
     const s = settingsManager.getSettings();
-    const activeProvider = s.activeProvider || 'gemini';
-    const activeModel = s.activeModel || s.providerModels[activeProvider] || '';
+    const activeProvider = s.activeProvider;
+    if (activeProvider !== 'gemini' && activeProvider !== 'groq' && activeProvider !== 'mistral') {
+      throw new Error('PROVIDER_CONFIGURATION_REQUIRED: configure the WhatsApp AI provider before processing inbound messages');
+    }
+    const activeModel = s.providerModels[activeProvider] ||
+      (s.activeProvider === activeProvider ? s.activeModel : '');
+    if (!activeModel) {
+      throw new Error(`MODEL_CONFIGURATION_REQUIRED:${activeProvider}: configure an explicit provider model before processing inbound messages`);
+    }
 
     if (!incomingImageData) {
       // Dynamic NLP Intent Classification using active LLM provider
@@ -130,9 +140,10 @@ export class WhatsAppWorker {
 
       // If classification needs clarification or confidence < 0.75
       if (classification.requiresClarification || classification.confidence < 0.75) {
-        const prompt =
-          classification.clarificationPrompt ||
-          `I want to make sure I understand correctly. Did you want to start a debate, log a decision outcome, or ask a question? Please clarify!`;
+        const prompt = classification.clarificationPrompt?.trim();
+        if (!prompt) {
+          throw new Error('AI_OUTPUT_SCHEMA_INVALID: clarification is required but the model did not provide usable text');
+        }
         await twilioService.sendWhatsAppMessage(senderPhone, `🤔 ${prompt}`);
         return;
       }
@@ -242,8 +253,10 @@ export class WhatsAppWorker {
       channel: 'whatsapp',
     });
 
-    const reply = turnResult?.reply?.trim() || 'Request processed.';
-    await twilioService.sendWhatsAppMessage(senderPhone, reply);
+    const reply = typeof turnResult?.reply === 'string' ? turnResult.reply.trim() : '';
+    if (!reply) throw new Error('AI_OUTPUT_EMPTY: provider returned no usable reply');
+    const delivered = await twilioService.sendWhatsAppMessage(senderPhone, reply);
+    if (!delivered.success) throw new Error(`DELIVERY_FAILED: ${delivered.error || 'WhatsApp response was not accepted by Twilio'}`);
 
     // Deliver generated artifacts (PDF, Excel .xlsx, CSV, Markdown) directly via WhatsApp mediaUrl
     if (turnResult?.toolsExecuted && Array.isArray(turnResult.toolsExecuted)) {
@@ -252,14 +265,24 @@ export class WhatsAppWorker {
         if (tool.toolName === 'generateArtifact' && res.fileName) {
           try {
             const fileName = res.fileName;
-            const publicBaseUrl = (process.env.PUBLIC_APP_URL || process.env.VITE_APP_URL || '').trim().replace(/\/+$/, '');
-            if (publicBaseUrl) {
-              const mediaUrl = `${publicBaseUrl}/artifacts/${encodeURIComponent(fileName)}`;
-              await twilioService.sendWhatsAppMessage(
-                senderPhone,
-                `📄 *Generated Document*: ${fileName}`,
-                mediaUrl
-              );
+            const publicBaseUrl = (process.env.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');
+            if (!publicBaseUrl) {
+              console.warn('[WhatsAppWorker] PUBLIC_APP_URL is not configured; generated artifact cannot be delivered as media.');
+              continue;
+            }
+            const parsedBaseUrl = new URL(publicBaseUrl);
+            if (parsedBaseUrl.protocol !== 'https:') {
+              throw new Error('PUBLIC_APP_URL must use HTTPS for signed artifact delivery');
+            }
+            const signedPath = artifactAccessService.createSignedPath(fileName);
+            const mediaUrl = `${parsedBaseUrl.origin}${signedPath}`;
+            const artifactDelivery = await twilioService.sendWhatsAppMessage(
+              senderPhone,
+              `📄 *Generated Document*: ${fileName}`,
+              mediaUrl
+            );
+            if (!artifactDelivery.success) {
+              throw new Error(`ARTIFACT_DELIVERY_FAILED: ${artifactDelivery.error || 'Twilio did not accept the artifact'}`);
             }
           } catch (artErr) {
             console.warn('[WhatsAppWorker] Error sending generated artifact over WhatsApp:', artErr);

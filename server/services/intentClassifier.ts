@@ -33,18 +33,12 @@ export class IntentClassifierService {
    * Classify inbound natural language message using active LLM provider & Zod schema validation
    */
   public async classifyNaturalIntent(userMessage: string): Promise<ClassifiedIntent> {
-    const trimmed = (userMessage || '').trim();
+    const trimmed = typeof userMessage === 'string' ? userMessage.trim() : '';
     if (!trimmed) {
-      return {
-        intent: 'GENERAL_CHAT',
-        confidence: 1.0,
-        reasoning: 'Empty message',
-        extractedParams: {},
-        requiresClarification: false,
-      };
+      throw new Error('INTENT_INPUT_EMPTY: a non-empty inbound message is required for classification');
     }
 
-    const systemInstruction = `You are TwinMind's Natural Language Intent Classifier.
+    const systemInstruction = `You classify inbound natural-language requests into the application's declared intent schema.
 Analyze the user's inbound message and classify it into EXACTLY ONE of the following intent types:
 
 1. "DEBATE_REQUEST":
@@ -91,43 +85,34 @@ Respond strictly in valid JSON matching this structure:
         prompt: `Inbound Message: "${trimmed}"`,
         systemInstruction,
         jsonMode: true,
-        temperature: 0.1, // Low temperature for consistent classification
+        temperature: 0.1,
       });
 
-      const parsed = JSON.parse(rawRes || '{}');
-      const validated = ClassifiedIntentSchema.safeParse(parsed);
-
-      if (validated.success) {
-        return validated.data;
+      if (typeof rawRes !== 'string' || !rawRes.trim()) {
+        throw new Error('AI_OUTPUT_EMPTY: intent model returned no usable classification');
       }
 
-      console.warn('[IntentClassifier] Zod validation failed for LLM classification output:', validated.error.format());
-      
-      // Secondary fallback attempt if schema validation failed on minor type details
-      return {
-        intent: (parsed.intent as IntentType) || 'GENERAL_CHAT',
-        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.7,
-        reasoning: parsed.reasoning || 'Unvalidated output structure',
-        extractedParams: {
-          debateTopic: parsed.extractedParams?.debateTopic || (parsed.intent === 'DEBATE_REQUEST' ? trimmed : undefined),
-          targetDecisionId: parsed.extractedParams?.targetDecisionId,
-          reportedStatus: parsed.extractedParams?.reportedStatus,
-          reportedNotes: parsed.extractedParams?.reportedNotes,
-          searchQuery: parsed.extractedParams?.searchQuery,
-        },
-        requiresClarification: Boolean(parsed.requiresClarification) || (typeof parsed.confidence === 'number' && parsed.confidence < 0.75),
-        clarificationPrompt: parsed.clarificationPrompt,
-      };
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawRes);
+      } catch {
+        throw new Error('AI_OUTPUT_INVALID_JSON: intent model did not return valid JSON');
+      }
+
+      const validated = ClassifiedIntentSchema.safeParse(parsed);
+      if (!validated.success) {
+        throw new Error('AI_OUTPUT_SCHEMA_INVALID: intent classification failed schema validation');
+      }
+      if (validated.data.requiresClarification &&
+          (typeof validated.data.clarificationPrompt !== 'string' || !validated.data.clarificationPrompt.trim())) {
+        throw new Error('AI_OUTPUT_SCHEMA_INVALID: clarification was required but no clarification prompt was provided');
+      }
+
+      return validated.data;
     } catch (err) {
-      console.error('[IntentClassifier] Intent classification error:', err);
-      return {
-        intent: 'GENERAL_CHAT',
-        confidence: 0,
-        reasoning: `Intent classification unavailable: ${err instanceof Error ? err.message : String(err)}`,
-        extractedParams: {},
-        requiresClarification: true,
-        clarificationPrompt: 'Unable to verify intent due to an API error. Please state your request directly.',
-      };
+      const message = err instanceof Error ? err.message : 'Intent classification failed';
+      console.warn('[IntentClassifier] Live classification unavailable:', message);
+      throw new Error(`INTENT_CLASSIFICATION_FAILED:${message}`);
     }
   }
 }

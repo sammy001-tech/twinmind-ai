@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { randomInt, randomUUID } from 'node:crypto';
 import { Bot, InputFile, InlineKeyboard, webhookCallback } from 'grammy';
 import { GoogleGenAI } from '@google/genai';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
@@ -48,8 +49,8 @@ export interface TelegramCommandHandler {
 function generatePairingCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = 'LKN-';
-  for (let i = 0; i < 4; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < 8; i++) {
+    code += chars.charAt(randomInt(chars.length));
   }
   return code;
 }
@@ -64,7 +65,7 @@ function loadConfig(): TelegramConfig {
     pairingCode: generatePairingCode(),
     mode: (process.env.TELEGRAM_MODE as 'polling' | 'webhook') || currentSavedSettings.telegramMode || 'polling',
     webhookUrl: process.env.TELEGRAM_WEBHOOK_URL || currentSavedSettings.telegramWebhookUrl || '',
-    activeProvider: currentSavedSettings.activeProvider || 'gemini',
+    activeProvider: currentSavedSettings.activeProvider || '',
     activeModel: currentSavedSettings.activeModel || '',
   };
 
@@ -91,7 +92,6 @@ class TelegramBotManager {
   private isRunning: boolean = false;
   private logs: TelegramLogEntry[] = [];
   private syncedMessages: SyncedTelegramMessage[] = [];
-  private ai: GoogleGenAI | null = null;
   private conversationHistory: { role: 'user' | 'assistant'; content: string }[] = [];
   private commandRegistry: TelegramCommandHandler[] = [];
   private lastSyncedCommands: Array<{ command: string; description: string }> = [];
@@ -105,23 +105,10 @@ class TelegramBotManager {
 
   constructor() {
     this.config = loadConfig();
-    this.initAi();
     this.initCommandRegistry();
     this.log('info', 'Telegram service initialized with Zero Silent Failure policy');
   }
 
-  private initAi() {
-    if (process.env.GEMINI_API_KEY) {
-      this.ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build-telegram',
-          },
-        },
-      });
-    }
-  }
 
   /**
    * Initializes the command directory.
@@ -139,9 +126,9 @@ class TelegramBotManager {
           if (!from) return;
           const userId = from.id;
 
-          if (this.config.ownerId === null || this.config.ownerId === userId) {
+          if (this.config.ownerId === userId) {
             this.config.ownerId = userId;
-            this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
+            this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
             saveConfig(this.config);
             this.log('auth', `Paired with owner ID ${userId} (@${from.username || from.first_name})`);
 
@@ -336,7 +323,7 @@ class TelegramBotManager {
             if (res.recentDecisions && res.recentDecisions.length > 0) {
               summaryText += `🎯 *Recently Logged Decisions & Frameworks:*\n`;
               res.recentDecisions.forEach((d: any, idx: number) => {
-                summaryText += `${idx + 1}. *${d.title}*\n   • Confidence: \`${d.confidence || 70}%\`\n   • Recommended: ${d.recommendation || 'Evaluated'}\n`;
+                summaryText += `${idx + 1}. *${d.title}*\n   • Confidence: \`${d.confidence ?? 'Not recorded'}%\`\n   • Recommended: ${d.recommendation || 'No recommendation recorded'}\n`;
               });
               summaryText += `\n`;
             } else {
@@ -390,7 +377,7 @@ class TelegramBotManager {
 
             const replyMessage =
               `🎯 *Decision Deconstruction*\n\n` +
-              `📊 *Confidence Level:* \`${a.confidenceLevel || 'Medium'}\`\n` +
+              `📊 *Confidence Level:* \`${a.confidenceLevel || 'Not available'}\`\n` +
               `💡 *Evidence Reason:* ${a.confidenceReason || 'Grounded in pragmatic leverage'}\n\n` +
               `1️⃣ *Actual Situation:*\n${a.actualSituation}\n\n` +
               `2️⃣ *What Matters Most:*\n${a.whatMattersMost}\n\n` +
@@ -417,7 +404,7 @@ class TelegramBotManager {
         description: 'Synthesize twin response into a native Telegram audio voice note',
         usage: '/voice <topic or question>',
         category: 'voice',
-        isReady: () => Boolean(process.env.GEMINI_API_KEY || this.ai),
+        isReady: () => Boolean((process.env.GEMINI_API_KEY || settingsManager.getSettings().customGeminiKey) && settingsManager.getSettings().voice?.trim()),
         execute: async (ctx, args) => {
           if (!args) {
             await ctx.reply('🎙️ Use `/voice <message>` to generate a voice note. E.g.: `/voice what is our top priority this week?`');
@@ -455,7 +442,7 @@ class TelegramBotManager {
               .text('Mistral Large', 'set_model_mistral');
 
             await ctx.reply(
-              `⚡ *Current Brain Model:* \`${this.config.activeModel || 'Not Set'}\` (${(this.config.activeProvider || 'gemini').toUpperCase()})\n\n` +
+              `⚡ *Current Brain Model:* \`${this.config.activeModel || 'Not Set'}\` (${(this.config.activeProvider || 'Not configured').toUpperCase()})\n\n` +
               `Select an engine or send \`/model <model_id>\`:`,
               { parse_mode: 'Markdown', reply_markup: keyboard }
             );
@@ -697,7 +684,7 @@ class TelegramBotManager {
     this.config.ownerUsername = null;
     this.config.pairingCode = newCode;
     saveConfig(this.config);
-    this.log('auth', `Pairing reset. New pairing code: ${newCode}`);
+    this.log('auth', 'Owner pairing was reset. A new one-time code was generated.');
     return newCode;
   }
 
@@ -771,19 +758,27 @@ class TelegramBotManager {
       } else {
         // Webhook Mode
         if (this.config.webhookUrl) {
+          const webhookSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+          if (!webhookSecret) {
+            this.log('error', 'TELEGRAM_WEBHOOK_SECRET is required before enabling Telegram webhook mode.');
+            return false;
+          }
           const cleanUrl = this.config.webhookUrl.replace(/\/+$/, '');
           const webhookTarget = cleanUrl.endsWith('/api/telegram/webhook') ? cleanUrl : `${cleanUrl}/api/telegram/webhook`;
-          const setRes = await fetch(
-            `https://api.telegram.org/bot${this.config.token}/setWebhook?url=${encodeURIComponent(webhookTarget)}`
-          );
+          const setRes = await fetch(`https://api.telegram.org/bot${this.config.token}/setWebhook`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({ url: webhookTarget, secret_token: webhookSecret }).toString(),
+          });
           const setData = await setRes.json();
           if (setData.ok) {
-            this.log('info', `Webhook registered successfully at ${webhookTarget}`);
+            this.log('info', 'Telegram webhook registered successfully.');
           } else {
-            this.log('error', `Webhook registration failed: ${setData.description}`);
+            this.log('error', `Telegram webhook registration failed: ${setData.description || 'provider rejected request'}`);
+            return false;
           }
         } else {
-          this.log('info', 'Webhook mode enabled; waiting for HTTPS webhook URL.');
+          this.log('info', 'Webhook mode enabled without a configured URL.');
         }
         await this.syncTelegramCommandMenu();
         this.isRunning = true;
@@ -846,25 +841,20 @@ class TelegramBotManager {
       const text = ctx.message?.text || '';
 
       if (this.config.ownerId === null) {
-        if (text.startsWith('/start') && text.includes(this.config.pairingCode)) {
+        const startParts = text.trim().split(/\\s+/);
+        const suppliedCode = startParts[0]?.startsWith('/start') ? (startParts[1] || '') : '';
+        if (suppliedCode && suppliedCode === this.config.pairingCode) {
           this.config.ownerId = userId;
-          this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
+          this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
           saveConfig(this.config);
-          this.log('auth', `Auto-paired via pairing code with owner ID ${userId} (@${this.config.ownerUsername})`);
-          await ctx.reply(`🎉 *Pairing Successful!*\nYour Telegram account is now linked as the owner of this digital twin.`, {
-            parse_mode: 'Markdown',
-          });
+          this.log('auth', `Owner pairing completed for Telegram user ID ${userId}`);
+          await ctx.reply('Pairing successful. This Telegram account is now linked as the owner.', { parse_mode: 'Markdown' });
           return;
         }
 
-        this.config.ownerId = userId;
-        this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || 'User';
-        saveConfig(this.config);
-        this.log('auth', `Auto-paired with first detected owner ID ${userId} (@${this.config.ownerUsername})`);
-        await ctx.reply(
-          `🤝 *Account Auto-Paired!*\nLinked to \`${userId}\` (@${this.config.ownerUsername}). You now have exclusive access.`,
-          { parse_mode: 'Markdown' }
-        );
+        this.log('auth', 'Rejected Telegram update while owner pairing is not configured.');
+        await ctx.reply('Owner pairing is not configured. An administrator must provide the current one-time pairing code.');
+        return;
       }
 
       if (this.config.ownerId !== userId) {
@@ -933,7 +923,7 @@ class TelegramBotManager {
             userPrompt: actionItem.payload,
             channel: 'telegram',
             conversationHistory: this.conversationHistory,
-            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
             providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
             modelOverride: this.config.activeModel || undefined,
           });
@@ -947,7 +937,7 @@ class TelegramBotManager {
           if (turnResult.suggestedActions && turnResult.suggestedActions.length > 0) {
             dynamicKeyboard = new InlineKeyboard();
             for (const act of turnResult.suggestedActions) {
-              const actKey = `dyn_act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+              const actKey = `dyn_act_${randomUUID()}`;
               this.dynamicActionCallbacks.set(actKey, {
                 payload: act.payload,
                 action: act.action,
@@ -1012,7 +1002,7 @@ class TelegramBotManager {
           userPrompt: text,
           channel: 'telegram',
           conversationHistory: this.conversationHistory,
-          userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+          userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
           providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
           modelOverride: this.config.activeModel || undefined,
         });
@@ -1041,7 +1031,7 @@ class TelegramBotManager {
         if (turnResult.suggestedActions && turnResult.suggestedActions.length > 0) {
           keyboard = new InlineKeyboard();
           for (const act of turnResult.suggestedActions) {
-            const callbackId = `dyn_act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+            const callbackId = `dyn_act_${randomUUID()}`;
             this.dynamicActionCallbacks.set(callbackId, {
               payload: act.payload,
               action: act.action,
@@ -1102,7 +1092,7 @@ class TelegramBotManager {
           },
           channel: 'telegram',
           conversationHistory: this.conversationHistory,
-          userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+          userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
           providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
           modelOverride: this.config.activeModel || undefined,
         });
@@ -1160,7 +1150,7 @@ class TelegramBotManager {
             },
             channel: 'telegram',
             conversationHistory: this.conversationHistory,
-            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
             providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
             modelOverride: this.config.activeModel || undefined,
           });
@@ -1174,7 +1164,7 @@ class TelegramBotManager {
             userPrompt: prompt,
             channel: 'telegram',
             conversationHistory: this.conversationHistory,
-            userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+            userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
             providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
             modelOverride: this.config.activeModel || undefined,
           });
@@ -1223,7 +1213,7 @@ class TelegramBotManager {
           },
           channel: 'telegram',
           conversationHistory: this.conversationHistory,
-          userName: this.config.ownerUsername || s.userName || 'User',
+          userName: this.config.ownerUsername || s.userName || '',
           providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
           modelOverride: this.config.activeModel || undefined,
         });
@@ -1291,7 +1281,7 @@ class TelegramBotManager {
 
   private recordSyncedMessage(sender: 'user' | 'assistant', text: string, isVoice = false) {
     this.syncedMessages.unshift({
-      id: `tg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: `tg-${randomUUID()}`,
       sender,
       text,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -1299,14 +1289,20 @@ class TelegramBotManager {
     });
     if (this.syncedMessages.length > 50) this.syncedMessages.pop();
 
-    neonDb.saveMessage({
+    void neonDb.saveMessage({
       channel: 'telegram',
       role: sender === 'assistant' ? 'assistant' : 'user',
       content: text,
       provider: this.config.activeProvider,
       model: this.config.activeModel,
       metadata: { isVoice, ownerId: this.config.ownerId, ownerUsername: this.config.ownerUsername },
-    }).catch(() => {});
+    }).then((messageId) => {
+      if (messageId === undefined) {
+        console.warn('[TelegramBot] Conversation message was not persisted to the database.');
+      }
+    }).catch((error: unknown) => {
+      console.warn('[TelegramBot] Conversation message persistence failed:', error instanceof Error ? error.message : 'unknown error');
+    });
   }
 
   /**
@@ -1317,7 +1313,7 @@ class TelegramBotManager {
       userPrompt,
       channel: 'telegram',
       conversationHistory: this.conversationHistory,
-      userName: this.config.ownerUsername || settingsManager.getSettings().userName || 'User',
+      userName: this.config.ownerUsername || settingsManager.getSettings().userName || '',
       providerOverride: (this.config.activeProvider as 'gemini' | 'groq' | 'mistral') || undefined,
       modelOverride: this.config.activeModel || undefined,
     });
@@ -1325,21 +1321,36 @@ class TelegramBotManager {
   }
 
   private async generateVoiceBuffer(text: string): Promise<Buffer | null> {
-    if (!this.ai) this.initAi();
-    if (!this.ai) return null;
+    const settings = settingsManager.getSettings();
+    const voice = (settings.voice || '').trim();
+    const apiKey = (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+
+    if (!voice) {
+      console.warn('[TelegramBot] Voice synthesis unavailable: no voice identifier is configured.');
+      return null;
+    }
+    if (!apiKey) {
+      console.warn('[TelegramBot] Voice synthesis unavailable: Gemini credentials are not configured.');
+      return null;
+    }
+
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+      .replace(/[*_#>-]/g, ' ')
+      .trim()
+      .slice(0, 1000);
+
+    if (!cleanText) {
+      console.warn('[TelegramBot] Voice synthesis unavailable: source text is empty after formatting cleanup.');
+      return null;
+    }
 
     try {
-      const s = settingsManager.getSettings();
-      const voice = s.voice || 'Fenrir';
-      const cleanText = text
-        .replace(/```[\s\S]*?```/g, ' ')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
-        .replace(/[*_#>-]/g, ' ')
-        .slice(0, 1000);
-
-      const model = await modelCatalogService.resolveSpecializedModel('tts');
-      const response = await this.ai.models.generateContent({
+      const model = await modelCatalogService.resolveSpecializedModel('tts', apiKey);
+      const client = new GoogleGenAI({ apiKey });
+      const response = await client.models.generateContent({
         model,
         contents: [{ role: 'user', parts: [{ text: cleanText }] }],
         config: {
@@ -1353,15 +1364,17 @@ class TelegramBotManager {
       });
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        return Buffer.from(base64Audio, 'base64');
+      if (!base64Audio) {
+        console.warn('[TelegramBot] Voice synthesis provider returned no audio data.');
+        return null;
       }
-    } catch (err) {
-      console.warn('Voice synthesis buffer error:', err);
-    }
-    return null;
-  }
 
+      return Buffer.from(base64Audio, 'base64');
+    } catch (err) {
+      console.warn('[TelegramBot] Voice synthesis unavailable:', err instanceof Error ? err.message : 'provider request failed');
+      return null;
+    }
+  }
   /**
    * Send a proactive alert message to the paired owner.
    */

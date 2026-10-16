@@ -86,15 +86,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onAutoPlayVoiceChange,
   voiceSpeed = 1,
   onVoiceSpeedChange,
-  brandName = 'TwinMind AI',
+  brandName = '',
   onSaveBrandName,
   userName = '',
   nickname = '',
   onSaveName,
   isEmbedded = false,
 }) => {
-  const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral'>(
-    (activeProvider as 'gemini' | 'groq' | 'mistral') || 'gemini'
+  const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral' | ''>(
+    activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral'
+      ? activeProvider
+      : ''
   );
 
   const [modelsByProvider, setModelsByProvider] = useState<{
@@ -162,16 +164,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     gemini: boolean;
     groq: boolean;
     mistral: boolean;
-  }>({ gemini: true, groq: false, mistral: false });
+  }>({ gemini: false, groq: false, mistral: false });
 
 
   // Neon PostgreSQL Database State
   const [dbStatus, setDbStatus] = useState<{
     configured: boolean;
     connected: boolean;
-    source: 'environment' | 'settings' | 'none';
+    source: 'environment' | 'none';
     maskedUrl: string | null;
-    tables: { conversations: number; decisions: number; twin_events: number };
+    tables: { conversations: number | null; decisions: number | null; twin_events: number | null };
     error: string | null;
   } | null>(null);
   const [dbUrlInput, setDbUrlInput] = useState('');
@@ -648,56 +650,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const handleSaveDb = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsTestingDb(true);
-    setDbFeedback(null);
-    try {
-      const res = await fetch('/api/db/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ databaseUrl: dbUrlInput.trim() }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setDbFeedback({ type: 'success', text: data.message });
-        setFeedbackToast('Database settings updated.');
-        await loadDbStatus();
-      } else {
-        setDbFeedback({ type: 'error', text: data.message });
-      }
-    } catch (err: unknown) {
-      setDbFeedback({
-        type: 'error',
-        text: err instanceof Error ? err.message : 'Failed to save DB configuration',
-      });
-    } finally {
-      setIsTestingDb(false);
-    }
-  };
-
-  const handleClearDb = async () => {
-    setIsTestingDb(true);
-    try {
-      const res = await fetch('/api/db/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ databaseUrl: '' }),
-      });
-      const data = await res.json();
-      setDbUrlInput('');
-      setDbFeedback({ type: 'success', text: 'Database configuration cleared.' });
-      await loadDbStatus();
-    } catch (err: unknown) {
-      setDbFeedback({
-        type: 'error',
-        text: err instanceof Error ? err.message : 'Failed to clear DB config',
-      });
-    } finally {
-      setIsTestingDb(false);
-    }
-  };
-
   // Load models for all providers from backend
   const loadAllModels = async () => {
     setIsLoading(true);
@@ -733,6 +685,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         } else if (selectedProviderTab === 'mistral' && (customMistralKey || mistralKeyInput)) {
           singleHeaders['x-api-key'] = customMistralKey || mistralKeyInput;
         }
+        if (!selectedProviderTab) throw new Error('Select a provider tab before requesting its individual catalogue.');
         const singleRes = await fetch(`/api/models/live?provider=${selectedProviderTab}`, {
           headers: singleHeaders,
         });
@@ -773,7 +726,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   useEffect(() => {
     // When tab changes, update custom input placeholder with current model of that provider
-    const currentModelForTab = providerModels[selectedProviderTab] || '';
+    const currentModelForTab = selectedProviderTab ? (providerModels[selectedProviderTab] || '') : '';
     setCustomModelInput(currentModelForTab);
     setSearchFilter('');
   }, [selectedProviderTab, providerModels]);
@@ -781,18 +734,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   if (!isOpen) return null;
 
   const handleSelectModel = (provider: 'gemini' | 'groq' | 'mistral', modelId: string) => {
+    const liveModels = modelsByProvider[provider];
+    if (!liveStatus[provider] || !liveModels.some((candidate) => candidate.id === modelId)) {
+      setErrorMsg(`Cannot activate "${modelId}": this identifier is not present in the current live ${provider.toUpperCase()} catalogue.`);
+      return;
+    }
+
     if (onSelectModelAndActivate) {
       onSelectModelAndActivate(provider, modelId);
     } else {
       onSelectProviderModel(provider, modelId);
       onProviderChange(provider);
     }
-    setFeedbackToast(`Activated "${modelId}" for ${provider.toUpperCase()}`);
+    setFeedbackToast(`Selected live model "${modelId}" for ${provider.toUpperCase()}`);
     setTimeout(() => setFeedbackToast(null), 3000);
   };
 
   const handleApplyCustomModel = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selectedProviderTab) {
+      setErrorMsg('Select a provider tab before choosing a model.');
+      return;
+    }
     if (customModelInput.trim()) {
       handleSelectModel(selectedProviderTab, customModelInput.trim());
     }
@@ -999,7 +962,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return <Zap className="w-3.5 h-3.5 text-slate-400" />;
   };
 
-  const currentModelsList = modelsByProvider[selectedProviderTab] || [];
+  const currentModelsList = selectedProviderTab ? (modelsByProvider[selectedProviderTab] || []) : [];
 
   const filteredModels = currentModelsList.filter(
     (m) =>
@@ -1008,15 +971,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       (m.description && m.description.toLowerCase().includes(searchFilter.toLowerCase()))
   );
 
-  const activeModel = providerModels[activeProvider as keyof typeof providerModels] || providerModels.gemini;
-
-  const voices = [
-    { id: 'Fenrir', label: 'Fenrir', desc: 'Direct, confident, grounded' },
-    { id: 'Puck', label: 'Puck', desc: 'Curious, conversational, energetic' },
-    { id: 'Charon', label: 'Charon', desc: 'Deep, analytical, measured' },
-    { id: 'Kore', label: 'Kore', desc: 'Warm, thoughtful, balanced' },
-    { id: 'Zephyr', label: 'Zephyr', desc: 'Fast, concise, punchy' },
-  ];
+  const activeModel = providerModels[activeProvider as keyof typeof providerModels] || '';
 
   const modalInner = (
     <div
@@ -1410,14 +1365,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               type="text"
               value={customModelInput}
               onChange={(e) => setCustomModelInput(e.target.value)}
-              placeholder={`Type or paste any model ID for ${selectedProviderTab.toUpperCase()}...`}
+              placeholder={selectedProviderTab ? `Search or select a live ${selectedProviderTab.toUpperCase()} model` : 'Select a provider tab first'}
               className="flex-1 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
             <button
               type="submit"
               className="px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shrink-0"
             >
-              Set for {selectedProviderTab.toUpperCase()}
+              Set for {selectedProviderTab ? selectedProviderTab.toUpperCase() : 'no selected provider'}
             </button>
           </form>
 
@@ -1428,7 +1383,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               type="text"
               value={searchFilter}
               onChange={(e) => setSearchFilter(e.target.value)}
-              placeholder={`Filter ${selectedProviderTab.toUpperCase()} models by name or keyword...`}
+              placeholder={selectedProviderTab ? `Filter ${selectedProviderTab.toUpperCase()} models by name or keyword...` : 'Select a provider tab to view its live catalogue'}
               className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-xl pl-9 pr-4 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
             />
           </div>
@@ -1437,7 +1392,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {isLoading ? (
             <div className="p-8 text-center space-y-2 text-slate-500 dark:text-slate-400 text-xs">
               <RefreshCw className="w-5 h-5 animate-spin mx-auto text-amber-500 dark:text-amber-400" />
-              <p>Loading available models for {selectedProviderTab.toUpperCase()}...</p>
+              <p>Loading available models for {selectedProviderTab ? selectedProviderTab.toUpperCase() : 'the selected provider'}...</p>
             </div>
           ) : errorMsg ? (
             <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-200 text-xs flex items-start gap-2">
@@ -1452,44 +1407,42 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="text-[11px] text-slate-600 dark:text-slate-400 px-1 mb-1 flex items-center justify-between">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span>
-                    Available {selectedProviderTab.toUpperCase()} Models ({filteredModels.length}):
+                    Available {selectedProviderTab ? selectedProviderTab.toUpperCase() : 'provider'} Models ({filteredModels.length}):
                   </span>
-                  {liveStatus[selectedProviderTab] ? (
+                  {selectedProviderTab && liveStatus[selectedProviderTab] ? (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 inline-block animate-pulse" />
                       Live API
                     </span>
-                  ) : selectedProviderTab === 'gemini' ? (
-                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 font-medium">
-                      Standard Gemini Catalog
+                  ) : selectedProviderTab ? (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30 font-medium">
+                      Live catalogue unavailable
                     </span>
                   ) : (
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-500/15 text-slate-600 dark:text-slate-400 border border-slate-500/30 font-medium">
-                      API Key Required for Live Models
+                      Select a provider to inspect its live catalogue
                     </span>
                   )}
                 </div>
                 <span className="text-amber-600 dark:text-amber-400 text-[10px]">
-                  Current: <strong className="text-slate-900 dark:text-white font-mono">{providerModels[selectedProviderTab]}</strong>
+                  Current: <strong className="text-slate-900 dark:text-white font-mono">{selectedProviderTab ? providerModels[selectedProviderTab] : ''}</strong>
                 </span>
               </div>
 
               {filteredModels.length === 0 ? (
                 <div className="p-6 text-center space-y-2 text-slate-500 dark:text-slate-400 text-xs">
-                  {selectedProviderTab !== 'gemini' && !liveStatus[selectedProviderTab] ? (
+                  {!selectedProviderTab ? (
+                    <p>Select a provider tab to inspect its live model catalogue.</p>
+                  ) : !liveStatus[selectedProviderTab] ? (
                     <div className="space-y-1.5 max-w-sm mx-auto">
                       <p className="font-semibold text-slate-700 dark:text-slate-300">
                         No live models loaded for {selectedProviderTab.toUpperCase()}
                       </p>
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        To fetch verified live models directly from {selectedProviderTab.toUpperCase()}, enter your API key in the Credentials section below and click save.
+                        To fetch verified live models directly from {selectedProviderTab.toUpperCase()}, configure its API key and retry the live catalogue request.
                       </p>
                       <p className="text-[11px] text-slate-500 leading-relaxed">
-                        Alternatively, you can manually type and activate any model ID above (e.g.{' '}
-                        <code className="font-mono text-amber-600 dark:text-amber-400">
-                          {selectedProviderTab === 'groq' ? 'openai/gpt-oss-120b' : 'ministral-14b-latest'}
-                        </code>
-                        ).
+                        A model must appear in the provider's current live catalogue before it can be activated.
                       </p>
                     </div>
                   ) : (
@@ -1498,13 +1451,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               ) : (
                 filteredModels.map((m) => {
-                  const isSelected = providerModels[selectedProviderTab] === m.id;
-                  const isOverallActive = activeProvider === selectedProviderTab && isSelected;
+                  const isSelected = selectedProviderTab ? providerModels[selectedProviderTab] === m.id : false;
+                  const isOverallActive = Boolean(selectedProviderTab && activeProvider === selectedProviderTab && isSelected);
 
                   return (
                     <div
                       key={m.id}
-                      onClick={() => handleSelectModel(selectedProviderTab, m.id)}
+                      onClick={() => { if (selectedProviderTab) handleSelectModel(selectedProviderTab, m.id); }}
                       role="button"
                       tabIndex={0}
                       className={`p-3 rounded-xl border text-left cursor-pointer transition flex items-center justify-between gap-3 ${
@@ -1541,7 +1494,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleSelectModel(selectedProviderTab, m.id);
+                          if (selectedProviderTab) handleSelectModel(selectedProviderTab, m.id);
                         }}
                         className={`px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition flex items-center gap-1 ${
                           isSelected
@@ -1910,7 +1863,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               {dbStatus?.connected && (
                 <span className="flex items-center gap-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
-                  Connected ({dbStatus.source === 'environment' ? '.env' : 'Settings'})
+                  Connected ({dbStatus.source === 'environment' ? 'DATABASE_URL environment setting' : 'source unavailable'})
                 </span>
               )}
               {renderKeyStatusBadge("neon_db", isTestingDb)}
@@ -1918,7 +1871,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Hybrid setup: reads directly from <code className="text-amber-700 dark:text-amber-300 font-mono">DATABASE_URL</code> in your environment/<code className="text-amber-700 dark:text-amber-300 font-mono">.env</code> file, or configure your private Neon PostgreSQL connection string below. Zero hardcoding.
+            Database connections are managed only through the server-side <code className="text-amber-700 dark:text-amber-300 font-mono">DATABASE_URL</code> deployment secret. The field below tests a candidate connection temporarily; it does not save, replace, or clear deployment configuration.
           </p>
 
           {dbStatus?.connected && (
@@ -1930,9 +1883,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </span>
               </div>
               <div className="flex items-center gap-4 text-[10px] text-slate-600 dark:text-slate-400 pt-1 border-t border-emerald-200 dark:border-emerald-900/40">
-                <span>💬 Messages: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.conversations}</strong></span>
-                <span>⚖️ Decisions: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.decisions}</strong></span>
-                <span>📡 Events: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.twin_events}</strong></span>
+                <span>💬 Messages: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.conversations ?? 'Unavailable'}</strong></span>
+                <span>⚖️ Decisions: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.decisions ?? 'Unavailable'}</strong></span>
+                <span>📡 Events: <strong className="text-slate-900 dark:text-white">{dbStatus.tables.twin_events ?? 'Unavailable'}</strong></span>
               </div>
             </div>
           )}
@@ -1961,7 +1914,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          <form onSubmit={handleSaveDb} className="space-y-2.5">
+          <form onSubmit={(event) => { event.preventDefault(); void handleTestDb(); }} className="space-y-2.5">
             <div>
               <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
                 Neon Connection String (postgresql://...)
@@ -1973,8 +1926,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   onChange={(e) => setDbUrlInput(e.target.value)}
                   placeholder={
                     dbStatus?.maskedUrl
-                      ? `Configured (${dbStatus.maskedUrl})`
-                      : 'postgresql://user:pass@ep-xyz.neon.tech/neondb?sslmode=require'
+                      ? `Active connection: ${dbStatus.maskedUrl} (read-only)`
+                      : 'Enter a candidate URL for a temporary connection test'
                   }
                   className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
@@ -1990,18 +1943,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              {dbStatus?.configured && dbStatus.source === 'settings' ? (
-                <button
-                  type="button"
-                  onClick={handleClearDb}
-                  disabled={isTestingDb}
-                  className="text-[11px] text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 underline font-medium"
-                >
-                  Clear Saved URL
-                </button>
-              ) : (
-                <div />
-              )}
+
 
               <div className="flex items-center gap-2">
                 <button
@@ -2013,13 +1955,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {renderKeyTestButtonIcon("neon_db", isTestingDb)}
                   <span>{isTestingDb ? "Testing..." : "Test Connection"}</span>
                 </button>
-                <button
-                  type="submit"
-                  disabled={isTestingDb || !dbUrlInput.trim()}
-                  className="px-3.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition disabled:opacity-50"
-                >
-                  Save &amp; Connect
-                </button>
+
               </div>
             </div>
           </form>
@@ -2423,28 +2359,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <h3 className="text-xs font-semibold text-slate-900 dark:text-white">Voice Note Persona (TTS)</h3>
           </div>
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Select the voice profile used when generating spoken voice notes in chat:
+            Configure the voice identifier accepted by the selected speech model:
           </p>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-            {voices.map((v) => (
-              <button
-                key={v.id}
-                type="button"
-                onClick={() => onVoiceChange(v.id)}
-                className={`p-2.5 rounded-xl border text-left text-xs transition ${
-                  voice === v.id
-                    ? 'bg-amber-500/15 border-amber-500 text-slate-900 dark:text-white font-semibold ring-1 ring-amber-500/30'
-                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                }`}
-              >
-                <div className="font-semibold flex items-center justify-between">
-                  <span>{v.label}</span>
-                  {voice === v.id && <Check className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />}
-                </div>
-                <div className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">{v.desc}</div>
-              </button>
-            ))}
+          <div className="space-y-1.5">
+            <label htmlFor="tts-voice-id" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+              Provider voice identifier
+            </label>
+            <input
+              id="tts-voice-id"
+              type="text"
+              value={voice}
+              onChange={(event) => onVoiceChange(event.target.value)}
+              placeholder="Enter a voice ID supported by the configured TTS model"
+              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-amber-500"
+            />
+            <p className="text-[10px] text-slate-500 dark:text-slate-400">
+              Voice IDs are not preselected. The provider validates the configured ID when audio is generated.
+            </p>
           </div>
 
           {/* Voice Note Auto-Play & Speed Settings */}
