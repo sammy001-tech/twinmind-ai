@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { getChatScrollState } from './utils/chatScroll.ts';
 import { normalizeDynamicPromptTemplates } from './utils/dynamicPrompts.ts';
+import { normalizeArtifactGenerationErrors, normalizeGeneratedArtifacts } from './utils/artifacts.ts';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
@@ -292,7 +293,8 @@ export default function App() {
             createdAt: m.created_at ? new Date(m.created_at).getTime() : undefined,
             channel: m.channel,
             modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
-            artifacts: m.metadata?.artifacts || [],
+            artifacts: normalizeGeneratedArtifacts(m.metadata?.artifacts),
+            artifactErrors: normalizeArtifactGenerationErrors(m.metadata?.artifactErrors),
           }));
           pendingThreadRestoreRef.current = threadId;
           setMessages(loaded);
@@ -781,18 +783,23 @@ export default function App() {
               }
               // Model info metadata
               if (parsed.meta) {
-                const { artifacts, ...modelInfo } = parsed.meta;
-                ensureAssistantMessage({ 
+                const {
+                  artifacts: rawArtifacts,
+                  artifactErrors: rawArtifactErrors,
+                  ...modelInfo
+                } = parsed.meta;
+                const artifacts = normalizeGeneratedArtifacts(rawArtifacts);
+                const artifactErrors = normalizeArtifactGenerationErrors(rawArtifactErrors);
+                const metadataPatch = {
                   ...(modelInfo.provider ? { modelInfo } : {}),
-                  ...(artifacts ? { artifacts } : {})
-                });
+                  ...(artifacts.length > 0 ? { artifacts } : {}),
+                  ...(artifactErrors.length > 0 ? { artifactErrors } : {}),
+                };
+                ensureAssistantMessage(metadataPatch);
                 setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === assistantId ? { 
-                      ...msg, 
-                      ...(modelInfo.provider ? { modelInfo } : {}),
-                      ...(artifacts ? { artifacts } : {})
-                    } : msg
+                  prev.map((msg) => msg.id === assistantId
+                    ? { ...msg, ...metadataPatch }
+                    : msg
                   )
                 );
               }
