@@ -70,6 +70,27 @@ export function normalizeGeneratedArtifacts(value: unknown): GeneratedArtifact[]
   return artifacts;
 }
 
+/**
+ * Suppress success claims about file creation only when the actual tool reported
+ * failure and no verified artifact is attached. Other response content is retained.
+ */
+export function removeUnverifiedArtifactSuccessClaims(
+  content: string,
+  artifacts: readonly GeneratedArtifact[] | undefined,
+  errors: readonly ArtifactGenerationError[] | undefined,
+): string {
+  if (!content || (artifacts?.length ?? 0) > 0 || !errors?.length) return content;
+
+  const successClaim = /\b(?:generated successfully|successfully generated|has been generated|was generated|generated and formatted|created successfully|file is ready|spreadsheet is ready|workbook is ready|download it here|download the (?:file|spreadsheet|workbook|document)|available at\s+\/?artifacts\/)/i;
+  const artifactContext = /\b(?:file|artifact|spreadsheet|workbook|excel|csv|pdf|document|download)\b|\/?artifacts\//i;
+  return content
+    .split(/\r?\n/)
+    .filter((line) => !(successClaim.test(line) && artifactContext.test(line)))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** Remove a duplicated textual download line only when it points to a real artifact attached to the message. */
 export function removeDuplicateArtifactDownloadLines(
   content: string,
