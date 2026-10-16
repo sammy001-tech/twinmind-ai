@@ -6,38 +6,101 @@ export interface ArtifactStorageDirectoryOptions {
   cwd?: string;
 }
 
-/**
- * Production file generation must target an explicitly configured absolute path.
- * A local project directory is useful during development but is not assumed to
- * survive a managed-host restart or redeploy.
- */
-export function resolveArtifactStorageDirectory(
-  options: ArtifactStorageDirectoryOptions = {},
-): string {
+export type ArtifactStorageMode = 'instance-local' | 'configured-path' | 'misconfigured';
+
+export interface ArtifactStorageStatus {
+  mode: ArtifactStorageMode;
+  configured: boolean;
+  canGenerate: boolean;
+  warning: string;
+}
+
+function getOptions(options: ArtifactStorageDirectoryOptions = {}) {
   const configuredPath = options.configuredPath === undefined
     ? process.env.ARTIFACTS_DIR
     : options.configuredPath;
   const nodeEnv = options.nodeEnv === undefined ? process.env.NODE_ENV : options.nodeEnv;
   const cwd = options.cwd || process.cwd();
-  const trimmed = typeof configuredPath === 'string' ? configuredPath.trim() : '';
-
-  if (nodeEnv === 'production' && !trimmed) {
-    throw new Error('ARTIFACT_STORAGE_CONFIGURATION_MISSING: configure ARTIFACTS_DIR to a mounted persistent directory before generating files');
-  }
-  if (nodeEnv === 'production' && !path.isAbsolute(trimmed)) {
-    throw new Error('ARTIFACT_STORAGE_PATH_MUST_BE_ABSOLUTE: production ARTIFACTS_DIR must be an absolute mounted path');
-  }
-
-  return path.resolve(cwd, trimmed || path.join(cwd, 'public', 'artifacts'));
+  const directory = typeof configuredPath === 'string' ? configuredPath.trim() : '';
+  return { directory, nodeEnv, cwd };
 }
 
-/** Resolve the directory used by download routes, including local development. */
+/**
+ * A configured directory is not automatically durable: the host must mount a
+ * persistent volume at that exact absolute path. Production refuses to generate
+ * artifacts when that configuration is absent or relative.
+ */
+export function resolveArtifactStorageDirectory(
+  options: ArtifactStorageDirectoryOptions = {},
+): string {
+  const { directory, nodeEnv, cwd } = getOptions(options);
+
+  if (nodeEnv === 'production' && !directory) {
+    throw new Error(
+      'ARTIFACT_STORAGE_CONFIGURATION_MISSING: configure ARTIFACTS_DIR to an absolute path on a persistent mounted volume before generating files',
+    );
+  }
+  if (directory && !path.isAbsolute(directory)) {
+    throw new Error(
+      'ARTIFACT_STORAGE_PATH_MUST_BE_ABSOLUTE: ARTIFACTS_DIR must be an absolute path',
+    );
+  }
+
+  return path.resolve(cwd, directory || path.join(cwd, 'public', 'artifacts'));
+}
+
+/** Resolve the same storage directory for download/access routes and generation. */
 export function getArtifactStorageDirectory(): string {
-  const configuredPath = process.env.ARTIFACTS_DIR?.trim();
-  return path.resolve(configuredPath || path.join(process.cwd(), 'public', 'artifacts'));
+  return resolveArtifactStorageDirectory({ nodeEnv: 'development' });
 }
 
-/** Fail closed when production generation has no explicitly configured storage. */
+/** Strict production generation gate. */
 export function getArtifactStorageDirectoryForGeneration(): string {
   return resolveArtifactStorageDirectory();
+}
+
+/**
+ * Safe, secret-free status for the authenticated UI. The application can confirm
+ * that an absolute path is configured, but cannot independently prove that the
+ * hosting provider actually mounted durable storage there.
+ */
+export function getArtifactStorageStatus(
+  options: ArtifactStorageDirectoryOptions = {},
+): ArtifactStorageStatus {
+  const { directory, nodeEnv } = getOptions(options);
+  const configured = Boolean(directory);
+
+  if (directory && !path.isAbsolute(directory)) {
+    return {
+      mode: 'misconfigured',
+      configured: true,
+      canGenerate: false,
+      warning: 'ARTIFACTS_DIR must be an absolute path. Artifact generation is blocked until it is corrected.',
+    };
+  }
+
+  if (nodeEnv === 'production' && !configured) {
+    return {
+      mode: 'instance-local',
+      configured: false,
+      canGenerate: false,
+      warning: 'Generated files would use instance-local storage and may disappear after a restart or redeploy. Configure ARTIFACTS_DIR to an absolute path on a persistent mounted volume. Production artifact generation is disabled until it is configured.',
+    };
+  }
+
+  if (!configured) {
+    return {
+      mode: 'instance-local',
+      configured: false,
+      canGenerate: true,
+      warning: 'Generated files use instance-local storage and may disappear after a restart or redeploy. Configure ARTIFACTS_DIR to an absolute path on a persistent mounted volume if files need to survive.',
+    };
+  }
+
+  return {
+    mode: 'configured-path',
+    configured: true,
+    canGenerate: true,
+    warning: 'ARTIFACTS_DIR is configured, but the application cannot verify that the host mounted a persistent volume at this path. Confirm the path matches the hosting disk mount.',
+  };
 }
