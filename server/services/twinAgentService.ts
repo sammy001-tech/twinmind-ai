@@ -907,8 +907,8 @@ Respond in valid JSON:
     const providerApiKey = provider === 'gemini'
       ? this.resolveUsableCredential(process.env.GEMINI_API_KEY, s.customGeminiKey, options.customGeminiKey)
       : provider === 'groq'
-        ? this.resolveUsableCredential(customGroqKey, s.customGroqKey, process.env.GROQ_API_KEY)
-        : this.resolveUsableCredential(customMistralKey, s.customMistralKey, process.env.MISTRAL_API_KEY);
+        ? this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, customGroqKey)
+        : this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, customMistralKey);
     if (!providerApiKey) throw new Error(`PROVIDER_CREDENTIALS_MISSING:${provider}`);
     const model = await modelCatalogService.resolveModelForProvider(provider, configuredModel, providerApiKey);
 
