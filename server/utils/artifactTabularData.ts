@@ -235,13 +235,13 @@ export function parseArtifactTableContent(content: unknown): ParsedArtifactTable
 
   if (typeof content !== 'string' || !content.trim()) throw dataRequired();
   let trimmed = content.trim();
-  const fencedLines = trimmed.split(/\\r?\\n/);
+  const fencedLines = trimmed.split(/\r?\n/);
   if (
     fencedLines.length >= 3 &&
-    /^\\x60{3}(?:json|csv|tsv|markdown|md)?\\s*$/i.test(fencedLines[0].trim()) &&
-    /^\\x60{3}\\s*$/.test(fencedLines[fencedLines.length - 1].trim())
+    /^\x60{3}(?:json|csv|tsv|markdown|md)?\s*$/i.test(fencedLines[0].trim()) &&
+    /^\x60{3}\s*$/.test(fencedLines[fencedLines.length - 1].trim())
   ) {
-    trimmed = fencedLines.slice(1, -1).join('\\n').trim();
+    trimmed = fencedLines.slice(1, -1).join('\n').trim();
   }
 
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
