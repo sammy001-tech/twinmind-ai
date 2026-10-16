@@ -215,8 +215,8 @@ export class SwarmSessionRegistry {
   }): SwarmSessionExecutionScope {
     const {
       sessionId,
-      userId = 'anonymous_user',
-      tenantId = 'default_tenant',
+      userId = 'authenticated-owner',
+      tenantId = 'single-owner-workspace',
       channel = 'web',
       deadlineMs = 35_000,
       externalSignal,
