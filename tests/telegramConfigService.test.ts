@@ -23,6 +23,7 @@ test('Telegram mode uses supported explicit configuration and rejects invalid en
   assert.equal(isTelegramMode('webhook'), true);
   assert.equal(isTelegramMode('polling-ish'), false);
   assert.equal(resolveTelegramMode('webhook', 'polling'), 'webhook');
+  assert.equal(resolveTelegramMode(' webhook ', 'polling'), 'webhook');
   assert.equal(resolveTelegramMode('', 'webhook'), 'webhook');
   assert.equal(resolveTelegramMode(undefined, undefined), 'polling');
   assert.throws(() => resolveTelegramMode('webhhok', 'polling'), /INVALID_TELEGRAM_MODE/);
