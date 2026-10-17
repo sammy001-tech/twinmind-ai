@@ -235,8 +235,7 @@ class SettingsManager {
   }
 
   /**
-   * Return sanitized settings for client-side use (masks sensitive keys)
-   * Includes environment variable fallbacks for display in UI when settings are empty.
+   * Return an explicit client DTO with secret masks and safe credential-source metadata..
    */
   public getSanitizedSettings(overrides: Partial<AppSettings> = {}) {
     const s = { ...this.getSettings(), ...overrides };
