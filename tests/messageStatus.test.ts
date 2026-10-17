@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getMessageDeliveryStatusLabel, resolvePersistedMessageStatus } from '../src/utils/messageStatus.ts';
+import { getMessageDeliveryStatusLabel, resolveMessageProcessingStatus, resolvePersistedMessageStatus } from '../src/utils/messageStatus.ts';
 
 test('status remains unknown when there is no persisted provider evidence', () => {
   assert.equal(resolvePersistedMessageStatus(undefined), undefined);
@@ -23,4 +23,16 @@ test('provider failure states render as failure without being promoted to sent/r
   assert.equal(getMessageDeliveryStatusLabel('delivered'), 'Delivered');
   assert.equal(getMessageDeliveryStatusLabel('read'), 'Read');
   assert.equal(getMessageDeliveryStatusLabel('error'), 'Failed');
+});
+
+test('processing status stays unknown when no persisted work state exists', () => {
+  assert.equal(resolveMessageProcessingStatus(undefined), undefined);
+  assert.equal(resolveMessageProcessingStatus(null), undefined);
+  assert.equal(resolveMessageProcessingStatus('waiting-maybe'), undefined);
+});
+
+test('processing lifecycle accepts only persisted processing, completed, or failed states', () => {
+  assert.equal(resolveMessageProcessingStatus('processing'), 'processing');
+  assert.equal(resolveMessageProcessingStatus('completed'), 'completed');
+  assert.equal(resolveMessageProcessingStatus('failed'), 'failed');
 });
