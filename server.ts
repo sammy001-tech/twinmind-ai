@@ -68,6 +68,7 @@ const publicApiPaths = new Set([
   '/auth/login',
   '/auth/logout',
   '/twilio/whatsapp',
+  '/twilio/status',
   '/telegram/webhook',
 ]);
 app.use('/api', (req: Request, res: Response, next) => {
@@ -409,6 +410,53 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
     if (!res.headersSent) {
       res.status(500).type('text/xml').send('<Response></Response>');
     }
+  }
+});
+
+// Twilio status callbacks are the only source of external WhatsApp delivery/read status.
+app.post('/api/twilio/status', async (req: Request, res: Response): Promise<void> => {
+  const callbackUrl = (process.env.TWILIO_STATUS_CALLBACK_URL || '').trim();
+  if (!callbackUrl) {
+    res.status(503).json({ success: false, code: 'TWILIO_STATUS_CALLBACK_NOT_CONFIGURED' });
+    return;
+  }
+
+  try {
+    const parsed = new URL(callbackUrl);
+    if (parsed.protocol !== 'https:' || parsed.pathname !== '/api/twilio/status' || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      res.status(503).json({ success: false, code: 'TWILIO_STATUS_CALLBACK_URL_INVALID' });
+      return;
+    }
+
+    if (!twilioService.validateSignature(req, callbackUrl)) {
+      res.status(403).json({ success: false, code: 'TWILIO_STATUS_SIGNATURE_INVALID' });
+      return;
+    }
+
+    const providerSid = typeof req.body?.MessageSid === 'string' ? req.body.MessageSid.trim() : '';
+    const status = typeof (req.body?.MessageStatus || req.body?.SmsStatus) === 'string'
+      ? String(req.body.MessageStatus || req.body.SmsStatus).trim().toLowerCase()
+      : '';
+    const allowedStatuses = new Set(['accepted', 'queued', 'sending', 'sent', 'delivered', 'read', 'failed', 'undelivered', 'canceled', 'scheduled', 'partially_delivered']);
+    const errorCode = typeof req.body?.ErrorCode === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.ErrorCode)
+      ? req.body.ErrorCode
+      : undefined;
+
+    if (!providerSid || !allowedStatuses.has(status)) {
+      res.status(400).json({ success: false, code: 'TWILIO_STATUS_PAYLOAD_INVALID' });
+      return;
+    }
+
+    const persisted = await neonDb.recordChannelDeliveryStatus(providerSid, status, errorCode);
+    if (!persisted) {
+      res.status(503).json({ success: false, code: 'DELIVERY_STATUS_PERSISTENCE_FAILED' });
+      return;
+    }
+
+    res.status(204).end();
+  } catch (error) {
+    console.error('[Twilio Status Webhook] Failed to validate or persist provider status:', error instanceof Error ? error.message : 'unknown error');
+    res.status(500).json({ success: false, code: 'TWILIO_STATUS_WEBHOOK_FAILED' });
   }
 });
 
