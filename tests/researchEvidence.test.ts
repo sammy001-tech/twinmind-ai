@@ -5,6 +5,8 @@ import {
   normalizeResearchExtractions,
   normalizeResearchSearchResults,
   normalizeResearchUrls,
+  inspectCitationReferences,
+  resolveResearchSearchDepth,
   parseAdaptiveResearchPlan,
   resolveBoundedIntegerSetting,
 } from '../server/utils/researchEvidence.ts';
@@ -148,6 +150,32 @@ test('runtime research limits accept valid configuration and reject invalid expl
       0,
       4,
     ),
+    /RESEARCH_CONFIGURATION_INVALID/,
+  );
+});
+
+
+test('citation identifiers must resolve to real entries in the current evidence ledger', () => {
+  assert.deepEqual(
+    inspectCitationReferences('The documented feature exists [S1], but an unsourced detail uses [S9].', new Set(['S1', 'S2'])),
+    { hasCitation: true, unknownIds: ['S9'] },
+  );
+  assert.deepEqual(
+    inspectCitationReferences('No source citation was supplied.', new Set(['S1'])),
+    { hasCitation: false, unknownIds: [] },
+  );
+  assert.deepEqual(
+    inspectCitationReferences('The source is documented [S2].', new Set(['S2'])),
+    { hasCitation: true, unknownIds: [] },
+  );
+});
+
+test('research search depth is resolved from live deployment configuration and invalid values fail closed', () => {
+  assert.equal(resolveResearchSearchDepth({ TWINMIND_RESEARCH_SEARCH_DEPTH: 'basic' }), 'basic');
+  assert.equal(resolveResearchSearchDepth({ TWINMIND_RESEARCH_SEARCH_DEPTH: 'ADVANCED' }), 'advanced');
+  assert.equal(resolveResearchSearchDepth({}), 'advanced');
+  assert.throws(
+    () => resolveResearchSearchDepth({ TWINMIND_RESEARCH_SEARCH_DEPTH: 'invented-mode' }),
     /RESEARCH_CONFIGURATION_INVALID/,
   );
 });
