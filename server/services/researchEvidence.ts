@@ -93,6 +93,19 @@ function normalizeSourceArray(
   return [...unique.values()];
 }
 
+/** Normalize, validate, and deduplicate requested source URLs without accepting non-HTTP protocols. */
+export function normalizeResearchUrls(value: unknown, maxUrls = 5): string[] {
+  if (!Array.isArray(value)) return [];
+  const unique = new Set<string>();
+  for (const candidate of value) {
+    const url = canonicalHttpUrl(candidate);
+    if (!url || unique.has(url)) continue;
+    unique.add(url);
+    if (unique.size >= maxUrls) break;
+  }
+  return [...unique];
+}
+
 /** Preserve only source records with provider-returned titles, HTTP(S) URLs, and evidence text. */
 export function normalizeResearchSearchResults(
   value: unknown,
@@ -168,6 +181,13 @@ export function parseAdaptiveResearchPlan(
     !candidate.unresolvedQuestions.every((value) => typeof value === 'string')
   ) {
     throw new Error('RESEARCH_PLAN_SCHEMA_INVALID: followUpQueries and unresolvedQuestions must be string arrays');
+  }
+
+  if (options.maxQueries <= 0) {
+    return {
+      followUpQueries: [],
+      unresolvedQuestions: [...new Set(candidate.unresolvedQuestions.map((value) => value.trim()).filter(Boolean))],
+    };
   }
 
   const prior = new Set((options.previouslySearched || []).map((query) => query.trim().toLocaleLowerCase()).filter(Boolean));
