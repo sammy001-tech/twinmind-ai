@@ -160,7 +160,12 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   // Animate newly received assistant text without altering the underlying message
   // content used by copy, audio, persistence, and other message actions.
   useEffect(() => {
-    if (!isStreaming) {
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (!isStreaming || reduceMotion) {
       displayedContentRef.current = message.content;
       setDisplayedContent(message.content);
       return;
