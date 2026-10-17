@@ -137,7 +137,7 @@ export const LiveResearchActivityFeed: React.FC<LiveResearchActivityFeedProps> =
                 {activity.toolName === 'extractWebPages' && Array.isArray(result?.requestedUrls) && sources.length === 0 && (
                   <div className="ml-5 space-y-1">
                     {(result?.requestedUrls as unknown[]).filter(isWebUrl).map((url) => (
-                      <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 break-all text-[10px] text-cyan-700 hover:underline dark:text-cyan-300">
+                      <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="flex min-h-8 items-center gap-2 break-all rounded-lg px-2 py-1 text-xs text-cyan-800 underline decoration-cyan-500/30 underline-offset-2 hover:bg-slate-100 hover:decoration-cyan-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/50 dark:text-cyan-300 dark:hover:bg-slate-800/70">
                         <BookOpen className="h-3 w-3 shrink-0" />
                         {url}
                       </a>
