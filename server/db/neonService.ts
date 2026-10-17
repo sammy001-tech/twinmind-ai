@@ -431,6 +431,9 @@ class NeonDatabaseService {
         CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
         CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
         CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_provider_inbound_event
+          ON conversations(channel, (metadata->>'inboundMessageSid'))
+          WHERE metadata ? 'inboundMessageSid';
         CREATE INDEX IF NOT EXISTS idx_chat_threads_updated ON chat_threads(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_experiments_decision ON decision_experiments(decision_id);
@@ -845,6 +848,49 @@ class NeonDatabaseService {
     } catch (error: unknown) {
       console.error('[NeonDB] Artifact cleanup failed; PostgreSQL error code:', postgresErrorCode(error));
       throw new Error('ARTIFACT_STORAGE_UNAVAILABLE');
+    }
+  }
+
+  public async saveInboundChannelMessage(
+    msg: ConversationMessage,
+    providerMessageId: string,
+  ): Promise<{ id: number; isDuplicate: boolean } | undefined> {
+    if (!this.pool || !this.isConnected || !providerMessageId.trim()) return undefined;
+    const metadata = { ...(msg.metadata || {}), inboundMessageSid: providerMessageId.trim() };
+    try {
+      const inserted = await this.pool.query(
+        `INSERT INTO conversations (session_id, channel, role, content, provider, model, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+         ON CONFLICT (channel, (metadata->>'inboundMessageSid'))
+           WHERE metadata ? 'inboundMessageSid'
+         DO NOTHING
+         RETURNING id`,
+        [
+          msg.session_id || 'default',
+          msg.channel,
+          msg.role,
+          msg.content,
+          msg.provider || null,
+          msg.model || null,
+          JSON.stringify(metadata),
+        ]
+      );
+      if ((inserted.rowCount ?? 0) > 0 && inserted.rows[0]?.id !== undefined) {
+        return { id: Number(inserted.rows[0].id), isDuplicate: false };
+      }
+
+      const existing = await this.pool.query(
+        `SELECT id FROM conversations
+         WHERE channel = $1 AND metadata->>'inboundMessageSid' = $2
+         LIMIT 1`,
+        [msg.channel, providerMessageId.trim()]
+      );
+      const id = existing.rows[0]?.id;
+      if (id === undefined) return undefined;
+      return { id: Number(id), isDuplicate: true };
+    } catch (err) {
+      console.error('[NeonDB] Failed to persist idempotent inbound channel message:', err);
+      return undefined;
     }
   }
 
