@@ -18,6 +18,7 @@ These settings control bounded execution, not research facts. Existing live cred
 |---|---:|---|
 | `TWINMIND_RESEARCH_SEARCH_DEPTH` | `advanced` | `basic` or `advanced` |
 | `TWINMIND_RESEARCH_SEARCH_RESULT_LIMIT` | `6` | Integer from `1` to `10` |
+| `TWINMIND_RESEARCH_INITIAL_QUERY_LIMIT` | `2` | Integer from `0` to `4` supplemental queries in the initial plan |
 | `TWINMIND_RESEARCH_FOLLOW_UP_LIMIT` | `2` | Integer from `0` to `4` |
 | `TWINMIND_RESEARCH_EXTRACT_LIMIT` | `5` | Integer from `1` to `10` |
 | `TWINMIND_RESEARCH_SOURCE_CONTENT_LIMIT` | `12000` | Integer from `1000` to `30000` characters |
