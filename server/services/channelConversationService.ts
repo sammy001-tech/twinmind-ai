@@ -65,6 +65,26 @@ export async function persistChannelMessage(input: PersistChannelMessageInput): 
   return { threadId, messageId };
 }
 
+export async function persistInboundChannelMessage(
+  input: Omit<PersistChannelMessageInput, 'deliveryStatus' | 'providerMessageSid' | 'errorCode'>,
+  providerMessageId: string,
+): Promise<{ threadId: string; messageId: number; isDuplicate: boolean }> {
+  if (!providerMessageId.trim()) throw new Error('CHANNEL_PROVIDER_MESSAGE_ID_REQUIRED');
+  const threadId = await ensureChannelThread(input.channel, input.externalIdentity, input.role === 'user' ? input.content : '');
+  const result = await neonDb.saveInboundChannelMessage({
+    session_id: threadId,
+    channel: input.channel,
+    role: input.role,
+    content: input.content,
+    provider: input.provider,
+    model: input.model,
+    metadata: input.metadata || {},
+  }, providerMessageId.trim());
+
+  if (!result) throw new Error('PERSISTENCE_FAILED: inbound channel message was not durably saved');
+  return { threadId, messageId: result.id, isDuplicate: result.isDuplicate };
+}
+
 export async function loadChannelConversationHistory(
   channel: ExternalChannel,
   externalIdentity: string | number,
