@@ -257,7 +257,8 @@ class SettingsManager {
       voice: s.voice || '',
       userName: s.userName || '',
       nickname: s.nickname || '',
-      // Display the saved Settings credential, not the environment key; source/precedence is exposed separately.\n      customGeminiKey: mask(s.customGeminiKey),
+      // Display the saved Settings credential, not the environment key; source/precedence is exposed separately.
+      customGeminiKey: mask(s.customGeminiKey),
       customGroqKey: mask(s.customGroqKey),
       customMistralKey: mask(s.customMistralKey),
       customTavilyKey: mask(s.customTavilyKey),
