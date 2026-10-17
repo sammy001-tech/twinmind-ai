@@ -21,6 +21,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   customGroqKey: process.env.GROQ_API_KEY || '',
   customMistralKey: process.env.MISTRAL_API_KEY || '',
   customTavilyKey: process.env.TAVILY_API_KEY || '',
+  telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  telegramOwnerId: process.env.TELEGRAM_OWNER_ID || '',
+  telegramMode: process.env.TELEGRAM_MODE === 'webhook' ? 'webhook' : 'polling',
+  telegramWebhookUrl: process.env.TELEGRAM_WEBHOOK_URL || '',
   autoPlayVoice: false,
   voiceSpeed: 1,
   customPrompts: [],
@@ -183,6 +187,8 @@ class SettingsManager {
       'customGroqKey',
       'customMistralKey',
       'customTavilyKey',
+      'twilioAuthToken',
+      'telegramToken',
     ] as const;
     const isCredentialUpdate = credentialFields.some((field) =>
       Object.prototype.hasOwnProperty.call(filteredPatch, field)
@@ -228,11 +234,19 @@ class SettingsManager {
       telegramOwnerId?: string;
     };
 
-    const mask = (key?: string) => {
+    const normalizeCredential = (value?: string): string => {
+      if (typeof value !== 'string') return '';
+      const key = value.trim().replace(/^["']|["']$/g, '');
+      return !key || key.includes('...') || key === '********' ? '' : key;
+    };
+    const mask = (value?: string) => {
+      const key = normalizeCredential(value);
       if (!key) return '';
       if (key.length < 8) return '********';
       return `${key.slice(0, 4)}...${key.slice(-4)}`;
     };
+    const credentialSource = (environmentValue?: string, savedValue?: string) =>
+      normalizeCredential(environmentValue) ? 'environment' : normalizeCredential(savedValue) ? 'settings' : 'none';
 
     // Explicit client DTO: unknown persisted properties and raw secrets are never spread into responses.
     return {
@@ -243,10 +257,10 @@ class SettingsManager {
       voice: s.voice || '',
       userName: s.userName || '',
       nickname: s.nickname || '',
-      customGeminiKey: mask(process.env.GEMINI_API_KEY || s.customGeminiKey),
-      customGroqKey: mask(process.env.GROQ_API_KEY || s.customGroqKey),
-      customMistralKey: mask(process.env.MISTRAL_API_KEY || s.customMistralKey),
-      customTavilyKey: mask(process.env.TAVILY_API_KEY || s.customTavilyKey),
+      // Display the saved Settings credential, not the environment key; source/precedence is exposed separately.\n      customGeminiKey: mask(s.customGeminiKey),
+      customGroqKey: mask(s.customGroqKey),
+      customMistralKey: mask(s.customMistralKey),
+      customTavilyKey: mask(s.customTavilyKey),
       autoPlayVoice: s.autoPlayVoice,
       voiceSpeed: s.voiceSpeed,
       customPrompts: s.customPrompts || [],
@@ -260,21 +274,23 @@ class SettingsManager {
       proactiveAlertChannel: s.proactiveAlertChannel,
       keyTestStatuses: s.keyTestStatuses,
       themeMode: s.themeMode,
-      telegramToken: runtime.telegramToken ? '********' : '',
+      telegramToken: mask(runtime.telegramToken),
       telegramMode: runtime.telegramMode || '',
       telegramWebhookUrl: runtime.telegramWebhookUrl || '',
-      hasTelegramToken: Boolean(runtime.telegramToken || process.env.TELEGRAM_BOT_TOKEN),
-      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY || s.customGeminiKey),
-      hasGroqKey: Boolean(process.env.GROQ_API_KEY || s.customGroqKey),
-      hasMistralKey: Boolean(process.env.MISTRAL_API_KEY || s.customMistralKey),
-      hasTavilyKey: Boolean(process.env.TAVILY_API_KEY || s.customTavilyKey),
+      hasTelegramToken: Boolean(normalizeCredential(process.env.TELEGRAM_BOT_TOKEN) || normalizeCredential(runtime.telegramToken)),
+      hasGeminiKey: Boolean(normalizeCredential(process.env.GEMINI_API_KEY) || normalizeCredential(s.customGeminiKey)),
+      hasGroqKey: Boolean(normalizeCredential(process.env.GROQ_API_KEY) || normalizeCredential(s.customGroqKey)),
+      hasMistralKey: Boolean(normalizeCredential(process.env.MISTRAL_API_KEY) || normalizeCredential(s.customMistralKey)),
+      hasTavilyKey: Boolean(normalizeCredential(process.env.TAVILY_API_KEY) || normalizeCredential(s.customTavilyKey)),
       apiKeySources: {
-        gemini: process.env.GEMINI_API_KEY ? 'environment' : s.customGeminiKey ? 'settings' : 'none',
-        groq: process.env.GROQ_API_KEY ? 'environment' : s.customGroqKey ? 'settings' : 'none',
-        mistral: process.env.MISTRAL_API_KEY ? 'environment' : s.customMistralKey ? 'settings' : 'none',
-        tavily: process.env.TAVILY_API_KEY ? 'environment' : s.customTavilyKey ? 'settings' : 'none',
+        gemini: credentialSource(process.env.GEMINI_API_KEY, s.customGeminiKey),
+        groq: credentialSource(process.env.GROQ_API_KEY, s.customGroqKey),
+        mistral: credentialSource(process.env.MISTRAL_API_KEY, s.customMistralKey),
+        tavily: credentialSource(process.env.TAVILY_API_KEY, s.customTavilyKey),
+        telegram: credentialSource(process.env.TELEGRAM_BOT_TOKEN, runtime.telegramToken),
+        twilio: credentialSource(process.env.TWILIO_AUTH_TOKEN, s.twilioAuthToken),
       },
-      twilioTokenConfigured: Boolean(s.twilioAuthToken || process.env.TWILIO_AUTH_TOKEN),
+      twilioTokenConfigured: Boolean(normalizeCredential(s.twilioAuthToken) || normalizeCredential(process.env.TWILIO_AUTH_TOKEN)),
     };
   }
 }
