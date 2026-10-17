@@ -203,6 +203,12 @@ class SettingsManager {
     // Credentials and integration configuration must survive restarts. Never acknowledge a
     // durable setting unless Neon confirms the write; do not commit it to memory first.
     if (requiresDurableWrite) {
+      const connected = await neonDb.ensureConnected();
+      if (!connected) {
+        throw new Error(
+          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
+        );
+      }
       const persisted = await neonDb.saveSettings(nextSettings as unknown as Record<string, unknown>);
       if (!persisted) {
         throw new Error(
