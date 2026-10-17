@@ -31,7 +31,7 @@ import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import path from 'path';
 import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
-import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, inspectCitationReferences, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from '../utils/researchEvidence.ts';
+import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, parseInitialResearchPlan, inspectCitationReferences, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from '../utils/researchEvidence.ts';
 
 export interface SwarmToolTrace {
   toolName: string;
@@ -650,6 +650,7 @@ class SpecialistSwarmService {
 
     // Validate every dynamic research limit before starting workers or performing external side effects.
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_SEARCH_RESULT_LIMIT', 6, 1, 10);
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_INITIAL_QUERY_LIMIT', 2, 0, 4);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_FOLLOW_UP_LIMIT', 2, 0, 4);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_EXTRACT_LIMIT', 5, 1, 10);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_SOURCE_CONTENT_LIMIT', 12000, 1000, 30000);
@@ -829,6 +830,7 @@ class SpecialistSwarmService {
           let gatheredSources: ResearchSource[] = [];
           let extractedSources: ResearchSource[] = [];
           let unresolvedQuestions: string[] = [];
+          let initialResearchQuestions: string[] = [];
           let primarySearchSucceeded = false;
 
           callbacks?.onSpecialistStart?.({
@@ -884,7 +886,100 @@ class SpecialistSwarmService {
             }
           };
 
+          // Plan subquestions and targeted searches from the actual request before the first lookup.
+          const initialQueryLimit = resolveBoundedIntegerSetting(
+            process.env,
+            'TWINMIND_RESEARCH_INITIAL_QUERY_LIMIT',
+            2,
+            0,
+            4,
+          );
+          let initialPlanQueries: string[] = [];
+          if (initialQueryLimit > 0 && !scope.isTerminated) {
+            const planningStartedAt = Date.now();
+            const availableInitialQueries = Math.min(
+              initialQueryLimit,
+              Math.max(0, scope.budget.getRemaining() - 2),
+            );
+            callbacks?.onToolCall?.({
+              specialist: 'DeepResearcher',
+              toolName: 'planInitialResearch',
+              input: { originalQuestion: userPrompt },
+            });
+
+            try {
+              const rawPlan = await twinAgentService.generateCompletion({
+                prompt: [
+                  'Plan an evidence-led live investigation for the user request below.',
+                  'Identify the concrete subquestions that need answers and propose targeted, non-duplicative web search queries for them.',
+                  'Prefer queries capable of finding primary documentation, current facts, independent corroboration, and credible counter-evidence as appropriate to the request.',
+                  'Do not answer the question. Do not invent sources, facts, dates, or search results.',
+                  'Return only valid JSON with researchQuestions (array of strings) and searchQueries (array of strings).',
+                  `The maximum supplemental query count allowed by the current tool budget is ${availableInitialQueries}.`,
+                  `Original user request: ${userPrompt}`,
+                  `Initial live search query from the request: ${goals.researchQuery}`,
+                ].join('\n\n'),
+                provider: effectiveProvider,
+                model: effectiveModel,
+                customGeminiKey: options.customGeminiKey,
+                customGroqKey: options.customGroqKey,
+                customMistralKey: options.customMistralKey,
+                jsonMode: true,
+                temperature: 0.1,
+              });
+              const plan = parseInitialResearchPlan(rawPlan, {
+                maxQueries: availableInitialQueries,
+                excludeQueries: [goals.researchQuery],
+              });
+              initialResearchQuestions = plan.researchQuestions;
+              initialPlanQueries = plan.searchQueries;
+              const result = { status: 'success', ...plan };
+              toolTraces.push({
+                toolName: 'planInitialResearch',
+                specialist: 'DeepResearcher',
+                input: { originalQuestion: userPrompt },
+                output: result,
+                status: 'success',
+                durationMs: Date.now() - planningStartedAt,
+                timestamp: new Date().toISOString(),
+              });
+              callbacks?.onToolResult?.({
+                specialist: 'DeepResearcher',
+                toolName: 'planInitialResearch',
+                status: 'success',
+                durationMs: Date.now() - planningStartedAt,
+                outputSummary: `The configured live model identified ${plan.researchQuestions.length} research questions and proposed ${plan.searchQueries.length} supplemental queries.`,
+                result,
+              });
+            } catch (error: unknown) {
+              const message = error instanceof Error ? error.message : String(error);
+              toolTraces.push({
+                toolName: 'planInitialResearch',
+                specialist: 'DeepResearcher',
+                input: { originalQuestion: userPrompt },
+                output: { status: 'error', error: message },
+                status: 'error',
+                durationMs: Date.now() - planningStartedAt,
+                timestamp: new Date().toISOString(),
+              });
+              callbacks?.onToolResult?.({
+                specialist: 'DeepResearcher',
+                toolName: 'planInitialResearch',
+                status: 'error',
+                durationMs: Date.now() - planningStartedAt,
+                outputSummary: `Initial research planning was unavailable: ${message}`,
+                result: { status: 'error', error: message },
+              });
+            }
+          }
+
+          // The user-derived query still runs if planning is unavailable; this is the request itself,
+          // not a substitute response or fabricated search result.
           await runSearch(goals.researchQuery);
+          for (const query of initialPlanQueries) {
+            if (scope.isTerminated || scope.budget.getRemaining() <= 1) break;
+            await runSearch(query);
+          }
 
           // Research depth is adapted by the configured live model from the evidence actually found.
           // Reserve one remaining provider call for source extraction where the shared tool budget permits.
@@ -1051,7 +1146,7 @@ class SpecialistSwarmService {
 
           const durationMs = Date.now() - specStart;
           const summary = gatheredSources.length > 0
-            ? `Collected ${gatheredSources.length} unique source records across ${searchedQueries.length} live search queries; extracted ${extractedSources.length} source pages.${unresolvedQuestions.length ? ` The adaptive planner identified ${unresolvedQuestions.length} unresolved questions.` : ''}`
+            ? `Collected ${gatheredSources.length} unique source records across ${searchedQueries.length} live search attempts; decomposed the request into ${initialResearchQuestions.length} initial research questions and extracted ${extractedSources.length} source pages.${unresolvedQuestions.length ? ` The adaptive planner identified ${unresolvedQuestions.length} unresolved questions.` : ''}`
             : `No usable live source records were collected. Search and planning errors are recorded in the trace; no substitute evidence was generated.`;
 
           callbacks?.onSpecialistDone?.({
