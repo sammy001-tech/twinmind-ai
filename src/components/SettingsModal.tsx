@@ -491,9 +491,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       if (data.success) {
         setTgFeedback({ type: 'success', text: `New pairing code generated: ${data.pairingCode}` });
         await loadTelegramStatus();
+      } else {
+        setTgFeedback({
+          type: 'error',
+          text: data.error || data.message || 'Pairing changes could not be saved. Verify that Neon PostgreSQL is connected.',
+        });
       }
     } catch (err) {
-      console.error('Reset pairing error:', err);
+      setTgFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Pairing changes could not be saved.',
+      });
     }
   };
 
@@ -537,10 +545,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const data = await res.json();
       const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (data.success) {
-        setTavilyFeedback({ type: 'success', text: data.message });
+        const message = credentialSources.tavily === 'environment'
+          ? `${data.message} The Render TAVILY_API_KEY remains authoritative for app execution.`
+          : data.message;
+        setTavilyFeedback({ type: 'success', text: message });
         updateKeyTestStatus('tavily', {
           status: 'success',
-          message: data.message,
+          message,
           testedAt: timeStr,
         });
       } else {
@@ -593,7 +604,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }
       }
       setTavilyKeyInput('');
-      setTavilyFeedback({ type: 'success', text: 'Tavily API key saved and persisted.' });
+      const environmentIsAuthoritative = credentialSources.tavily === 'environment';
+      setTavilyFeedback({
+        type: 'success',
+        text: environmentIsAuthoritative
+          ? 'Tavily key saved to Neon. Render TAVILY_API_KEY is still authoritative; update or remove it to use the saved key.'
+          : 'Tavily API key saved and persisted. The raw key remains hidden.',
+      });
+      await loadCredentialSources();
       setFeedbackToast('Tavily API key saved.');
       setTimeout(() => setFeedbackToast(null), 3000);
       await loadTavilyStatus();
