@@ -21,8 +21,8 @@ export function formatChannelMessage(text: string, channel: ExternalChannel): st
   output = output.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label: string, url: string) =>
     channel === 'telegram' ? `${label} (${url})` : `${label}: ${url}`
   );
-  output = output.replace(/^\s{0,3}#{1,6}[ \t]+/gm, '');
-  output = output.replace(/^\s*[-+*][ \t]+/gm, '• ');
+  output = output.replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, '');
+  output = output.replace(/^[ \t]*[-+*][ \t]+/gm, '• ');
 
   if (channel === 'telegram') {
     output = output
