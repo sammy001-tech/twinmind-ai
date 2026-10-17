@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { randomUUID } from 'node:crypto';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
 import { knowledgeService } from '../db/knowledgeService.ts';
@@ -266,8 +267,9 @@ export interface TwinAgentTurnOptions {
   model?: string;
   providerOverride?: 'gemini' | 'groq' | 'mistral' | string;
   modelOverride?: string;
-  onToolStart?: (toolName: string, args: Record<string, unknown>) => void;
-  onToolComplete?: (toolName: string, result: unknown) => void;
+  signal?: AbortSignal;
+  onToolStart?: (toolName: string, args: Record<string, unknown>, toolId: string) => void;
+  onToolComplete?: (toolName: string, result: unknown, toolId: string) => void;
 }
 
 export interface SuggestedAction {
@@ -472,7 +474,7 @@ class TwinAgentService {
   /**
    * Deterministic Tool 1: Live Tavily Web Search with Untrusted Data Boundary
    */
-  public async executeSearchWeb(query: string, customTavilyKey?: string): Promise<Record<string, unknown>> {
+  public async executeSearchWeb(query: string, customTavilyKey?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const trimmed = (query || '').trim();
     if (!trimmed) {
       return { error: 'SEARCH_QUERY_REQUIRED', status: 'invalid_args' };
@@ -511,6 +513,7 @@ class TwinAgentService {
               include_raw_content: false,
               search_depth: resolveResearchSearchDepth(process.env),
             }),
+            signal,
           });
           if (!res.ok) {
             const errText = await res.text().catch(() => '');
@@ -518,7 +521,7 @@ class TwinAgentService {
           }
           return await res.json();
         },
-        { operationName: 'TavilySearch', maxRetries: 3 }
+        { operationName: 'TavilySearch', maxRetries: 3, signal }
       );
 
       const normalized = normalizeResearchSearchResults(data);
@@ -560,7 +563,7 @@ class TwinAgentService {
    * Extract full page content from validated URLs using the configured live Tavily capability.
    * Only source records returned by the provider are exposed; empty extraction is a failure.
    */
-  public async executeExtractWebPages(urlsValue: unknown, customTavilyKey?: string): Promise<Record<string, unknown>> {
+  public async executeExtractWebPages(urlsValue: unknown, customTavilyKey?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const maxUrls = resolveBoundedIntegerSetting(
       process.env,
       'TWINMIND_RESEARCH_EXTRACT_LIMIT',
@@ -598,6 +601,7 @@ class TwinAgentService {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ api_key: tavilyKey, urls }),
+            signal,
           });
           if (!res.ok) {
             const errorText = await res.text().catch(() => '');
@@ -605,7 +609,7 @@ class TwinAgentService {
           }
           return await res.json();
         },
-        { operationName: 'TavilyExtract', maxRetries: 2 },
+        { operationName: 'TavilyExtract', maxRetries: 2, signal },
       );
 
       const knownSources = urls.map((url) => ({ title: '', url, content: '' }));
@@ -1080,12 +1084,13 @@ Respond in valid JSON:
 
     // Helper to dispatch tool execution
     const runTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
-      onToolStart?.(name, args);
+      const toolId = randomUUID();
+      onToolStart?.(name, args, toolId);
       let result: unknown;
       if (name === 'searchWeb') {
-        result = await this.executeSearchWeb(String(args.query || ''), customTavilyKey);
+        result = await this.executeSearchWeb(String(args.query || ''), customTavilyKey, options.signal);
       } else if (name === 'extractWebPages') {
-        result = await this.executeExtractWebPages(args.urls, customTavilyKey);
+        result = await this.executeExtractWebPages(args.urls, customTavilyKey, options.signal);
       } else if (name === 'runMultiAgentDebate') {
         result = await this.executeMultiAgentDebate(String(args.dilemma || ''), channel, provider, model);
       } else if (name === 'deconstructDecision') {
@@ -1141,7 +1146,7 @@ Respond in valid JSON:
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };
       }
-      onToolComplete?.(name, result);
+      onToolComplete?.(name, result, toolId);
       toolsExecuted.push({ toolName: name, args, result });
       return result;
     };
@@ -1211,7 +1216,7 @@ Respond in valid JSON:
       });
 
       let round = 0;
-      const MAX_ROUNDS = 3;
+      const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
 
       while (round < MAX_ROUNDS) {
         round++;
@@ -1339,7 +1344,7 @@ Respond in valid JSON:
       ];
 
       let round = 0;
-      const MAX_ROUNDS = 3;
+      const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
 
       while (round < MAX_ROUNDS) {
         round++;
@@ -1461,7 +1466,7 @@ Respond in valid JSON:
       ];
 
       let round = 0;
-      const MAX_ROUNDS = 3;
+      const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
 
       while (round < MAX_ROUNDS) {
         round++;
