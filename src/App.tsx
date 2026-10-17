@@ -1322,6 +1322,7 @@ export default function App() {
                     voiceSpeed={voiceSpeed}
                     onVoiceSpeedChange={handleVoiceSpeedChange}
                     isDark={isDark}
+                    isStreamingResponse={isLoading}
                   />
 
                   {isLoading && displayMessages[displayMessages.length - 1]?.role !== 'assistant' && (
