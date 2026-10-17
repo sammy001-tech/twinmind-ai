@@ -1699,7 +1699,7 @@ class SpecialistSwarmService {
             if (out.status === 'success' && Array.isArray(out.results)) {
               const sourceReferences = normalizeResearchSearchResults(out.results)
                 .map((source) => sourceIds.get(source.url))
-                .filter((id): id is string => Boolean(id));
+                .filter((id) => id !== undefined);
               evidenceContext += `Search query "${String(tool.input.query || '')}" returned source records ${JSON.stringify(sourceReferences)}.\n`;
             } else {
               evidenceContext += `Live search did not produce usable evidence for "${String(tool.input.query || '')}": ${String(out.error || 'No usable source records were returned by the provider.')}\n`;
@@ -1723,7 +1723,7 @@ class SpecialistSwarmService {
             if (out.status === 'success') {
               const extractedRefs = normalizeResearchSearchResults(out.sources)
                 .map((source) => sourceIds.get(source.url))
-                .filter((id): id is string => Boolean(id));
+                .filter((id) => id !== undefined);
               evidenceContext += `Page extraction returned content for source records ${JSON.stringify(extractedRefs)}.\n`;
             } else {
               evidenceContext += `Live page extraction unavailable: ${String(out.error || 'The provider returned no attributable page content.')}\n`;
