@@ -976,13 +976,14 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         customGroqKey,
         customMistralKey,
         customTavilyKey,
+        signal: abortController.signal,
         providerOverride: targetProvider as any,
         modelOverride: targetModel,
-        onToolStart: (toolName, args) => {
-          res.write(`data: ${JSON.stringify({ toolEvent: { type: 'start', toolName, args } })}\n\n`);
+        onToolStart: (toolName, args, toolId) => {
+          res.write(`data: ${JSON.stringify({ toolEvent: { type: 'start', toolId, toolName, args } })}\n\n`);
         },
-        onToolComplete: (toolName, result) => {
-          res.write(`data: ${JSON.stringify({ toolEvent: { type: 'complete', toolName, result } })}\n\n`);
+        onToolComplete: (toolName, result, toolId) => {
+          res.write(`data: ${JSON.stringify({ toolEvent: { type: 'complete', toolId, toolName, result } })}\n\n`);
         },
       });
 
