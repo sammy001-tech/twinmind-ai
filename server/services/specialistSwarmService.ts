@@ -31,6 +31,7 @@ import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import path from 'path';
 import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
+import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from './researchEvidence.ts';
 
 export interface SwarmToolTrace {
   toolName: string;
@@ -163,9 +164,15 @@ class SpecialistSwarmService {
             body: JSON.stringify({
               api_key: tavilyKey,
               query: trimmed,
-              max_results: 4,
+              max_results: resolveBoundedIntegerSetting(
+                process.env,
+                'TWINMIND_RESEARCH_SEARCH_RESULT_LIMIT',
+                6,
+                1,
+                10,
+              ),
               include_answer: true,
-              search_depth: 'basic',
+              search_depth: resolveResearchSearchDepth(process.env),
             }),
             signal,
           });
@@ -187,20 +194,16 @@ class SpecialistSwarmService {
         }
       );
 
-      const items = Array.isArray(data.results)
-        ? data.results
-            .filter((r: any) =>
-              typeof r?.title === 'string' && r.title.trim() &&
-              typeof r?.url === 'string' && r.url.trim() &&
-              typeof r?.content === 'string' && r.content.trim()
-            )
-            .map((r: any) => ({
-              title: r.title,
-              url: r.url,
-              content: r.content.slice(0, 1000),
-              ...(typeof r.score === 'number' && Number.isFinite(r.score) ? { score: r.score } : {}),
-            }))
-        : [];
+      const items = normalizeResearchSearchResults(data);
+      if (items.length === 0) {
+        return {
+          status: 'error',
+          query: trimmed,
+          results: [],
+          error: 'LIVE_SEARCH_NO_USABLE_RESULTS: the search provider returned no source records with attributable titles, URLs, and content.',
+          durationMs: Date.now() - startTime,
+        };
+      }
 
       return {
         status: 'success',
@@ -217,6 +220,137 @@ class SpecialistSwarmService {
         query: trimmed,
         results: [],
         error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startTime,
+      };
+    }
+  }
+
+  /**
+   * Extract provider-returned content for a bounded set of pages discovered by live search.
+   * An extraction is usable only when it maps back to one of the selected source URLs.
+   */
+  public async executeExtractWebPages(
+    sources: ResearchSource[],
+    options: {
+      customTavilyKey?: string;
+      signal?: AbortSignal;
+      budget?: SwarmToolBudget;
+    } = {},
+  ): Promise<{ status: 'success' | 'error'; requestedUrls: string[]; sources: ResearchSource[]; error?: string; durationMs: number }> {
+    const startTime = Date.now();
+    const { customTavilyKey, signal, budget } = options;
+    const extractLimit = resolveBoundedIntegerSetting(
+      process.env,
+      'TWINMIND_RESEARCH_EXTRACT_LIMIT',
+      5,
+      1,
+      10,
+    );
+    const contentLimit = resolveBoundedIntegerSetting(
+      process.env,
+      'TWINMIND_RESEARCH_SOURCE_CONTENT_LIMIT',
+      12000,
+      1000,
+      30000,
+    );
+    const sourceByUrl = new Map(sources.map((source) => [source.url, source] as const));
+    const requestedUrls = normalizeResearchUrls(
+      sources.map((source) => source.url),
+      extractLimit,
+    );
+
+    if (requestedUrls.length === 0) {
+      return {
+        status: 'error',
+        requestedUrls: [],
+        sources: [],
+        error: 'RESEARCH_SOURCE_URLS_REQUIRED: no valid source URLs were available for extraction.',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    const cbCheck = circuitBreakers.checkCanExecute('tavily');
+    if (!cbCheck.canExecute) {
+      return {
+        status: 'error',
+        requestedUrls,
+        sources: [],
+        error: cbCheck.reason || 'Tavily circuit breaker is open',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    const tavilyKey =
+      process.env.TAVILY_API_KEY ||
+      settingsManager.getSettings().customTavilyKey ||
+      customTavilyKey;
+    if (!tavilyKey) {
+      return {
+        status: 'error',
+        requestedUrls,
+        sources: [],
+        error: 'TAVILY_API_KEY is not configured; live page extraction is unavailable.',
+        durationMs: Date.now() - startTime,
+      };
+    }
+
+    try {
+      if (signal?.aborted) throw new Error('RESEARCH_EXTRACTION_ABORTED');
+
+      const data = await callWithBoundedRetry(
+        async (attempt: number) => {
+          budget?.claim('extractWebPages', attempt);
+          const response = await fetch('https://api.tavily.com/extract', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: tavilyKey, urls: requestedUrls }),
+            signal,
+          });
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => '');
+            circuitBreakers.recordFailure('tavily', response.status, errorText);
+            throw new Error(`Tavily extraction API error (${response.status}): ${errorText || response.statusText}`);
+          }
+          circuitBreakers.recordSuccess('tavily');
+          return await response.json();
+        },
+        {
+          maxRetries: 1,
+          baseDelayMs: 600,
+          operationName: 'TavilyExtract',
+          signal,
+        },
+      );
+
+      const allowlistedSources = requestedUrls
+        .map((url) => sourceByUrl.get(url))
+        .filter((source): source is ResearchSource => Boolean(source));
+      const extracted = normalizeResearchExtractions(data, allowlistedSources, contentLimit);
+      if (extracted.length === 0) {
+        return {
+          status: 'error',
+          requestedUrls,
+          sources: [],
+          error: 'RESEARCH_EXTRACTION_EMPTY: the provider returned no attributable page content.',
+          durationMs: Date.now() - startTime,
+        };
+      }
+
+      return {
+        status: 'success',
+        requestedUrls,
+        sources: extracted,
+        durationMs: Date.now() - startTime,
+      };
+    } catch (err: unknown) {
+      if (!(err instanceof SwarmBudgetExceededError)) {
+        circuitBreakers.recordFailure('tavily', undefined, String(err));
+      }
+      return {
+        status: 'error',
+        requestedUrls,
+        sources: [],
+        error: err instanceof Error ? err.message : 'Live page extraction failed.',
         durationMs: Date.now() - startTime,
       };
     }
