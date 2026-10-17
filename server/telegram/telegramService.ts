@@ -10,7 +10,7 @@ import { knowledgeService } from '../db/knowledgeService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
-import { resolveProviderCredential } from '../services/providerCredentialService.ts';
+import { normalizeProviderCredential, resolveProviderCredential } from '../services/providerCredentialService.ts';
 import {
   isTelegramMode,
   isValidTelegramWebhookUrl,
@@ -666,8 +666,8 @@ class TelegramBotManager {
       }
     }
 
-    const environmentToken = cleanConfigSecret(process.env.TELEGRAM_BOT_TOKEN);
-    const requestedToken = newConfig.token === undefined ? undefined : cleanConfigSecret(newConfig.token);
+    const environmentToken = normalizeProviderCredential(process.env.TELEGRAM_BOT_TOKEN);
+    const requestedToken = newConfig.token === undefined ? undefined : normalizeProviderCredential(newConfig.token);
     if (requestedToken && environmentToken && requestedToken !== environmentToken) {
       return {
         success: false,
@@ -1382,7 +1382,6 @@ class TelegramBotManager {
   private async generateVoiceBuffer(text: string): Promise<Buffer | null> {
     const settings = settingsManager.getSettings();
     const voice = (settings.voice || '').trim();
-    const apiKey = resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key;
     const apiKey = resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key;
 
     if (!voice) {
