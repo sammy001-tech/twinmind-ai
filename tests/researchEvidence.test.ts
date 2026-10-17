@@ -79,6 +79,16 @@ test('research URL normalization rejects malformed and non-HTTP URLs and removes
   );
 });
 
+test('URL safety rejects loopback while allowing syntactically valid public IPv6 source URLs', () => {
+  assert.deepEqual(
+    normalizeResearchUrls([
+      'http://[::1]/admin',
+      'https://[2606:4700:4700::1111]/guide',
+    ]),
+    ['https://[2606:4700:4700::1111]/guide'],
+  );
+});
+
 test('adaptive query plans exclude previously searched queries and duplicate suggestions', () => {
   const plan = parseAdaptiveResearchPlan(JSON.stringify({
     followUpQueries: [
