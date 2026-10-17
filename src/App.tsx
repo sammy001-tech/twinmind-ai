@@ -1322,6 +1322,11 @@ export default function App() {
                     voiceSpeed={voiceSpeed}
                     onVoiceSpeedChange={handleVoiceSpeedChange}
                     isDark={isDark}
+                    streamingMessageId={
+                      isLoading && messages[messages.length - 1]?.role === 'assistant'
+                        ? messages[messages.length - 1].id
+                        : undefined
+                    }
                   />
 
                   {isLoading && displayMessages[displayMessages.length - 1]?.role !== 'assistant' && (

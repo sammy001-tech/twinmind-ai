@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { ChatMessage, ChannelType } from '../types/index.ts';
 import { VoicePlayer } from './VoicePlayer.tsx';
 import { SwarmTraceFeed } from './SwarmTraceFeed.tsx';
@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { ArtifactCard } from './ArtifactCard.tsx';
+import { getMessageContentView } from '../utils/chatMessagePresentation.ts';
 
 export interface GroupedMessages {
   groupId: string;
@@ -121,6 +122,7 @@ interface ChatMessageProps {
   voiceSpeed?: number;
   onVoiceSpeedChange?: (speed: number) => void;
   isDark?: boolean;
+  isStreaming?: boolean;
 }
 
 export const ChatMessageItem: React.FC<ChatMessageProps> = ({
@@ -140,6 +142,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   voiceSpeed = 1,
   onVoiceSpeedChange,
   isDark = true,
+  isStreaming = false,
 }) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
@@ -151,6 +154,50 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
 
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [displayedContent, setDisplayedContent] = useState(isStreaming ? '' : message.content);
+  const displayedContentRef = useRef(isStreaming ? '' : message.content);
+
+  // Animate newly received assistant text without altering the underlying message
+  // content used by copy, audio, persistence, and other message actions.
+  useEffect(() => {
+    const reduceMotion =
+      typeof window !== 'undefined' &&
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    if (!isStreaming || reduceMotion) {
+      displayedContentRef.current = message.content;
+      setDisplayedContent(message.content);
+      return;
+    }
+
+    const target = message.content;
+    if (displayedContentRef.current.length >= target.length) return;
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const revealNext = () => {
+      if (cancelled) return;
+      const current = displayedContentRef.current;
+      if (current.length >= target.length) return;
+
+      const remaining = target.length - current.length;
+      const increment = Math.max(1, Math.min(6, Math.ceil(remaining / 18)));
+      const next = target.slice(0, Math.min(target.length, current.length + increment));
+      displayedContentRef.current = next;
+      setDisplayedContent(next);
+
+      if (next.length < target.length) {
+        timer = setTimeout(revealNext, 16);
+      }
+    };
+
+    revealNext();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [message.content, message.id, isStreaming]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(message.content);
@@ -255,6 +302,12 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   );
 
   const isMatch = Boolean(searchQuery?.trim()) && message.content.toLowerCase().includes(searchQuery.toLowerCase().trim());
+  const contentView = getMessageContentView(
+    isUser ? message.content : displayedContent,
+    message.role,
+    isExpanded,
+    isStreaming,
+  );
 
   // Channel-tailored style mapping while maintaining UNIFIED features across Light and Dark modes
   const getBubbleStyle = () => {
@@ -269,10 +322,11 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]'
           : 'bg-[#005c4b] text-[#e9edef] border border-[#007a64]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]';
       }
-      // Web Canvas
+      // Web chat: a restrained primary-accent tint distinguishes user content
+      // while keeping the assistant's response on an uncluttered canvas.
       return !isDark
-        ? 'bg-slate-900 text-white rounded-[22px] px-4 py-2.5 text-sm md:text-[15px] shadow-sm max-w-[95%] sm:max-w-[85%]'
-        : 'bg-[#1b2a47] sm:bg-[#162238] text-white rounded-[22px] px-4 py-2.5 text-sm md:text-[15px] border border-slate-700/60 max-w-[95%] sm:max-w-[85%]';
+        ? 'bg-amber-50/90 text-slate-900 border border-amber-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-sm md:text-[15px] leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]'
+        : 'bg-amber-400/10 text-slate-100 border border-amber-300/15 rounded-[24px] rounded-br-md px-4 py-3 text-sm md:text-[15px] leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]';
     } else {
       // Assistant
       if (channel === 'telegram') {
@@ -285,8 +339,8 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           ? 'bg-white text-[#111b21] border border-slate-200/80 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[98%] sm:max-w-[90%]'
           : 'bg-[#202c33] text-[#d1d7db] border border-slate-700/50 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
-      // Web Canvas - borderless canvas typography
-      return 'bg-transparent border-0 shadow-none px-0 py-0.5 text-slate-900 dark:text-slate-100 text-sm md:text-[15px] leading-relaxed w-full';
+      // ChatGPT-inspired assistant canvas: readable typography without a heavy card.
+      return 'bg-transparent border-0 shadow-none px-0 py-0.5 text-slate-900 dark:text-slate-100 text-sm md:text-[15px] leading-7 w-full';
     }
   };
 
@@ -354,40 +408,20 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
               </div>
             ) : (
               <>
-                {isUser && message.content.length > 320 && !isExpanded ? (
-                  <div className="relative">
-                    <div className="max-h-[120px] overflow-hidden mask-fade-bottom">
-                      {renderFormattedMarkdown(message.content.slice(0, 300) + '...')}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setIsExpanded(true);
-                      }}
-                      className="mt-1 text-[11px] font-bold text-amber-500 hover:text-amber-400 flex items-center gap-1 transition-all"
-                    >
-                      <span>Show more</span>
-                      <RefreshCw className="w-2.5 h-2.5 rotate-90" />
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    {renderFormattedMarkdown(message.content)}
-                    {isUser && message.content.length > 320 && isExpanded && (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setIsExpanded(false);
-                        }}
-                        className="mt-2 text-[11px] font-bold text-slate-400 hover:text-slate-300 flex items-center gap-1 transition-all"
-                      >
-                        <span>Show less</span>
-                        <RefreshCw className="w-2.5 h-2.5 -rotate-90" />
-                      </button>
-                    )}
-                  </>
+                {renderFormattedMarkdown(contentView.content)}
+                {contentView.canExpand && (
+                  <button
+                    type="button"
+                    aria-expanded={contentView.isExpanded}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsExpanded((expanded) => !expanded);
+                    }}
+                    className="mt-2 inline-flex items-center gap-1 rounded-lg py-1 text-xs font-medium text-amber-600 hover:text-amber-500 dark:text-amber-300 dark:hover:text-amber-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50"
+                  >
+                    <span>{contentView.isExpanded ? 'See less' : 'See more'}</span>
+                    <RefreshCw className={`h-3 w-3 ${contentView.isExpanded ? '-rotate-90' : 'rotate-90'} transition-transform`} />
+                  </button>
                 )}
               </>
             )}
@@ -660,6 +694,7 @@ interface GroupedChatMessageListProps {
   voiceSpeed?: number;
   onVoiceSpeedChange?: (speed: number) => void;
   isDark?: boolean;
+  streamingMessageId?: string;
 }
 
 export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
@@ -676,6 +711,7 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   voiceSpeed = 1,
   onVoiceSpeedChange,
   isDark = true,
+  streamingMessageId,
 }) => {
   const groups = groupMessagesBySender(messages, 5 * 60 * 1000);
 
@@ -720,6 +756,7 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
                     voiceSpeed={voiceSpeed}
                     onVoiceSpeedChange={onVoiceSpeedChange}
                     isDark={isDark}
+                    isStreaming={message.id === streamingMessageId}
                   />
                 ))}
               </div>
