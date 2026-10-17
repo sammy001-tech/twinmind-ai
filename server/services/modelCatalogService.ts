@@ -82,30 +82,56 @@ class ModelCatalogService {
     const key = this.normalizeKey(apiKey || process.env.GEMINI_API_KEY);
     if (!key) return { models: [], status: 'unconfigured', errorCode: 'PROVIDER_CREDENTIALS_MISSING' };
 
+    const models: LiveModelInfo[] = [];
+    let pageToken: string | undefined;
+    let pagesFetched = 0;
     try {
-      const client = new GoogleGenAI({ apiKey: key });
-      const pager = await client.models.list();
-      const models: LiveModelInfo[] = [];
-
-      for await (const model of pager) {
-        // Validate provider-returned capabilities because the SDK Model type omits this API metadata.
-        const rawModel = model as unknown as { name?: unknown; displayName?: unknown; description?: unknown; supportedGenerationMethods?: unknown };
-        const id = typeof rawModel.name === 'string' ? rawModel.name.replace(/^models\//, '') : '';
-        const methods = Array.isArray(rawModel.supportedGenerationMethods)
-          ? rawModel.supportedGenerationMethods.filter((item): item is string => typeof item === 'string')
-          : [];
-        if (!id || !methods.includes('generateContent')) continue;
-
-        models.push({
-          id,
-          displayName: model.displayName || id,
-          description: model.description,
-          supportedGenerationMethods: methods,
+      // Use Google's documented REST resource so provider capability metadata is inspected directly,
+      // rather than relying on an SDK object type that may omit supportedGenerationMethods.
+      do {
+        const params = new URLSearchParams();
+        if (pageToken) params.set('pageToken', pageToken);
+        const query = params.toString();
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models${query ? `?${query}` : ''}`, {
+          headers: { 'x-goog-api-key': key, Accept: 'application/json' },
         });
-      }
+        if (!response.ok) {
+          const failure = classifyGeminiCatalogueFailure({ status: response.status });
+          return { models: [], status: 'unavailable', ...failure };
+        }
+
+        const payload: unknown = await response.json();
+        if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { models?: unknown }).models)) {
+          return { models: [], status: 'unavailable', errorCode: 'GEMINI_CATALOG_RESPONSE_INVALID' };
+        }
+        const page = payload as {
+          models: Array<{ name?: unknown; displayName?: unknown; description?: unknown; supportedGenerationMethods?: unknown }>;
+          nextPageToken?: unknown;
+        };
+
+        for (const model of page.models) {
+          const id = typeof model.name === 'string' ? model.name.replace(/^models\//, '') : '';
+          const methods = Array.isArray(model.supportedGenerationMethods)
+            ? model.supportedGenerationMethods.filter((item): item is string => typeof item === 'string')
+            : [];
+          if (!id || !methods.includes('generateContent')) continue;
+          models.push({
+            id,
+            displayName: typeof model.displayName === 'string' && model.displayName ? model.displayName : id,
+            ...(typeof model.description === 'string' ? { description: model.description } : {}),
+            supportedGenerationMethods: methods,
+          });
+        }
+
+        pageToken = typeof page.nextPageToken === 'string' && page.nextPageToken ? page.nextPageToken : undefined;
+        pagesFetched += 1;
+        if (pageToken && pagesFetched >= 20) {
+          return { models: [], status: 'unavailable', errorCode: 'GEMINI_CATALOG_PAGINATION_LIMIT' };
+        }
+      } while (pageToken);
 
       if (!models.length) {
-        return { models, status: 'unavailable', errorCode: 'GEMINI_NO_CHAT_CAPABLE_MODELS' };
+        return { models: [], status: 'unavailable', errorCode: 'GEMINI_NO_CHAT_CAPABLE_MODELS' };
       }
       return { models, status: 'available' };
     } catch (err) {
