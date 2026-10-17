@@ -11,6 +11,8 @@ import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
 import { normalizeProviderCredential, resolveProviderCredential } from '../services/providerCredentialService.ts';
+import { loadChannelConversationHistory, persistChannelMessage, persistInboundChannelMessage } from '../services/channelConversationService.ts';
+import { splitChannelMessage } from '../services/channelMessagePolicy.ts';
 import {
   isTelegramMode,
   isValidTelegramWebhookUrl,
@@ -102,8 +104,6 @@ class TelegramBotManager {
   private conversationHistory: { role: 'user' | 'assistant'; content: string }[] = [];
   private commandRegistry: TelegramCommandHandler[] = [];
   private lastSyncedCommands: Array<{ command: string; description: string }> = [];
-  // Idempotency update tracking to prevent duplicate update processing
-  private processedUpdateIds = new Set<number>();
   // Cached verified bot identity from getMe
   private botUsername: string | null = null;
   private botFirstName: string | null = null;
@@ -244,11 +244,7 @@ class TelegramBotManager {
               .text('💾 Save as Note', `save_note_${encodeURIComponent(args.slice(0, 20))}`)
               .text('⚔️ Debate Topic', `debate_${encodeURIComponent(args.slice(0, 20))}`);
 
-            await ctx.reply(replyText, {
-              parse_mode: 'Markdown',
-              disable_web_page_preview: false,
-              reply_markup: keyboard,
-            });
+            await this.replyLongText(ctx, replyText, { reply_markup: keyboard });
           } catch (err: unknown) {
             console.error('Telegram search error:', err);
             await ctx.reply(`❌ *Search Failed:* ${err instanceof Error ? err.message : String(err)}`, {
@@ -302,7 +298,7 @@ class TelegramBotManager {
               `⚖️ *3 & 4. Critic Synthesis & Verdict:*\n${res.synthesis}\n\n` +
               `💾 *Persistence:* ${res.persistedToDb ? `✅ Saved to Neon DB (ID #${res.decisionId})` : '⚠️ DB offline'}`;
 
-            await ctx.reply(debateText, { parse_mode: 'Markdown' });
+            await this.replyLongText(ctx, debateText);
           } catch (err: unknown) {
             console.error('Debate error:', err);
             await ctx.reply(`❌ *Debate Failed:* ${err instanceof Error ? err.message : String(err)}`, {
@@ -345,7 +341,7 @@ class TelegramBotManager {
             summaryText += `• Revenue & External Metrics: *None recorded in database* (zero fabrication).\n`;
             summaryText += `• Open Tasks: *Tracking active conversation context.*\n`;
 
-            await ctx.reply(summaryText, { parse_mode: 'Markdown' });
+            await this.replyLongText(ctx, summaryText);
           } catch (err: unknown) {
             await ctx.reply(`❌ *Summary Generation Error:* ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -403,7 +399,7 @@ class TelegramBotManager {
               .text('💾 Confirmed in Vault', `save_decision_${a.confidenceLevel || 'Med'}`)
               .text('⚔️ Multi-Agent Debate', `debate_${encodeURIComponent(args.slice(0, 20))}`);
 
-            await ctx.reply(replyMessage, { parse_mode: 'Markdown', reply_markup: keyboard });
+            await this.replyLongText(ctx, replyMessage, { reply_markup: keyboard });
           } catch (err: unknown) {
             console.error('Decision command error:', err);
             await ctx.reply(`❌ Could not complete decision breakdown: ${err instanceof Error ? err.message : String(err)}`);
@@ -870,24 +866,44 @@ class TelegramBotManager {
   }
 
   private setupHandlers(bot: Bot) {
-    // Middleware 1: Deduplication Guard (Idempotency)
+    // Telegram update IDs are durably claimed in PostgreSQL, so process restarts and
+    // horizontally scaled instances share one idempotency boundary.
     bot.use(async (ctx, next) => {
       const updateId = ctx.update?.update_id;
-      if (updateId !== undefined) {
-        if (this.processedUpdateIds.has(updateId)) {
-          this.log('info', `Dropped duplicate update_id: ${updateId}`);
-          return;
-        }
-        this.processedUpdateIds.add(updateId);
-        if (this.processedUpdateIds.size > 1500) {
-          const iter = this.processedUpdateIds.values();
-          for (let i = 0; i < 400; i++) {
-            const val = iter.next().value;
-            if (val !== undefined) this.processedUpdateIds.delete(val);
-          }
-        }
+      if (updateId === undefined) {
+        await next();
+        return;
       }
-      await next();
+
+      const claimed = await neonDb.claimTelegramUpdate(updateId);
+      if (claimed === null) {
+        throw new Error('PERSISTENCE_UNAVAILABLE: Telegram webhook update could not be durably claimed');
+      }
+      if (!claimed) {
+        this.log('info', 'Dropped duplicate Telegram update already recorded in durable storage.');
+        return;
+      }
+
+      try {
+        await next();
+        const inboundKey = (ctx as any).twinmindInboundKey;
+        if (typeof inboundKey === 'string') {
+          await neonDb.updateInboundChannelProcessingStatus('telegram', inboundKey, 'completed');
+        }
+        const finished = await neonDb.finishTelegramUpdate(updateId, 'completed');
+        if (!finished) {
+          this.log('error', 'Telegram update handler returned but its durable processing state could not be finalized.');
+        }
+      } catch (error: unknown) {
+        const rawCode = error instanceof Error ? error.message : 'TELEGRAM_UPDATE_FAILED';
+        const errorCode = rawCode.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'TELEGRAM_UPDATE_FAILED';
+        const inboundKey = (ctx as any).twinmindInboundKey;
+        if (typeof inboundKey === 'string') {
+          await neonDb.updateInboundChannelProcessingStatus('telegram', inboundKey, 'failed', errorCode);
+        }
+        await neonDb.finishTelegramUpdate(updateId, 'failed', errorCode);
+        throw error;
+      }
     });
 
     // Middleware 2: Owner Guard & Seamless Auto-Pairing
@@ -925,6 +941,44 @@ class TelegramBotManager {
           parse_mode: 'Markdown',
         });
         return;
+      }
+
+      await this.loadConversationHistory();
+
+      const message = ctx.message as any;
+      if (message) {
+        const caption = typeof message.caption === 'string' ? message.caption.trim() : '';
+        let inboundText = typeof message.text === 'string' ? message.text.trim() : '';
+        let isVoiceMessage = false;
+
+        if (!inboundText && Array.isArray(message.photo)) {
+          inboundText = caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]';
+        } else if (!inboundText && message.document) {
+          const fileName = typeof message.document.file_name === 'string' ? message.document.file_name : 'file';
+          inboundText = caption ? `[Uploaded Document ${fileName}]: ${caption}` : `[Uploaded Document ${fileName}]`;
+        } else if (!inboundText && message.voice) {
+          inboundText = '[Voice Note Audio Sent]';
+          isVoiceMessage = true;
+        } else if (!inboundText && caption) {
+          inboundText = caption;
+        }
+
+        if (inboundText) {
+          const updateId = ctx.update?.update_id;
+          if (typeof updateId !== 'number' || !Number.isSafeInteger(updateId)) {
+            throw new Error('TELEGRAM_UPDATE_ID_MISSING: inbound message cannot be saved idempotently');
+          }
+          const inboundKey = `telegram:${this.config.ownerId}:${updateId}`;
+          await this.recordSyncedMessage(
+            'user',
+            inboundText,
+            isVoiceMessage,
+            undefined,
+            inboundKey,
+          );
+          (ctx as any).twinmindInboundKey = inboundKey;
+          if (this.conversationHistory.length > 20) this.conversationHistory = this.conversationHistory.slice(-20);
+        }
       }
 
       await next();
@@ -975,8 +1029,21 @@ class TelegramBotManager {
           }
         } else {
           // Trigger twin agent turn dynamically with payload
-          await ctx.reply(`👉 *Executing:* ${actionItem.payload}`, { parse_mode: 'Markdown' });
+          await this.replyLongText(ctx, `Executing: ${actionItem.payload}`);
           await ctx.replyWithChatAction('typing');
+
+          const callbackUpdateId = ctx.update?.update_id;
+          if (typeof callbackUpdateId === 'number' && Number.isSafeInteger(callbackUpdateId)) {
+            const inboundKey = `telegram:${this.config.ownerId}:${callbackUpdateId}`;
+            await this.recordSyncedMessage(
+              'user',
+              actionItem.payload,
+              false,
+              undefined,
+              inboundKey,
+            );
+            (ctx as any).twinmindInboundKey = inboundKey;
+          }
 
           const turnResult = await twinAgentService.executeTurn({
             userPrompt: actionItem.payload,
@@ -989,7 +1056,6 @@ class TelegramBotManager {
 
           this.conversationHistory.push({ role: 'user', content: actionItem.payload });
           this.conversationHistory.push({ role: 'assistant', content: turnResult.reply });
-          this.recordSyncedMessage('assistant', turnResult.reply);
 
           // Render follow-up dynamic buttons if suggested
           let dynamicKeyboard: InlineKeyboard | undefined;
@@ -1006,11 +1072,7 @@ class TelegramBotManager {
             }
           }
 
-          try {
-            await ctx.reply(turnResult.reply, { parse_mode: 'Markdown', reply_markup: dynamicKeyboard });
-          } catch {
-            await ctx.reply(turnResult.reply, { reply_markup: dynamicKeyboard });
-          }
+          await this.replyLongText(ctx, turnResult.reply, { reply_markup: dynamicKeyboard });
         }
       } else if (data.startsWith('save_decision_')) {
         await ctx.reply('💾 Decision record confirmed in Neon database.');
@@ -1044,8 +1106,7 @@ class TelegramBotManager {
       const text = ctx.message.text.trim();
       if (text.startsWith('/')) return;
 
-      this.log('chat', `Owner message: "${text.slice(0, 60)}..."`);
-      this.recordSyncedMessage('user', text);
+      this.log('chat', 'Processing an authorized Telegram message.');
 
       const lowerText = text.toLowerCase();
       const isVoiceRequest =
@@ -1072,14 +1133,13 @@ class TelegramBotManager {
         if (this.conversationHistory.length > 20) {
           this.conversationHistory = this.conversationHistory.slice(-20);
         }
-        this.recordSyncedMessage('assistant', responseText, isVoiceRequest);
-
         if (isVoiceRequest) {
           const audioBuffer = await this.generateVoiceBuffer(responseText);
           if (audioBuffer) {
             await ctx.replyWithVoice(new InputFile(audioBuffer, 'olalekan_voice.wav'), {
               caption: responseText.length > 200 ? `${responseText.slice(0, 197)}...` : responseText,
             });
+            await this.recordSyncedMessage('assistant', responseText, true, 'accepted');
             return;
           }
         }
@@ -1100,15 +1160,7 @@ class TelegramBotManager {
           }
         }
 
-        try {
-          await ctx.reply(responseText, {
-            parse_mode: 'Markdown',
-            reply_markup: keyboard,
-          });
-        } catch {
-          // Fallback if raw text contains unmatched markdown formatting
-          await ctx.reply(responseText, { reply_markup: keyboard });
-        }
+        await this.replyLongText(ctx, responseText, { reply_markup: keyboard });
 
         // Deliver generated files (PDFs, Excel .xlsx, CSV, Markdown) directly to Telegram chat
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
@@ -1159,13 +1211,7 @@ class TelegramBotManager {
         const responseText = turnResult.reply;
         this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]' });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
-        this.recordSyncedMessage('assistant', responseText);
-
-        try {
-          await ctx.reply(responseText, { parse_mode: 'Markdown' });
-        } catch {
-          await ctx.reply(responseText);
-        }
+        await this.replyLongText(ctx, responseText);
 
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
       } catch (err: unknown) {
@@ -1230,15 +1276,9 @@ class TelegramBotManager {
         }
 
         const responseText = turnResult.reply;
-        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Document ${doc.file_name}]: ${caption}` : `[Uploaded Document ${doc.file_name}]` });
+        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Document ${doc.file_name || 'file'}]: ${caption}` : `[Uploaded Document ${doc.file_name || 'file'}]` });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
-        this.recordSyncedMessage('assistant', responseText);
-
-        try {
-          await ctx.reply(responseText, { parse_mode: 'Markdown' });
-        } catch {
-          await ctx.reply(responseText);
-        }
+        await this.replyLongText(ctx, responseText);
 
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
       } catch (err: unknown) {
@@ -1280,13 +1320,7 @@ class TelegramBotManager {
         const reply = turnResult.reply;
         this.conversationHistory.push({ role: 'user', content: '[Voice Note Audio Sent]' });
         this.conversationHistory.push({ role: 'assistant', content: reply });
-        this.recordSyncedMessage('assistant', reply, true);
-
-        try {
-          await ctx.reply(reply, { parse_mode: 'Markdown' });
-        } catch {
-          await ctx.reply(reply);
-        }
+        await this.replyLongText(ctx, reply);
 
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
 
@@ -1338,7 +1372,40 @@ class TelegramBotManager {
     }
   }
 
-  private recordSyncedMessage(sender: 'user' | 'assistant', text: string, isVoice = false) {
+  private async recordSyncedMessage(
+    sender: 'user' | 'assistant',
+    text: string,
+    isVoice = false,
+    deliveryStatus?: 'accepted',
+    providerMessageId?: string,
+  ): Promise<void> {
+    if (this.config.ownerId === null) {
+      throw new Error('TELEGRAM_OWNER_ID_REQUIRED: cannot persist an unpaired Telegram conversation');
+    }
+
+    const messageInput = {
+      channel: 'telegram' as const,
+      externalIdentity: this.config.ownerId,
+      role: sender,
+      content: text,
+      ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
+      ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
+      metadata: {
+        isVoice,
+        source: 'telegram',
+        ...(sender === 'user' && providerMessageId ? { processingStatus: 'processing' } : {}),
+      },
+    };
+
+    if (sender === 'user' && providerMessageId) {
+      await persistInboundChannelMessage(messageInput, providerMessageId);
+    } else {
+      await persistChannelMessage({
+        ...messageInput,
+        ...(deliveryStatus ? { deliveryStatus } : {}),
+      });
+    }
+
     this.syncedMessages.unshift({
       id: `tg-${randomUUID()}`,
       sender,
@@ -1347,21 +1414,72 @@ class TelegramBotManager {
       isVoice,
     });
     if (this.syncedMessages.length > 50) this.syncedMessages.pop();
+  }
 
-    void neonDb.saveMessage({
+  private async loadConversationHistory(): Promise<void> {
+    if (this.config.ownerId === null) {
+      this.conversationHistory = [];
+      return;
+    }
+    this.conversationHistory = await loadChannelConversationHistory('telegram', this.config.ownerId);
+  }
+
+  private async replyLongText(ctx: any, text: string, options: Record<string, unknown> = {}): Promise<void> {
+    const chunks = splitChannelMessage(text, 'telegram');
+    if (chunks.length === 0) throw new Error('TELEGRAM_OUTPUT_EMPTY: no usable reply text was generated');
+    if (this.config.ownerId === null) throw new Error('TELEGRAM_OWNER_ID_REQUIRED: cannot persist an unpaired Telegram reply');
+
+    // Persist before the provider side effect so failed/partial Telegram sends
+    // have a durable record. Bot API acceptance is not evidence that the user read it.
+    const pending = await persistChannelMessage({
       channel: 'telegram',
-      role: sender === 'assistant' ? 'assistant' : 'user',
+      externalIdentity: this.config.ownerId,
+      role: 'assistant',
       content: text,
-      provider: this.config.activeProvider,
-      model: this.config.activeModel,
-      metadata: { isVoice, ownerId: this.config.ownerId, ownerUsername: this.config.ownerUsername },
-    }).then((messageId) => {
-      if (messageId === undefined) {
-        console.warn('[TelegramBot] Conversation message was not persisted to the database.');
-      }
-    }).catch((error: unknown) => {
-      console.warn('[TelegramBot] Conversation message persistence failed:', error instanceof Error ? error.message : 'unknown error');
+      ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
+      ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
+      deliveryStatus: 'pending',
+      metadata: { isVoice: false, source: 'telegram' },
     });
+
+    const safeOptions: Record<string, unknown> = { ...options };
+    delete safeOptions.parse_mode;
+    const replyMarkup = safeOptions.reply_markup;
+    delete safeOptions.reply_markup;
+
+    try {
+      for (let index = 0; index < chunks.length; index++) {
+        const isLastChunk = index === chunks.length - 1;
+        await ctx.reply(chunks[index], {
+          ...(isLastChunk ? safeOptions : {}),
+          ...(isLastChunk && replyMarkup ? { reply_markup: replyMarkup } : {}),
+        });
+      }
+
+      const statusPersisted = await neonDb.updateMessageMetadata(pending.messageId, {
+        deliveryStatus: 'accepted',
+        providerStatus: 'accepted',
+      });
+      if (!statusPersisted) {
+        this.log('error', 'Telegram accepted a reply but its final provider status could not be durably saved.');
+      }
+
+      this.syncedMessages.unshift({
+        id: `tg-${randomUUID()}`,
+        sender: 'assistant',
+        text,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      if (this.syncedMessages.length > 50) this.syncedMessages.pop();
+    } catch (error: unknown) {
+      const rawCode = error instanceof Error ? error.message : 'TELEGRAM_DELIVERY_FAILED';
+      const errorCode = rawCode.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'TELEGRAM_DELIVERY_FAILED';
+      await neonDb.updateMessageMetadata(pending.messageId, {
+        deliveryStatus: 'error',
+        deliveryErrorCode: errorCode,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -1438,17 +1556,56 @@ class TelegramBotManager {
    * Send a proactive alert message to the paired owner.
    */
   public async sendProactiveMessage(text: string): Promise<boolean> {
-    if (!this.bot || !this.isRunning || !this.config.ownerId) {
+    if (!this.bot || !this.isRunning || this.config.ownerId === null) {
       console.warn('[TelegramBot] Cannot send proactive message: bot not running or owner not paired.');
       return false;
     }
 
+    const chunks = splitChannelMessage(text, 'telegram');
+    if (chunks.length === 0) return false;
+
+    let pending: { threadId: string; messageId: number } | undefined;
     try {
-      await this.bot.api.sendMessage(this.config.ownerId, text, { parse_mode: 'Markdown' });
-      this.log('info', `Proactive message sent to owner ID ${this.config.ownerId}`);
+      pending = await persistChannelMessage({
+        channel: 'telegram',
+        externalIdentity: this.config.ownerId,
+        role: 'assistant',
+        content: text,
+        ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
+        ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
+        deliveryStatus: 'pending',
+        metadata: { source: 'telegram', isProactive: true },
+      });
+
+      for (const chunk of chunks) {
+        await this.bot.api.sendMessage(this.config.ownerId, chunk);
+      }
+
+      const persisted = await neonDb.updateMessageMetadata(pending.messageId, {
+        deliveryStatus: 'accepted',
+        providerStatus: 'accepted',
+      });
+      if (!persisted) this.log('error', 'Telegram accepted a proactive message but its final status could not be saved.');
+
+      this.syncedMessages.unshift({
+        id: `tg-${randomUUID()}`,
+        sender: 'assistant',
+        text,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      if (this.syncedMessages.length > 50) this.syncedMessages.pop();
+      this.log('info', 'Proactive Telegram message accepted by Telegram.');
       return true;
     } catch (err) {
-      console.error('[TelegramBot] Failed to send proactive message:', err);
+      if (pending) {
+        const rawCode = err instanceof Error ? err.message : 'TELEGRAM_DELIVERY_FAILED';
+        const errorCode = rawCode.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'TELEGRAM_DELIVERY_FAILED';
+        await neonDb.updateMessageMetadata(pending.messageId, {
+          deliveryStatus: 'error',
+          deliveryErrorCode: errorCode,
+        });
+      }
+      console.error('[TelegramBot] Failed to send proactive Telegram message:', err instanceof Error ? err.message : 'provider request failed');
       return false;
     }
   }

@@ -9,6 +9,8 @@ import {
   Copy,
   Check,
   CheckCheck,
+  Clock3,
+  AlertCircle,
   Brain,
   Edit2,
   Trash2,
@@ -459,19 +461,43 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
-        {/* WhatsApp Checkmark Indicator */}
-        {channel === 'whatsapp' && isUser && isLastInGroup && !isEditing && (
-          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-[#aebac1]' : 'text-[#52656f]'}`}>
-            <span>{message.timestamp}</span>
-            <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-[#53bdeb]' : 'text-[#128c7e]'}`} />
+        {isUser && message.processingStatus === 'processing' && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} role="status" aria-live="polite">
+            <span>Processing</span>
+            <Loader2 className="inline h-3.5 w-3.5 animate-spin" aria-label="Processing" />
+          </div>
+        )}
+        {isUser && message.processingStatus === 'failed' && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
+          <div className="mt-1 flex items-center justify-end gap-1 text-[11px] text-red-500" role="status" aria-live="polite">
+            <span>Processing failed</span>
+            <AlertCircle className="inline h-3.5 w-3.5" aria-label="Processing failed" />
           </div>
         )}
 
-        {/* Telegram Checkmark Indicator */}
-        {channel === 'telegram' && isUser && isLastInGroup && !isEditing && (
-          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-sky-300/80' : 'text-slate-500'}`}>
+        {/* Display only explicit provider-backed state; user messages have no inferred ticks. */}
+        {!isUser && message.status && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
             <span>{message.timestamp}</span>
-            <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-sky-400' : 'text-sky-700'}`} />
+            <span>{({
+              pending: 'Pending',
+              accepted: 'Accepted by provider',
+              queued: 'Queued',
+              sending: 'Sending',
+              sent: 'Sent',
+              delivered: 'Delivered',
+              read: 'Read',
+              undelivered: 'Undelivered',
+              error: 'Failed',
+            } as const)[message.status]}</span>
+            {message.status === 'delivered' || message.status === 'read' ? (
+              <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-[#53bdeb]' : 'text-[#128c7e]'}`} aria-label={message.status === 'read' ? 'Read' : 'Delivered'} />
+            ) : message.status === 'sent' ? (
+              <Check className="inline h-3.5 w-3.5" aria-label="Sent" />
+            ) : message.status === 'pending' || message.status === 'queued' || message.status === 'sending' ? (
+              <Clock3 className="inline h-3.5 w-3.5" aria-label={message.status} />
+            ) : message.status === 'error' || message.status === 'undelivered' ? (
+              <AlertCircle className="inline h-3.5 w-3.5 text-red-500" aria-label={message.status === 'error' ? 'Failed' : 'Undelivered'} />
+            ) : null}
           </div>
         )}
 

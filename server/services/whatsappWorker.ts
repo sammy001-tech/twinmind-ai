@@ -7,6 +7,7 @@ import { twinAgentService } from './twinAgentService.ts';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
 import { artifactAccessService } from './artifactAccessService.ts';
+import { loadChannelConversationHistory, persistInboundChannelMessage } from './channelConversationService.ts';
 
 export class WhatsAppWorker {
   private isRunning = false;
@@ -34,7 +35,7 @@ export class WhatsAppWorker {
       job = await jobQueueService.claimNextJob(this.workerLeaseId);
       if (!job) return;
 
-      console.log(`[WhatsAppWorker] Processing job ${job.jobId} for message from ${job.senderPhone}`);
+      console.log(`[WhatsAppWorker] Processing durable inbound job ${job.jobId}.`);
 
       // Start 15s heartbeat timer
       const heartbeatInterval = setInterval(() => {
@@ -43,6 +44,8 @@ export class WhatsAppWorker {
 
       try {
         await this.executeJobPayload(job);
+        const processingFinalized = await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'completed');
+        if (!processingFinalized) throw new Error('PERSISTENCE_FAILED: WhatsApp inbound processing completion was not durably recorded');
         const completed = await jobQueueService.completeJob(job.jobId, this.workerLeaseId);
         if (!completed) throw new Error('PERSISTENCE_FAILED: WhatsApp job completion was not durably recorded');
       } finally {
@@ -50,8 +53,11 @@ export class WhatsAppWorker {
       }
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[WhatsAppWorker] Error processing job ${job?.jobId || 'unknown'}:`, errorMsg);
+      const safeLoggedError = errorMsg.replace(/\\+?\\d[\\d\\s().-]{5,}\\d/g, '[redacted contact number]');
+      console.error(`[WhatsAppWorker] Error processing job ${job?.jobId || 'unknown'}:`, safeLoggedError);
       if (job) {
+        const safeErrorCode = errorMsg.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'WHATSAPP_PROCESSING_FAILED';
+        await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'failed', safeErrorCode);
         await jobQueueService.failJob(job.jobId, this.workerLeaseId, errorMsg);
         let userFacingError = `⚠️ TwinMind encountered an issue: ${errorMsg}`;
         if (errorMsg.includes('401') || errorMsg.includes('API_KEY_INVALID') || errorMsg.includes('unauthorized') || errorMsg.includes('API key')) {
@@ -60,6 +66,14 @@ export class WhatsAppWorker {
         await twilioService.sendWhatsAppMessage(job.senderPhone, userFacingError);
       }
     }
+  }
+
+  private async sendReply(to: string, bodyText?: string, mediaUrl?: string | string[]) {
+    const result = await twilioService.sendWhatsAppMessage(to, bodyText, mediaUrl);
+    if (!result.success) {
+      throw new Error(result.error || 'WHATSAPP_DELIVERY_FAILED: provider rejected the outbound message');
+    }
+    return result;
   }
 
   private async executeJobPayload(job: JobRecord) {
@@ -71,6 +85,26 @@ export class WhatsAppWorker {
     let incomingAudioData: { mimeType: string; data: string; name?: string } | undefined;
     const mediaUrl0 = job.payload.MediaUrl0 || job.payload.mediaUrl0;
     const mediaContentType0 = job.payload.MediaContentType0 || job.payload.mediaContentType0 || 'image/jpeg';
+
+    // MessageSid is supplied by Twilio and backed by a unique database constraint.
+    // That idempotency key also guards inbound conversation persistence if a worker
+    // lease is recovered after an interrupted processing attempt.
+    const conversationHistory = await loadChannelConversationHistory('whatsapp', senderPhone);
+    await persistInboundChannelMessage({
+      channel: 'whatsapp',
+      externalIdentity: senderPhone,
+      role: 'user',
+      content: userMessage || (mediaUrl0 ? '[Media attachment]' : ''),
+      metadata: {
+        source: 'twilio',
+        hasMedia: Boolean(mediaUrl0),
+        processingStatus: 'processing',
+      },
+    }, job.messageSid);
+    const processingStarted = await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'processing');
+    if (!processingStarted) {
+      throw new Error('PERSISTENCE_FAILED: WhatsApp inbound processing state could not be recorded');
+    }
 
     if (mediaUrl0) {
       try {
@@ -110,13 +144,13 @@ export class WhatsAppWorker {
     if (pendingConfirmation) {
       if (confirmationService.isAffirmative(userMessage)) {
         const commitRes = await confirmationService.commitConfirmation(pendingConfirmation.actionId, senderPhone);
-        await twilioService.sendWhatsAppMessage(senderPhone, commitRes.replyMessage);
+        await this.sendReply(senderPhone, commitRes.replyMessage);
         return;
       }
 
       if (confirmationService.isNegative(userMessage)) {
         const cancelRes = confirmationService.cancelConfirmation(senderPhone);
-        await twilioService.sendWhatsAppMessage(senderPhone, cancelRes);
+        await this.sendReply(senderPhone, cancelRes);
         return;
       }
     }
@@ -144,7 +178,7 @@ export class WhatsAppWorker {
         if (!prompt) {
           throw new Error('AI_OUTPUT_SCHEMA_INVALID: clarification is required but the model did not provide usable text');
         }
-        await twilioService.sendWhatsAppMessage(senderPhone, `🤔 ${prompt}`);
+        await this.sendReply(senderPhone, `🤔 ${prompt}`);
         return;
       }
 
@@ -152,7 +186,7 @@ export class WhatsAppWorker {
       switch (classification.intent) {
         case 'DEBATE_REQUEST': {
           const topic = classification.extractedParams.debateTopic || userMessage;
-          await twilioService.sendWhatsAppMessage(
+          await this.sendReply(
             senderPhone,
             `🥊 *TwinMind Swarm Debate Initiated*\n\nTopic: "${topic}"\nExecuting multi-agent evidence gathering and stress-testing. Stand by for the Chief Arbiter verdict...`
           );
@@ -160,13 +194,13 @@ export class WhatsAppWorker {
           const debateRes = await twinAgentService.executeMultiAgentDebate(topic, 'whatsapp', activeProvider, activeModel);
 
           if (debateRes.error) {
-            await twilioService.sendWhatsAppMessage(senderPhone, `⚠️ Debate failed: ${debateRes.error}`);
+            await this.sendReply(senderPhone, `⚠️ Debate failed: ${debateRes.error}`);
             return;
           }
 
           const synthesis = String(debateRes.synthesis || debateRes.recommendation || 'Debate complete.');
           const replyText = `🎯 *CHIEF ARBITER DEBATE VERDICT*\n\n${synthesis}\n\n_Decision recorded in Knowledge Vault (#${debateRes.decisionId || 'saved'})_`;
-          await twilioService.sendWhatsAppMessage(senderPhone, replyText);
+          await this.sendReply(senderPhone, replyText);
           return;
         }
 
@@ -185,7 +219,7 @@ export class WhatsAppWorker {
           }
 
           if (!targetDecisionId) {
-            await twilioService.sendWhatsAppMessage(
+            await this.sendReply(
               senderPhone,
               `❓ Which decision outcome are you logging? Please specify the decision ID (e.g., "Outcome for decision #3: success").`
             );
@@ -198,7 +232,7 @@ export class WhatsAppWorker {
             reportedStatus,
             reportedNotes
           );
-          await twilioService.sendWhatsAppMessage(senderPhone, promptMessage);
+          await this.sendReply(senderPhone, promptMessage);
           return;
         }
 
@@ -210,21 +244,21 @@ export class WhatsAppWorker {
             const decision = await neonDb.getDecisionById(targetId);
             if (decision) {
               const reply = `📌 *Decision #${decision.id}: ${decision.title}*\n\n*Recommendation*: ${decision.recommendation || 'None'}\n*Confidence*: ${decision.confidence}%\n*Created*: ${decision.created_at?.slice(0, 10) || 'Recent'}`;
-              await twilioService.sendWhatsAppMessage(senderPhone, reply);
+              await this.sendReply(senderPhone, reply);
               return;
             }
           }
 
           const recentDecisions = await neonDb.getDecisions(3);
           if (recentDecisions.length === 0) {
-            await twilioService.sendWhatsAppMessage(senderPhone, `📂 No stored decisions found in your Knowledge Vault.`);
+            await this.sendReply(senderPhone, `📂 No stored decisions found in your Knowledge Vault.`);
             return;
           }
 
           const listText = recentDecisions
             .map((d) => `• *#${d.id}*: ${d.title} (${d.confidence}% conf)`)
             .join('\n');
-          await twilioService.sendWhatsAppMessage(
+          await this.sendReply(
             senderPhone,
             `📚 *Recent Strategic Decisions*\n\n${listText}\n\nReply with a decision ID for full details!`
           );
@@ -237,7 +271,7 @@ export class WhatsAppWorker {
           const notesCount = summary.totalIndexedKnowledgeNotes || 0;
 
           const reply = `📊 *TwinMind System Status*\n\n• *Recorded Decisions*: ${count}\n• *Vault Notes*: ${notesCount}\n• *Active Provider*: ${activeProvider.toUpperCase()} (${activeModel})\n\nHow can I assist your decision-making today?`;
-          await twilioService.sendWhatsAppMessage(senderPhone, reply);
+          await this.sendReply(senderPhone, reply);
           return;
         }
       }
@@ -251,11 +285,12 @@ export class WhatsAppWorker {
       imageData: incomingImageData,
       audioData: incomingAudioData,
       channel: 'whatsapp',
+      conversationHistory,
     });
 
     const reply = typeof turnResult?.reply === 'string' ? turnResult.reply.trim() : '';
     if (!reply) throw new Error('AI_OUTPUT_EMPTY: provider returned no usable reply');
-    const delivered = await twilioService.sendWhatsAppMessage(senderPhone, reply);
+    const delivered = await this.sendReply(senderPhone, reply);
     if (!delivered.success) throw new Error(`DELIVERY_FAILED: ${delivered.error || 'WhatsApp response was not accepted by Twilio'}`);
 
     // Deliver generated artifacts (PDF, Excel .xlsx, CSV, Markdown) directly via WhatsApp mediaUrl
@@ -276,7 +311,7 @@ export class WhatsAppWorker {
             }
             const signedPath = artifactAccessService.createSignedPath(fileName);
             const mediaUrl = `${parsedBaseUrl.origin}${signedPath}`;
-            const artifactDelivery = await twilioService.sendWhatsAppMessage(
+            const artifactDelivery = await this.sendReply(
               senderPhone,
               `📄 *Generated Document*: ${fileName}`,
               mediaUrl

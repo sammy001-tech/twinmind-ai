@@ -386,6 +386,22 @@ class NeonDatabaseService {
           updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS telegram_updates (
+          update_id BIGINT PRIMARY KEY,
+          status VARCHAR(20) NOT NULL DEFAULT 'processing',
+          error_code VARCHAR(128),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS channel_delivery_receipts (
+          provider_sid VARCHAR(128) PRIMARY KEY,
+          channel VARCHAR(32) NOT NULL,
+          status VARCHAR(32) NOT NULL,
+          error_code VARCHAR(64),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS persona_memories (
           id SERIAL PRIMARY KEY,
           category VARCHAR(32) NOT NULL, -- 'preference', 'opinion', 'correction', 'feedback'
@@ -415,6 +431,9 @@ class NeonDatabaseService {
         CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
         CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
         CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_provider_inbound_event
+          ON conversations(channel, (metadata->>'inboundMessageSid'))
+          WHERE metadata ? 'inboundMessageSid';
         CREATE INDEX IF NOT EXISTS idx_chat_threads_updated ON chat_threads(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_experiments_decision ON decision_experiments(decision_id);
@@ -832,6 +851,49 @@ class NeonDatabaseService {
     }
   }
 
+  public async saveInboundChannelMessage(
+    msg: ConversationMessage,
+    providerMessageId: string,
+  ): Promise<{ id: number; isDuplicate: boolean } | undefined> {
+    if (!this.pool || !this.isConnected || !providerMessageId.trim()) return undefined;
+    const metadata = { ...(msg.metadata || {}), inboundMessageSid: providerMessageId.trim() };
+    try {
+      const inserted = await this.pool.query(
+        `INSERT INTO conversations (session_id, channel, role, content, provider, model, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+         ON CONFLICT (channel, (metadata->>'inboundMessageSid'))
+           WHERE metadata ? 'inboundMessageSid'
+         DO NOTHING
+         RETURNING id`,
+        [
+          msg.session_id || 'default',
+          msg.channel,
+          msg.role,
+          msg.content,
+          msg.provider || null,
+          msg.model || null,
+          JSON.stringify(metadata),
+        ]
+      );
+      if ((inserted.rowCount ?? 0) > 0 && inserted.rows[0]?.id !== undefined) {
+        return { id: Number(inserted.rows[0].id), isDuplicate: false };
+      }
+
+      const existing = await this.pool.query(
+        `SELECT id FROM conversations
+         WHERE channel = $1 AND metadata->>'inboundMessageSid' = $2
+         LIMIT 1`,
+        [msg.channel, providerMessageId.trim()]
+      );
+      const id = existing.rows[0]?.id;
+      if (id === undefined) return undefined;
+      return { id: Number(id), isDuplicate: true };
+    } catch (err) {
+      console.error('[NeonDB] Failed to persist idempotent inbound channel message:', err);
+      return undefined;
+    }
+  }
+
   public async saveMessage(msg: ConversationMessage): Promise<number | undefined> {
     if (!this.pool || !this.isConnected) return undefined;
 
@@ -884,7 +946,11 @@ class NeonDatabaseService {
         content: r.content,
         provider: r.provider,
         model: r.model,
-        metadata: r.metadata,
+        metadata: {
+          ...(r.metadata || {}),
+          ...(r.delivery_status ? { deliveryStatus: r.delivery_status } : {}),
+          ...(r.delivery_error_code ? { deliveryErrorCode: r.delivery_error_code } : {}),
+        },
         created_at: r.created_at,
       }));
     } catch (err) {
@@ -931,6 +997,164 @@ class NeonDatabaseService {
     }
 
     return [];
+  }
+
+  public async ensureThread(thread: { id: string; title: string; channel: string }): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      await this.pool.query(
+        `INSERT INTO chat_threads (id, title, channel, updated_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
+        [thread.id, thread.title.slice(0, 48), thread.channel]
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error ensuring channel thread:', err);
+      return false;
+    }
+  }
+
+  public async updateMessageMetadata(messageId: number, patch: Record<string, unknown>): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const result = await this.pool.query(
+        `UPDATE conversations
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb
+         WHERE id = $1
+         RETURNING id`,
+        [messageId, JSON.stringify(patch)]
+      );
+      return (result.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating conversation message metadata:', err);
+      return false;
+    }
+  }
+
+  public async updateInboundChannelProcessingStatus(
+    channel: 'telegram' | 'whatsapp',
+    providerMessageId: string,
+    status: 'processing' | 'completed' | 'failed',
+    errorCode?: string,
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !providerMessageId.trim()) return false;
+    try {
+      const result = await this.pool.query(
+        `UPDATE conversations
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+           'processingStatus', $3::text,
+           'processingErrorCode', COALESCE($4::text, ''),
+           'processingUpdatedAt', CURRENT_TIMESTAMP::text
+         )
+         WHERE channel = $1 AND metadata->>'inboundMessageSid' = $2
+         RETURNING id`,
+        [channel, providerMessageId.trim(), status, errorCode || null]
+      );
+      return (result.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating inbound channel processing state:', err);
+      return false;
+    }
+  }
+
+  public async recordChannelDeliveryStatus(providerSid: string, status: string, errorCode?: string): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !providerSid.trim() || !status.trim()) return false;
+    try {
+      await this.pool.query(
+        `INSERT INTO channel_delivery_receipts (provider_sid, channel, status, error_code, updated_at)
+         VALUES ($1, 'whatsapp', $2, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (provider_sid) DO UPDATE SET
+           status = CASE
+             WHEN channel_delivery_receipts.status = 'read' THEN 'read'
+             WHEN channel_delivery_receipts.status IN ('failed', 'undelivered', 'canceled')
+               THEN channel_delivery_receipts.status
+             WHEN EXCLUDED.status = 'read' THEN 'read'
+             WHEN EXCLUDED.status = 'delivered' THEN 'delivered'
+             WHEN channel_delivery_receipts.status = 'delivered' THEN 'delivered'
+             ELSE EXCLUDED.status
+           END,
+           error_code = COALESCE(EXCLUDED.error_code, channel_delivery_receipts.error_code),
+           updated_at = CURRENT_TIMESTAMP`,
+        [providerSid.trim(), status.trim(), errorCode || null]
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error recording provider delivery status:', err);
+      return false;
+    }
+  }
+
+  public async claimTelegramUpdate(updateId: number): Promise<boolean | null> {
+    if (!this.pool || !this.isConnected || !Number.isSafeInteger(updateId) || updateId < 0) return null;
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO telegram_updates (update_id, status)
+         VALUES ($1, 'processing')
+         ON CONFLICT (update_id) DO NOTHING
+         RETURNING update_id`,
+        [updateId]
+      );
+      if ((result.rowCount ?? 0) > 0 && updateId % 100 === 0) {
+        await this.pool.query(
+          "DELETE FROM telegram_updates WHERE updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'"
+        );
+      }
+      return (result.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error claiming Telegram update; refusing non-durable processing:', err);
+      return null;
+    }
+  }
+
+  public async finishTelegramUpdate(updateId: number, status: 'completed' | 'failed', errorCode?: string): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const result = await this.pool.query(
+        `UPDATE telegram_updates
+         SET status = $2, error_code = $3, updated_at = CURRENT_TIMESTAMP
+         WHERE update_id = $1
+         RETURNING update_id`,
+        [updateId, status, errorCode || null]
+      );
+      return (result.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating Telegram webhook processing state:', err);
+      return false;
+    }
+  }
+
+  public async getThreadMessagesStrict(threadId: string): Promise<ConversationMessage[]> {
+    if (!this.pool || !this.isConnected) throw new Error('PERSISTENCE_UNAVAILABLE: conversation database is disconnected');
+    try {
+      const result = await this.pool.query(
+        `SELECT c.*, d.status AS delivery_status, d.error_code AS delivery_error_code
+         FROM conversations c
+         LEFT JOIN channel_delivery_receipts d
+           ON d.provider_sid = c.metadata->>'providerMessageSid'
+         WHERE c.session_id = $1
+         ORDER BY c.created_at ASC`,
+        [threadId]
+      );
+      return result.rows.map((row) => ({
+        id: row.id,
+        session_id: row.session_id,
+        channel: row.channel,
+        role: row.role,
+        content: row.content,
+        provider: row.provider,
+        model: row.model,
+        metadata: {
+          ...(row.metadata || {}),
+          ...(row.delivery_status ? { deliveryStatus: row.delivery_status } : {}),
+          ...(row.delivery_error_code ? { deliveryErrorCode: row.delivery_error_code } : {}),
+        },
+        created_at: row.created_at,
+      }));
+    } catch (err) {
+      console.error('[NeonDB] Error fetching strict conversation history:', err);
+      throw new Error('PERSISTENCE_FAILED: conversation history could not be retrieved');
+    }
   }
 
   public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<boolean> {
@@ -980,7 +1204,12 @@ class NeonDatabaseService {
 
     try {
       const res = await this.pool.query(
-        'SELECT * FROM conversations WHERE session_id = $1 ORDER BY created_at ASC;',
+        `SELECT c.*, d.status AS delivery_status, d.error_code AS delivery_error_code
+         FROM conversations c
+         LEFT JOIN channel_delivery_receipts d
+           ON d.provider_sid = c.metadata->>'providerMessageSid'
+         WHERE c.session_id = $1
+         ORDER BY c.created_at ASC`,
         [threadId]
       );
       return res.rows.map((r) => ({
