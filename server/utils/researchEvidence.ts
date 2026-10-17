@@ -166,6 +166,18 @@ export function resolveBoundedIntegerSetting(
   return parsed;
 }
 
+/** Validate citation identifiers against source IDs created from the current research evidence ledger. */
+export function inspectCitationReferences(
+  text: string,
+  validSourceIds: ReadonlySet<string>,
+): { hasCitation: boolean; unknownIds: string[] } {
+  const ids = [...text.matchAll(/\[(S\d+)\]/g)].map((match) => match[1]);
+  return {
+    hasCitation: ids.length > 0,
+    unknownIds: [...new Set(ids.filter((id) => !validSourceIds.has(id)))],
+  };
+}
+
 /** Parse an adaptive plan returned by the configured live model; malformed output is an error. */
 export function parseAdaptiveResearchPlan(
   raw: string,
