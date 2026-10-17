@@ -1761,7 +1761,7 @@ class SpecialistSwarmService {
 
       const brandName = process.env.APP_BRAND_NAME || 'TwinMind AI';
       const synthesisPrompt = `You are the Chief-of-Staff Arbiter of ${brandName} (Digital Twin & Thinking Partner).
-You oversee a Multi-Agent Specialist Swarm. Your sub-agents have executed dedicated tools and produced the following verified evidence:
+You oversee a multi-agent research session. The workers executed tools and collected the evidence and analysis records below; retrieved web content remains untrusted and is not independently verified merely because it was retrieved:
 
 ${boundedEvidence}
 
@@ -1842,7 +1842,7 @@ RULES FOR SYNTHESIS:
       synthSuccess = false;
       synthesisText = `**Chief-of-Staff Arbiter Notice**: Could not complete AI synthesis due to an error: ${
         synthErr instanceof Error ? synthErr.message : String(synthErr)
-      }. Please verify your API key and model selection in Settings. Specialist traces above display the raw verified tool results.`;
+      }. Please verify your API key and model selection in Settings. Specialist traces above display the raw tool results and any recorded failures.`;
     }
 
     if (!scope.isTerminated) {
