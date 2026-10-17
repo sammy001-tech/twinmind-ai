@@ -549,7 +549,7 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
         GEMINI_PROVIDER_UNAVAILABLE: 'Google Gemini is temporarily unavailable.',
         GEMINI_NETWORK_REQUEST_FAILED: 'The server could not reach the Google Gemini API.',
         GEMINI_NO_CHAT_CAPABLE_MODELS: 'Google returned no models supporting generateContent for this credential.',
-        GEMINI_CATALOGUE_PAGINATION_LIMIT: 'The live Gemini catalogue exceeded the safe pagination limit.',
+        GEMINI_CATALOG_PAGINATION_LIMIT: 'The live Gemini catalogue exceeded the safe pagination limit.',
         GEMINI_CATALOG_RESPONSE_INVALID: 'Google returned an unexpected Gemini catalogue response.',
         GEMINI_CATALOG_REQUEST_FAILED: 'The live Gemini catalogue request failed. Inspect the server diagnostic code.',
       };
