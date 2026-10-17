@@ -1032,6 +1032,32 @@ class NeonDatabaseService {
     }
   }
 
+  public async updateInboundChannelProcessingStatus(
+    channel: 'telegram' | 'whatsapp',
+    providerMessageId: string,
+    status: 'processing' | 'completed' | 'failed',
+    errorCode?: string,
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !providerMessageId.trim()) return false;
+    try {
+      const result = await this.pool.query(
+        `UPDATE conversations
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+           'processingStatus', $3::text,
+           'processingErrorCode', COALESCE($4::text, ''),
+           'processingUpdatedAt', CURRENT_TIMESTAMP::text
+         )
+         WHERE channel = $1 AND metadata->>'inboundMessageSid' = $2
+         RETURNING id`,
+        [channel, providerMessageId.trim(), status, errorCode || null]
+      );
+      return (result.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating inbound channel processing state:', err);
+      return false;
+    }
+  }
+
   public async recordChannelDeliveryStatus(providerSid: string, status: string, errorCode?: string): Promise<boolean> {
     if (!this.pool || !this.isConnected || !providerSid.trim() || !status.trim()) return false;
     try {
