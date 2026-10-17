@@ -8,6 +8,7 @@ import {
   inspectCitationReferences,
   resolveResearchSearchDepth,
   parseAdaptiveResearchPlan,
+  parseInitialResearchPlan,
   resolveBoundedIntegerSetting,
 } from '../server/utils/researchEvidence.ts';
 
@@ -179,5 +180,38 @@ test('research search depth is resolved from live deployment configuration and i
   assert.throws(
     () => resolveResearchSearchDepth({ TWINMIND_RESEARCH_SEARCH_DEPTH: 'invented-mode' }),
     /RESEARCH_CONFIGURATION_INVALID/,
+  );
+});
+
+
+test('initial research plans decompose the objective and deduplicate actual model-proposed queries', () => {
+  assert.deepEqual(
+    parseInitialResearchPlan(JSON.stringify({
+      researchQuestions: ['What do official sources say?', 'What operational risks are documented?', 'What do official sources say?'],
+      searchQueries: [
+        'official product documentation',
+        'Official Product Documentation',
+        'independent production benchmark',
+        'published operational failure reports',
+      ],
+    }), {
+      maxQueries: 2,
+      excludeQueries: ['the original user query'],
+    }),
+    {
+      researchQuestions: ['What do official sources say?', 'What operational risks are documented?'],
+      searchQueries: ['official product documentation', 'independent production benchmark'],
+    },
+  );
+});
+
+test('initial plans fail closed when the model output does not satisfy the plan schema', () => {
+  assert.throws(
+    () => parseInitialResearchPlan('not json', { maxQueries: 2 }),
+    /RESEARCH_INITIAL_PLAN_INVALID_JSON/,
+  );
+  assert.throws(
+    () => parseInitialResearchPlan(JSON.stringify({ searchQueries: ['query'] }), { maxQueries: 2 }),
+    /RESEARCH_INITIAL_PLAN_SCHEMA_INVALID/,
   );
 });
