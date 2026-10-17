@@ -1504,22 +1504,98 @@ class SpecialistSwarmService {
     let synthSuccess = false;
 
     try {
-      // Build structured evidence context
+      // Build an evidence ledger from actual provider-returned source records.
+      // Extracted page text supersedes a short search excerpt for the same canonical URL.
+      const ledgerByUrl = new Map<string, {
+        title: string;
+        url: string;
+        content: string;
+        extracted: boolean;
+        publishedDate?: string;
+        sourceQueries: Set<string>;
+      }>();
+      for (const trace of specialistTraces) {
+        for (const tool of trace.tools) {
+          if (tool.toolName === 'searchWeb') {
+            const out = tool.output as Record<string, unknown>;
+            if (out.status !== 'success' || !Array.isArray(out.results)) continue;
+            const query = typeof out.query === 'string' ? out.query : String(tool.input.query || '');
+            const sources = normalizeResearchSearchResults(out.results);
+            for (const source of sources) {
+              const existing = ledgerByUrl.get(source.url);
+              if (existing) {
+                existing.sourceQueries.add(query);
+                if (!existing.publishedDate && source.publishedDate) existing.publishedDate = source.publishedDate;
+                continue;
+              }
+              ledgerByUrl.set(source.url, {
+                title: source.title,
+                url: source.url,
+                content: source.content,
+                extracted: false,
+                ...(source.publishedDate ? { publishedDate: source.publishedDate } : {}),
+                sourceQueries: new Set([query]),
+              });
+            }
+          } else if (tool.toolName === 'extractWebPages') {
+            const out = tool.output as Record<string, unknown>;
+            if (out.status !== 'success' || !Array.isArray(out.sources)) continue;
+            for (const source of normalizeResearchSearchResults(out.sources)) {
+              const existing = ledgerByUrl.get(source.url);
+              if (!existing) continue;
+              existing.title = source.title || existing.title;
+              existing.content = source.content;
+              existing.extracted = true;
+              if (!existing.publishedDate && source.publishedDate) existing.publishedDate = source.publishedDate;
+            }
+          }
+        }
+      }
+
+      const reportSourceLimit = resolveBoundedIntegerSetting(
+        process.env,
+        'TWINMIND_RESEARCH_REPORT_SOURCE_LIMIT',
+        8,
+        1,
+        20,
+      );
+      const reportSources = [...ledgerByUrl.values()]
+        .sort((left, right) => Number(right.extracted) - Number(left.extracted))
+        .slice(0, reportSourceLimit);
+      const sourceIds = new Map(reportSources.map((source, index) => [source.url, `S${index + 1}`] as const));
+      const validSourceIds = new Set(sourceIds.values());
+
       let evidenceContext = '';
       for (const trace of specialistTraces) {
         evidenceContext += `\n### Specialist: ${trace.roleName} (${trace.specialist})\n`;
         evidenceContext += `Status: ${trace.status}\n`;
         for (const tool of trace.tools) {
           if (tool.toolName === 'searchWeb') {
-            const out = tool.output as any;
-            if (out.status === 'success' && out.results?.length) {
-              evidenceContext += `<untrusted_web_evidence source="tavily" query="${tool.input.query}">\n`;
-              for (const r of out.results) {
-                evidenceContext += `- Title: ${r.title}\n  URL: ${r.url}\n  Summary: ${r.content}\n`;
-              }
-              evidenceContext += `</untrusted_web_evidence>\n`;
+            const out = tool.output as Record<string, unknown>;
+            if (out.status === 'success' && Array.isArray(out.results)) {
+              const sourceReferences = normalizeResearchSearchResults(out.results)
+                .map((source) => sourceIds.get(source.url))
+                .filter((id): id is string => Boolean(id));
+              evidenceContext += `Search query "${String(tool.input.query || '')}" returned source records ${JSON.stringify(sourceReferences)}.\n`;
             } else {
-              evidenceContext += `Web search error: ${out.error || 'No results'}\n`;
+              evidenceContext += `Live search did not produce usable evidence for "${String(tool.input.query || '')}": ${String(out.error || 'No usable source records were returned by the provider.')}\n`;
+            }
+          } else if (tool.toolName === 'planResearch') {
+            const out = tool.output as Record<string, unknown>;
+            if (out.status === 'success') {
+              evidenceContext += `Adaptive research plan: follow-up queries ${JSON.stringify(out.followUpQueries)}; unresolved questions ${JSON.stringify(out.unresolvedQuestions)}.\n`;
+            } else {
+              evidenceContext += `Adaptive research planning unavailable: ${String(out.error || 'The live model did not return a valid plan.')}\n`;
+            }
+          } else if (tool.toolName === 'extractWebPages') {
+            const out = tool.output as Record<string, unknown>;
+            if (out.status === 'success') {
+              const extractedRefs = normalizeResearchSearchResults(out.sources)
+                .map((source) => sourceIds.get(source.url))
+                .filter((id): id is string => Boolean(id));
+              evidenceContext += `Page extraction returned content for source records ${JSON.stringify(extractedRefs)}.\n`;
+            } else {
+              evidenceContext += `Live page extraction unavailable: ${String(out.error || 'The provider returned no attributable page content.')}\n`;
             }
           } else if (tool.toolName === 'calculateMath') {
             const out = tool.output as CalculateMathResult;
@@ -1545,6 +1621,18 @@ class SpecialistSwarmService {
         }
       }
 
+      if (reportSources.length > 0) {
+        evidenceContext += '\n<untrusted_web_evidence source="live_tavily_research">\n';
+        for (const source of reportSources) {
+          const sourceId = sourceIds.get(source.url);
+          if (!sourceId) continue;
+          evidenceContext += `- [${sourceId}] Title: ${source.title}\n  URL: ${source.url}\n  Evidence type: ${source.extracted ? 'extracted page content' : 'search-provider excerpt'}\n`;
+          if (source.publishedDate) evidenceContext += `  Provider-reported publication date: ${source.publishedDate}\n`;
+          evidenceContext += `  Content: ${source.content.slice(0, source.extracted ? 1400 : 600)}\n`;
+          evidenceContext += `  Search queries associated with this source: ${JSON.stringify([...source.sourceQueries])}\n`;
+        }
+        evidenceContext += '</untrusted_web_evidence>\n';
+      }
       // Enforce 4,000-token context ceiling on prompt payload
       const boundedEvidence = this.enforceContextCeiling(evidenceContext, 4000);
 
