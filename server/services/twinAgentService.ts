@@ -7,7 +7,7 @@ import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
 import { memoryService } from './memoryService.ts';
 import { calibrationService } from './calibrationService.ts';
 import { modelCatalogService } from './modelCatalogService.ts';
-import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, resolveBoundedIntegerSetting } from './researchEvidence.ts';
+import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, resolveBoundedIntegerSetting, resolveResearchSearchDepth } from './researchEvidence.ts';
 
 const Type = {
   OBJECT: 'OBJECT',
@@ -509,6 +509,7 @@ class TwinAgentService {
               max_results: maxResults,
               include_answer: true,
               include_raw_content: false,
+              search_depth: resolveResearchSearchDepth(process.env),
             }),
           });
           if (!res.ok) {
