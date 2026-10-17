@@ -179,7 +179,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
                 {headers.map((h, colIdx) => (
                   <th
                     key={colIdx}
-                    className={`min-w-[7rem] max-w-[18rem] whitespace-normal break-words px-3 py-2 font-bold tracking-wide uppercase text-[11px] ${
+                    className={`min-w-[7rem] max-w-[18rem] whitespace-normal break-words px-3 py-2.5 font-semibold tracking-wide uppercase text-xs ${
                       alignments[colIdx] === 'center'
                         ? 'text-center'
                         : alignments[colIdx] === 'right'
@@ -203,7 +203,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
                   {row.map((cell, cIdx) => (
                     <td
                       key={cIdx}
-                      className={`min-w-[7rem] max-w-[18rem] whitespace-normal break-words px-3 py-2 text-xs leading-relaxed ${
+                      className={`min-w-[7rem] max-w-[18rem] whitespace-normal break-words px-3 py-2.5 text-[13px] leading-5 ${
                         alignments[cIdx] === 'center'
                           ? 'text-center'
                           : alignments[cIdx] === 'right'
@@ -226,7 +226,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     // 3. Headings
     if (trimmed.startsWith('### ')) {
       elements.push(
-        <h4 key={`h4-${i}`} className="text-xs sm:text-sm font-bold text-amber-600 dark:text-amber-300 mt-2.5 mb-1 tracking-wide break-words">
+        <h4 key={`h4-${i}`} className="text-sm sm:text-base font-semibold text-amber-700 dark:text-amber-300 mt-4 mb-2 tracking-tight break-words">
           {renderInlineMarkdown(trimmed.slice(4))}
         </h4>
       );
@@ -235,7 +235,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     }
     if (trimmed.startsWith('## ')) {
       elements.push(
-        <h3 key={`h3-${i}`} className="text-sm sm:text-base font-bold text-slate-900 dark:text-white mt-3 mb-1.5 tracking-tight border-b border-slate-200 dark:border-slate-800 pb-1 break-words">
+        <h3 key={`h3-${i}`} className="text-base sm:text-lg font-semibold text-slate-950 dark:text-white mt-5 mb-2 tracking-tight border-b border-slate-200/80 dark:border-slate-800 pb-2 break-words">
           {renderInlineMarkdown(trimmed.slice(3))}
         </h3>
       );
@@ -244,7 +244,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     }
     if (trimmed.startsWith('# ')) {
       elements.push(
-        <h2 key={`h2-${i}`} className="text-base sm:text-lg font-bold text-slate-900 dark:text-white mt-3.5 mb-1.5 tracking-tight break-words">
+        <h2 key={`h2-${i}`} className="text-lg sm:text-xl font-semibold text-slate-950 dark:text-white mt-6 mb-2 tracking-tight break-words">
           {renderInlineMarkdown(trimmed.slice(2))}
         </h2>
       );
@@ -255,7 +255,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     // 4. Bullet list items
     if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
       elements.push(
-        <li key={`li-${i}`} className="ml-4 list-disc my-0.5 leading-relaxed text-inherit break-words">
+        <li key={`li-${i}`} className="ml-5 list-disc my-1 leading-7 text-inherit break-words">
           {renderInlineMarkdown(trimmed.slice(2))}
         </li>
       );
@@ -266,7 +266,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
     // 5. Numbered list items
     if (/^\d+\.\s/.test(trimmed)) {
       elements.push(
-        <li key={`ol-${i}`} className="ml-4 list-decimal my-0.5 leading-relaxed text-inherit break-words">
+        <li key={`ol-${i}`} className="ml-5 list-decimal my-1 leading-7 text-inherit break-words">
           {renderInlineMarkdown(trimmed.replace(/^\d+\.\s/, ''))}
         </li>
       );
@@ -283,7 +283,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
 
     // 7. Normal paragraphs
     elements.push(
-      <p key={`p-${i}`} className="my-1 leading-relaxed text-inherit break-words">
+      <p key={`p-${i}`} className="my-1.5 leading-7 text-inherit break-words">
         {renderInlineMarkdown(line)}
       </p>
     );
