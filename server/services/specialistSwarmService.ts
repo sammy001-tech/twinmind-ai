@@ -925,6 +925,7 @@ class SpecialistSwarmService {
                 customGeminiKey: options.customGeminiKey,
                 customGroqKey: options.customGroqKey,
                 customMistralKey: options.customMistralKey,
+                  signal: scope.combinedSignal,
                 jsonMode: true,
                 temperature: 0.1,
               });
@@ -1031,6 +1032,7 @@ class SpecialistSwarmService {
                   customGeminiKey: options.customGeminiKey,
                   customGroqKey: options.customGroqKey,
                   customMistralKey: options.customMistralKey,
+                  signal: scope.combinedSignal,
                   jsonMode: true,
                   temperature: 0.1,
                 });
@@ -1803,6 +1805,7 @@ RULES FOR SYNTHESIS:
         model: effectiveModel,
         customGroqKey: options.customGroqKey,
         customMistralKey: options.customMistralKey,
+                  signal: scope.combinedSignal,
         customGeminiKey: options.customGeminiKey,
       });
 
@@ -1831,6 +1834,7 @@ RULES FOR SYNTHESIS:
             customGeminiKey: options.customGeminiKey,
             customGroqKey: options.customGroqKey,
             customMistralKey: options.customMistralKey,
+                  signal: scope.combinedSignal,
             temperature: 0.1,
           });
           if (typeof synthesisText !== 'string' || !synthesisText.trim()) {
