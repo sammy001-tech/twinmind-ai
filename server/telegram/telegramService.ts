@@ -658,13 +658,29 @@ class TelegramBotManager {
   }
 
   public async updateConfig(newConfig: Partial<TelegramConfig>): Promise<{ success: boolean; message: string }> {
+    if (newConfig.mode !== undefined && newConfig.mode !== 'polling' && newConfig.mode !== 'webhook') {
+      return {
+        success: false,
+        message: 'Telegram mode must be either polling or webhook.',
+      };
+    }
+
     if (newConfig.webhookUrl !== undefined) {
       const trimmedUrl = newConfig.webhookUrl.trim();
-      if (trimmedUrl && !trimmedUrl.startsWith('https://')) {
-        return {
-          success: false,
-          message: 'Telegram requires a valid HTTPS webhook URL (e.g. https://your-service.onrender.com).',
-        };
+      if (trimmedUrl) {
+        let validHttpsUrl = false;
+        try {
+          const parsed = new URL(trimmedUrl);
+          validHttpsUrl = parsed.protocol === 'https:' && Boolean(parsed.hostname) && !parsed.username && !parsed.password;
+        } catch {
+          validHttpsUrl = false;
+        }
+        if (!validHttpsUrl) {
+          return {
+            success: false,
+            message: 'Telegram requires a valid HTTPS webhook URL (e.g. https://your-service.onrender.com).',
+          };
+        }
       }
     }
 
