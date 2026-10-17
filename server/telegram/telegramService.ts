@@ -700,7 +700,7 @@ class TelegramBotManager {
       ...(!environmentToken && requestedToken !== undefined ? { token: requestedToken } : {}),
     };
     // Do not mutate active runtime state until durable configuration has been accepted.
-    await saveConfig(nextConfig, newConfig.token !== undefined);
+    await saveConfig(nextConfig, newConfig.token !== undefined && !environmentToken);
 
     if (newConfig.activeProvider || newConfig.activeModel) {
       await settingsManager.updateSettings({
