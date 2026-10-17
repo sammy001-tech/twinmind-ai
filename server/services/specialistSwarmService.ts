@@ -31,7 +31,7 @@ import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import path from 'path';
 import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
-import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from '../utils/researchEvidence.ts';
+import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, inspectCitationReferences, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from '../utils/researchEvidence.ts';
 
 export interface SwarmToolTrace {
   toolName: string;
@@ -1691,14 +1691,7 @@ RULES FOR SYNTHESIS:
       // Validate citation identifiers against the actual evidence ledger. If the draft omits
       // citations or references unknown IDs, request one evidence-bounded correction pass.
       if (validSourceIds.size > 0) {
-        const inspectCitations = (draft: string) => {
-          const ids = [...draft.matchAll(/\[(S\d+)\]/g)].map((match) => match[1]);
-          return {
-            hasCitation: ids.length > 0,
-            unknownIds: [...new Set(ids.filter((id) => !validSourceIds.has(id)))],
-          };
-        };
-        let citationCheck = inspectCitations(synthesisText);
+        let citationCheck = inspectCitationReferences(synthesisText, validSourceIds);
         if (!citationCheck.hasCitation || citationCheck.unknownIds.length > 0) {
           const draft = synthesisText;
           synthesisText = await twinAgentService.generateCompletion({
@@ -1721,7 +1714,7 @@ RULES FOR SYNTHESIS:
           if (typeof synthesisText !== 'string' || !synthesisText.trim()) {
             throw new Error('RESEARCH_CITATION_REPAIR_EMPTY: citation correction returned no report');
           }
-          citationCheck = inspectCitations(synthesisText);
+          citationCheck = inspectCitationReferences(synthesisText, validSourceIds);
           if (!citationCheck.hasCitation || citationCheck.unknownIds.length > 0) {
             throw new Error(
               `RESEARCH_CITATION_VALIDATION_FAILED: report contains no valid source citations or references unknown IDs ${JSON.stringify(citationCheck.unknownIds)}`,
