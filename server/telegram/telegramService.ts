@@ -886,6 +886,10 @@ class TelegramBotManager {
 
       try {
         await next();
+        const inboundKey = (ctx as any).twinmindInboundKey;
+        if (typeof inboundKey === 'string') {
+          await neonDb.updateInboundChannelProcessingStatus('telegram', inboundKey, 'completed');
+        }
         const finished = await neonDb.finishTelegramUpdate(updateId, 'completed');
         if (!finished) {
           this.log('error', 'Telegram update handler returned but its durable processing state could not be finalized.');
@@ -893,6 +897,10 @@ class TelegramBotManager {
       } catch (error: unknown) {
         const rawCode = error instanceof Error ? error.message : 'TELEGRAM_UPDATE_FAILED';
         const errorCode = rawCode.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'TELEGRAM_UPDATE_FAILED';
+        const inboundKey = (ctx as any).twinmindInboundKey;
+        if (typeof inboundKey === 'string') {
+          await neonDb.updateInboundChannelProcessingStatus('telegram', inboundKey, 'failed', errorCode);
+        }
         await neonDb.finishTelegramUpdate(updateId, 'failed', errorCode);
         throw error;
       }
@@ -960,13 +968,15 @@ class TelegramBotManager {
           if (typeof updateId !== 'number' || !Number.isSafeInteger(updateId)) {
             throw new Error('TELEGRAM_UPDATE_ID_MISSING: inbound message cannot be saved idempotently');
           }
+          const inboundKey = `telegram:${this.config.ownerId}:${updateId}`;
           await this.recordSyncedMessage(
             'user',
             inboundText,
             isVoiceMessage,
             undefined,
-            `telegram:${this.config.ownerId}:${updateId}`,
+            inboundKey,
           );
+          (ctx as any).twinmindInboundKey = inboundKey;
           if (this.conversationHistory.length > 20) this.conversationHistory = this.conversationHistory.slice(-20);
         }
       }
@@ -1024,13 +1034,15 @@ class TelegramBotManager {
 
           const callbackUpdateId = ctx.update?.update_id;
           if (typeof callbackUpdateId === 'number' && Number.isSafeInteger(callbackUpdateId)) {
+            const inboundKey = `telegram:${this.config.ownerId}:${callbackUpdateId}`;
             await this.recordSyncedMessage(
               'user',
               actionItem.payload,
               false,
               undefined,
-              `telegram:${this.config.ownerId}:${callbackUpdateId}`,
+              inboundKey,
             );
+            (ctx as any).twinmindInboundKey = inboundKey;
           }
 
           const turnResult = await twinAgentService.executeTurn({
@@ -1378,7 +1390,11 @@ class TelegramBotManager {
       content: text,
       ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
       ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
-      metadata: { isVoice, source: 'telegram' },
+      metadata: {
+        isVoice,
+        source: 'telegram',
+        ...(sender === 'user' && providerMessageId ? { processingStatus: 'processing' } : {}),
+      },
     };
 
     if (sender === 'user' && providerMessageId) {
