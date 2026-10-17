@@ -133,9 +133,14 @@ function normalizeSourceArray(
 
     const existing = unique.get(url);
     if (!existing || normalized.content.length > existing.content.length) {
+      if (existing) {
+        if (normalized.score === undefined && existing.score !== undefined) normalized.score = existing.score;
+        if (!normalized.publishedDate && existing.publishedDate) normalized.publishedDate = existing.publishedDate;
+      }
       unique.set(url, normalized);
-    } else if (existing.score === undefined && normalized.score !== undefined) {
-      existing.score = normalized.score;
+    } else {
+      if (existing.score === undefined && normalized.score !== undefined) existing.score = normalized.score;
+      if (!existing.publishedDate && normalized.publishedDate) existing.publishedDate = normalized.publishedDate;
     }
   }
 
