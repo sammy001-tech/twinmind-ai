@@ -563,7 +563,7 @@ class TwinAgentService {
    * Extract full page content from validated URLs using the configured live Tavily capability.
    * Only source records returned by the provider are exposed; empty extraction is a failure.
    */
-  public async executeExtractWebPages(urlsValue: unknown, customTavilyKey?: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  public async executeExtractWebPages(urlsValue: unknown, customTavilyKey?: string, signal?: AbortSignal, knownSourcesValue?: unknown): Promise<Record<string, unknown>> {
     const maxUrls = resolveBoundedIntegerSetting(
       process.env,
       'TWINMIND_RESEARCH_EXTRACT_LIMIT',
@@ -612,7 +612,10 @@ class TwinAgentService {
         { operationName: 'TavilyExtract', maxRetries: 2, signal },
       );
 
-      const knownSources = urls.map((url) => ({ title: '', url, content: '' }));
+      const knownSourceByUrl = new Map(
+        normalizeResearchSearchResults(knownSourcesValue).map((source) => [source.url, source] as const),
+      );
+      const knownSources = urls.map((url) => knownSourceByUrl.get(url) || ({ title: '', url, content: '' }));
       const extracted = normalizeResearchExtractions(response, knownSources);
       const sources = extracted.filter((source) => source.title.trim() && source.content.trim());
       if (sources.length === 0) {
@@ -1122,16 +1125,13 @@ Respond in valid JSON:
           (userPrompt.match(/https?:\/\/[^\s"'<>]+/gi) || []).map((url) => url.replace(/[),.;!?]+$/, '')),
           100,
         );
-        const observedSearchUrls = toolsExecuted.flatMap((executed) => {
+        const observedSearchSources = toolsExecuted.flatMap((executed) => {
           if (executed.toolName !== 'searchWeb' || !executed.result || typeof executed.result !== 'object') return [];
           const searchResult = executed.result as Record<string, unknown>;
           if (searchResult.status !== 'success' || !Array.isArray(searchResult.sources)) return [];
-          return searchResult.sources.flatMap((source) => {
-            if (!source || typeof source !== 'object' || Array.isArray(source)) return [];
-            const url = (source as Record<string, unknown>).url;
-            return typeof url === 'string' ? [url] : [];
-          });
+          return normalizeResearchSearchResults(searchResult.sources);
         });
+        const observedSearchUrls = observedSearchSources.map((source) => source.url);
         const allowedUrls = new Set(normalizeResearchUrls([...userSuppliedUrls, ...observedSearchUrls], 100));
         const invalidEntries = rawRequestedUrls.some((url) =>
           typeof url !== 'string' || normalizeResearchUrls([url], 1).length === 0
@@ -1156,7 +1156,7 @@ Respond in valid JSON:
             sources: [],
           };
         } else {
-          result = await this.executeExtractWebPages(requestedUrls, customTavilyKey, options.signal);
+          result = await this.executeExtractWebPages(requestedUrls, customTavilyKey, options.signal, observedSearchSources);
         }
       } else if (name === 'runMultiAgentDebate') {
         result = await this.executeMultiAgentDebate(String(args.dilemma || ''), channel, provider, model);
