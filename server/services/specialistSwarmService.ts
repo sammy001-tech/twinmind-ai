@@ -831,6 +831,7 @@ class SpecialistSwarmService {
           let extractedSources: ResearchSource[] = [];
           let unresolvedQuestions: string[] = [];
           let initialResearchQuestions: string[] = [];
+          let initialPlanStatus: 'success' | 'error' | 'skipped' = 'skipped';
           let primarySearchSucceeded = false;
 
           callbacks?.onSpecialistStart?.({
@@ -933,6 +934,7 @@ class SpecialistSwarmService {
               });
               initialResearchQuestions = plan.researchQuestions;
               initialPlanQueries = plan.searchQueries;
+              initialPlanStatus = 'success';
               const result = { status: 'success', ...plan };
               toolTraces.push({
                 toolName: 'planInitialResearch',
@@ -953,6 +955,7 @@ class SpecialistSwarmService {
               });
             } catch (error: unknown) {
               const message = error instanceof Error ? error.message : String(error);
+              initialPlanStatus = 'error';
               toolTraces.push({
                 toolName: 'planInitialResearch',
                 specialist: 'DeepResearcher',
@@ -1145,8 +1148,13 @@ class SpecialistSwarmService {
           if (scope.isTerminated) return;
 
           const durationMs = Date.now() - specStart;
+          const initialPlanSummary = initialPlanStatus === 'success'
+            ? `The initial plan identified ${initialResearchQuestions.length} research questions.`
+            : initialPlanStatus === 'error'
+              ? 'Initial planning failed; the original user-derived query was still attempted.'
+              : 'Initial query decomposition was disabled by runtime configuration.';
           const summary = gatheredSources.length > 0
-            ? `Collected ${gatheredSources.length} unique source records across ${searchedQueries.length} live search attempts; decomposed the request into ${initialResearchQuestions.length} initial research questions and extracted ${extractedSources.length} source pages.${unresolvedQuestions.length ? ` The adaptive planner identified ${unresolvedQuestions.length} unresolved questions.` : ''}`
+            ? `Collected ${gatheredSources.length} unique source records across ${searchedQueries.length} live search attempts; ${initialPlanSummary} Extracted ${extractedSources.length} source pages.${unresolvedQuestions.length ? ` The adaptive planner identified ${unresolvedQuestions.length} unresolved questions.` : ''}`
             : `No usable live source records were collected. Search and planning errors are recorded in the trace; no substitute evidence was generated.`;
 
           callbacks?.onSpecialistDone?.({
@@ -1695,6 +1703,13 @@ class SpecialistSwarmService {
               evidenceContext += `Search query "${String(tool.input.query || '')}" returned source records ${JSON.stringify(sourceReferences)}.\n`;
             } else {
               evidenceContext += `Live search did not produce usable evidence for "${String(tool.input.query || '')}": ${String(out.error || 'No usable source records were returned by the provider.')}\n`;
+            }
+          } else if (tool.toolName === 'planInitialResearch') {
+            const out = tool.output as Record<string, unknown>;
+            if (out.status === 'success') {
+              evidenceContext += `Initial research questions: ${JSON.stringify(out.researchQuestions)}. Supplemental search queries proposed by the live model: ${JSON.stringify(out.searchQueries)}.\n`;
+            } else {
+              evidenceContext += `Initial research planning unavailable: ${String(out.error || 'The configured model did not return a valid initial plan.')}. The original user-derived query was attempted.\n`;
             }
           } else if (tool.toolName === 'planResearch') {
             const out = tool.output as Record<string, unknown>;
