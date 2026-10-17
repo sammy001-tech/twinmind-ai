@@ -52,6 +52,7 @@ export interface ChatMessage {
   imageData?: { mimeType: string; data: string; name?: string };
   isGeneratingAudio?: boolean;
   status?: 'pending' | 'accepted' | 'queued' | 'sending' | 'sent' | 'delivered' | 'read' | 'undelivered' | 'error';
+  processingStatus?: 'processing' | 'completed' | 'failed';
   modelInfo?: {
     provider: string;
     model: string;
