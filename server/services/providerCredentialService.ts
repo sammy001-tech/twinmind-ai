@@ -22,6 +22,20 @@ export function resolveProviderCredential(environmentKey: unknown, settingsKey: 
   return { key: '', source: 'none' };
 }
 
+/**
+ * Connection tests must verify the key the user entered, not silently test an unrelated
+ * environment key. Runtime resolution remains environment-first by design.
+ */
+export function resolveCredentialForVerification(
+  suppliedKey: unknown,
+  environmentKey: unknown,
+  settingsKey: unknown,
+): ProviderCredentialResolution {
+  const supplied = normalizeProviderCredential(suppliedKey);
+  if (supplied) return { key: supplied, source: 'request' };
+  return resolveProviderCredential(environmentKey, settingsKey);
+}
+
 export type OriginRejectionCode = 'ORIGIN_REQUIRED' | 'INVALID_ORIGIN' | 'INVALID_PUBLIC_ORIGIN_CONFIGURATION';
 export type SameOriginDecision = { allowed: true } | { allowed: false; code: OriginRejectionCode };
 
