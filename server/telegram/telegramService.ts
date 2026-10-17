@@ -11,7 +11,7 @@ import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
 import { normalizeProviderCredential, resolveProviderCredential } from '../services/providerCredentialService.ts';
-import { loadChannelConversationHistory, persistChannelMessage } from '../services/channelConversationService.ts';
+import { loadChannelConversationHistory, persistChannelMessage, persistInboundChannelMessage } from '../services/channelConversationService.ts';
 import { splitChannelMessage } from '../services/channelMessagePolicy.ts';
 import {
   isTelegramMode,
@@ -940,6 +940,42 @@ class TelegramBotManager {
       }
 
       await this.loadConversationHistory();
+
+      const message = ctx.message as any;
+      if (message) {
+        const caption = typeof message.caption === 'string' ? message.caption.trim() : '';
+        let inboundText = typeof message.text === 'string' ? message.text.trim() : '';
+        let isVoiceMessage = false;
+
+        if (!inboundText && Array.isArray(message.photo)) {
+          inboundText = caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]';
+        } else if (!inboundText && message.document) {
+          const fileName = typeof message.document.file_name === 'string' ? message.document.file_name : 'file';
+          inboundText = caption ? `[Uploaded Document ${fileName}]: ${caption}` : `[Uploaded Document ${fileName}]`;
+        } else if (!inboundText && message.voice) {
+          inboundText = '[Voice Note Audio Sent]';
+          isVoiceMessage = true;
+        } else if (!inboundText && caption) {
+          inboundText = caption;
+        }
+
+        if (inboundText) {
+          const updateId = ctx.update?.update_id;
+          if (typeof updateId !== 'number' || !Number.isSafeInteger(updateId)) {
+            throw new Error('TELEGRAM_UPDATE_ID_MISSING: inbound message cannot be saved idempotently');
+          }
+          await this.recordSyncedMessage(
+            'user',
+            inboundText,
+            isVoiceMessage,
+            undefined,
+            `telegram:${this.config.ownerId}:${updateId}`,
+          );
+          this.conversationHistory.push({ role: 'user', content: inboundText });
+          if (this.conversationHistory.length > 20) this.conversationHistory = this.conversationHistory.slice(-20);
+        }
+      }
+
       await next();
     });
 
@@ -1054,7 +1090,6 @@ class TelegramBotManager {
       if (text.startsWith('/')) return;
 
       this.log('chat', 'Processing an authorized Telegram message.');
-      await this.recordSyncedMessage('user', text);
 
       const lowerText = text.toLowerCase();
       const isVoiceRequest =
@@ -1076,7 +1111,6 @@ class TelegramBotManager {
         });
 
         const responseText = turnResult.reply;
-        this.conversationHistory.push({ role: 'user', content: text });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         if (this.conversationHistory.length > 20) {
           this.conversationHistory = this.conversationHistory.slice(-20);
@@ -1142,7 +1176,6 @@ class TelegramBotManager {
         const buffer = Buffer.from(arrayBuffer);
         const base64Data = buffer.toString('base64');
         const caption = (ctx.message.caption || '').trim();
-        await this.recordSyncedMessage('user', caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]');
 
         const turnResult = await twinAgentService.executeTurn({
           userPrompt: caption,
@@ -1159,7 +1192,6 @@ class TelegramBotManager {
         });
 
         const responseText = turnResult.reply;
-        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]' });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         await this.replyLongText(ctx, responseText);
         await this.recordSyncedMessage('assistant', responseText, false, 'accepted');
@@ -1193,7 +1225,6 @@ class TelegramBotManager {
         const buffer = Buffer.from(arrayBuffer);
         const mimeType = doc.mime_type || 'application/octet-stream';
         const caption = (ctx.message.caption || '').trim();
-        await this.recordSyncedMessage('user', caption ? `[Uploaded Document ${doc.file_name || 'file'}]: ${caption}` : `[Uploaded Document ${doc.file_name || 'file'}]`);
 
         let turnResult: any;
 
@@ -1228,7 +1259,6 @@ class TelegramBotManager {
         }
 
         const responseText = turnResult.reply;
-        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Document ${doc.file_name || 'file'}]: ${caption}` : `[Uploaded Document ${doc.file_name || 'file'}]` });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         await this.replyLongText(ctx, responseText);
         await this.recordSyncedMessage('assistant', responseText, false, 'accepted');
@@ -1257,7 +1287,6 @@ class TelegramBotManager {
         const buffer = Buffer.from(arrayBuffer);
 
         const s = settingsManager.getSettings();
-        await this.recordSyncedMessage('user', '[Voice Note Audio Sent]');
         const turnResult = await twinAgentService.executeTurn({
           userPrompt: 'Listen to this voice memo / audio recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast if applicable.',
           audioData: {
@@ -1272,7 +1301,6 @@ class TelegramBotManager {
         });
 
         const reply = turnResult.reply;
-        this.conversationHistory.push({ role: 'user', content: '[Voice Note Audio Sent]' });
         this.conversationHistory.push({ role: 'assistant', content: reply });
         await this.replyLongText(ctx, reply);
         await this.recordSyncedMessage('assistant', reply, true, 'accepted');
@@ -1332,21 +1360,30 @@ class TelegramBotManager {
     text: string,
     isVoice = false,
     deliveryStatus?: 'accepted',
+    providerMessageId?: string,
   ): Promise<void> {
     if (this.config.ownerId === null) {
       throw new Error('TELEGRAM_OWNER_ID_REQUIRED: cannot persist an unpaired Telegram conversation');
     }
 
-    await persistChannelMessage({
-      channel: 'telegram',
+    const messageInput = {
+      channel: 'telegram' as const,
       externalIdentity: this.config.ownerId,
       role: sender,
       content: text,
       ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
       ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
-      ...(deliveryStatus ? { deliveryStatus } : {}),
       metadata: { isVoice, source: 'telegram' },
-    });
+    };
+
+    if (sender === 'user' && providerMessageId) {
+      await persistInboundChannelMessage(messageInput, providerMessageId);
+    } else {
+      await persistChannelMessage({
+        ...messageInput,
+        ...(deliveryStatus ? { deliveryStatus } : {}),
+      });
+    }
 
     this.syncedMessages.unshift({
       id: `tg-${randomUUID()}`,
