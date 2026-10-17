@@ -21,6 +21,8 @@ test('search evidence excludes records without real titles, HTTP(S) URLs, or con
     { title: 'Missing excerpt', url: 'https://docs.example.org/no-content', content: '' },
     { title: 'Invalid scheme', url: 'javascript:alert(1)', content: 'Not a source' },
     { title: 'Credentials in URL', url: 'https://user:pass@docs.example.org/private', content: 'Not a source' },
+    { title: 'Local host', url: 'http://localhost/private', content: 'Not a source' },
+    { title: 'Private address', url: 'http://192.168.1.20/admin', content: 'Not a source' },
   ]);
 
   assert.deepEqual(sources, [
