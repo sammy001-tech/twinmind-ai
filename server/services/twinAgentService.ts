@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
 import { knowledgeService } from '../db/knowledgeService.ts';
-import { callWithBoundedRetry } from '../utils/retryHelper.ts';
+import { callWithBoundedRetry, waitWithAbort } from '../utils/retryHelper.ts';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
 import { memoryService } from './memoryService.ts';
 import { calibrationService } from './calibrationService.ts';
@@ -332,6 +332,7 @@ class TwinAgentService {
     customGeminiKey?: string;
     temperature?: number;
     jsonMode?: boolean;
+    signal?: AbortSignal;
   }): Promise<string> {
     const s = settingsManager.getSettings();
     const effectiveProvider = (options.provider || s.activeProvider || '').toLowerCase();
@@ -345,7 +346,7 @@ class TwinAgentService {
       const key = this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, options.customGroqKey);
       if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:groq');
       if (key) {
-        const model = await modelCatalogService.resolveModelForProvider('groq', options.model || s.providerModels.groq, key);
+        const model = await waitWithAbort(modelCatalogService.resolveModelForProvider('groq', options.model || s.providerModels.groq, key), options.signal, 'Groq model resolution');
         const messages: any[] = [];
         if (options.systemInstruction) {
           messages.push({ role: 'system', content: options.systemInstruction });
@@ -370,6 +371,7 @@ class TwinAgentService {
                 Authorization: `Bearer ${key}`,
               },
               body: JSON.stringify(bodyPayload),
+              signal: options.signal,
             });
             if (!r.ok) {
               const errText = await r.text().catch(() => '');
@@ -377,7 +379,7 @@ class TwinAgentService {
             }
             return await r.json();
           },
-          { operationName: 'GroqCompletion' }
+          { operationName: 'GroqCompletion', signal: options.signal }
         );
 
         const content = res.choices?.[0]?.message?.content?.trim() || '';
@@ -391,7 +393,7 @@ class TwinAgentService {
       const key = this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, options.customMistralKey);
       if (!key) throw new Error('PROVIDER_CREDENTIALS_MISSING:mistral');
       if (key) {
-        const model = await modelCatalogService.resolveModelForProvider('mistral', options.model || s.providerModels.mistral, key);
+        const model = await waitWithAbort(modelCatalogService.resolveModelForProvider('mistral', options.model || s.providerModels.mistral, key), options.signal, 'Mistral model resolution');
         const messages: any[] = [];
         if (options.systemInstruction) {
           messages.push({ role: 'system', content: options.systemInstruction });
@@ -416,6 +418,7 @@ class TwinAgentService {
                 Authorization: `Bearer ${key}`,
               },
               body: JSON.stringify(bodyPayload),
+              signal: options.signal,
             });
             if (!r.ok) {
               const errText = await r.text().catch(() => '');
@@ -423,7 +426,7 @@ class TwinAgentService {
             }
             return await r.json();
           },
-          { operationName: 'MistralCompletion' }
+          { operationName: 'MistralCompletion', signal: options.signal }
         );
 
         const content = res.choices?.[0]?.message?.content?.trim() || '';
@@ -442,10 +445,14 @@ class TwinAgentService {
       apiKey: geminiKey,
       httpOptions: { headers: { 'User-Agent': 'aistudio-build-twinagent' } },
     });
-    const model = await modelCatalogService.resolveModelForProvider(
-      'gemini',
-      options.model || s.providerModels.gemini || (s.activeProvider === 'gemini' ? s.activeModel : ''),
-      geminiKey
+    const model = await waitWithAbort(
+      modelCatalogService.resolveModelForProvider(
+        'gemini',
+        options.model || s.providerModels.gemini || (s.activeProvider === 'gemini' ? s.activeModel : ''),
+        geminiKey,
+      ),
+      options.signal,
+      'Gemini model resolution',
     );
 
     const config: any = { temperature };
@@ -463,7 +470,7 @@ class TwinAgentService {
           contents: options.prompt,
           config,
         }),
-      { operationName: 'GeminiCompletion' }
+      { operationName: 'GeminiCompletion', signal: options.signal }
     );
 
     const content = res.text?.trim() || '';
@@ -1050,7 +1057,11 @@ Respond in valid JSON:
         ? this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, customGroqKey)
         : this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, customMistralKey);
     if (!providerApiKey) throw new Error(`PROVIDER_CREDENTIALS_MISSING:${provider}`);
-    const model = await modelCatalogService.resolveModelForProvider(provider, configuredModel, providerApiKey);
+    const model = await waitWithAbort(
+      modelCatalogService.resolveModelForProvider(provider, configuredModel, providerApiKey),
+      options.signal,
+      'Live model resolution',
+    );
 
     // 1. Explicit Concurrent Retrieval: Vault + Learned Context + Calibration Metrics
     let recalledKnowledge: Array<{ id: string | number; title: string; content: string; category: string; similarity?: number }> = [];
@@ -1299,7 +1310,7 @@ Respond in valid JSON:
                 tools: [{ functionDeclarations: GEMINI_TWIN_TOOLS }],
               },
             }),
-          { operationName: `GeminiAgentRound(${round})` }
+          { operationName: `GeminiAgentRound(${round})`, signal: options.signal }
         );
 
         const functionCalls = response.functionCalls;
@@ -1431,6 +1442,7 @@ Respond in valid JSON:
                 tool_choice: 'auto',
                 temperature: 0.7,
               }),
+              signal: options.signal,
             });
             if (!res.ok) {
               const errText = await res.text().catch(() => '');
@@ -1438,7 +1450,7 @@ Respond in valid JSON:
             }
             return await res.json();
           },
-          { operationName: `GroqAgentRound(${round})` }
+          { operationName: `GroqAgentRound(${round})`, signal: options.signal }
         );
 
         const choice = groqRes.choices?.[0];
@@ -1498,6 +1510,7 @@ Respond in valid JSON:
           messages: groqMessages,
           temperature: 0.7,
         }),
+        signal: options.signal,
       });
       const finalData = await finalRes.json();
       const finalReplyGroq = finalData.choices?.[0]?.message?.content?.trim() || '';
@@ -1553,6 +1566,7 @@ Respond in valid JSON:
                 tool_choice: 'auto',
                 temperature: 0.7,
               }),
+              signal: options.signal,
             });
             if (!res.ok) {
               const errText = await res.text().catch(() => '');
@@ -1560,7 +1574,7 @@ Respond in valid JSON:
             }
             return await res.json();
           },
-          { operationName: `MistralAgentRound(${round})` }
+          { operationName: `MistralAgentRound(${round})`, signal: options.signal }
         );
 
         const choice = mistralRes.choices?.[0];
@@ -1620,6 +1634,7 @@ Respond in valid JSON:
           messages: mistralMessages,
           temperature: 0.7,
         }),
+        signal: options.signal,
       });
       const finalData = await finalRes.json();
       const finalReplyMistral = finalData.choices?.[0]?.message?.content?.trim() || '';
