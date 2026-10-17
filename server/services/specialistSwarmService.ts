@@ -1281,7 +1281,7 @@ class SpecialistSwarmService {
 
           const durationMs = Date.now() - specStart;
           const summary = searchRes.status === 'success' 
-            ? `Identified ${searchRes.results.length} potential risk vectors and failure modes.`
+            ? `Retrieved ${searchRes.results.length} source records relevant to potential risks; retrieval alone does not establish that a risk is present.`
             : `Risk audit limited: ${searchRes.error}`;
 
           specialistTraces.push({
@@ -1329,7 +1329,7 @@ class SpecialistSwarmService {
 
           const durationMs = Date.now() - specStart;
           const summary = searchRes.status === 'success'
-            ? `Mapped ${searchRes.results.length} alternative strategic perspectives.`
+            ? `Retrieved ${searchRes.results.length} source records that may inform alternative perspectives; the sources still require evidence-based synthesis.`
             : `Perspective shift limited: ${searchRes.error}`;
 
           specialistTraces.push({
@@ -1377,7 +1377,7 @@ class SpecialistSwarmService {
 
           const durationMs = Date.now() - specStart;
           const summary = searchRes.status === 'success'
-            ? `Verified ${searchRes.results.length} data points against current market noise.`
+            ? `Retrieved ${searchRes.results.length} source records for claim checking; retrieval alone does not verify claims or data points.`
             : `Signal filtering limited: ${searchRes.error}`;
 
           specialistTraces.push({
@@ -1425,7 +1425,7 @@ class SpecialistSwarmService {
 
           const durationMs = Date.now() - specStart;
           const summary = searchRes.status === 'success'
-            ? `Retrieved ${searchRes.results.length} historical case studies and precedents.`
+            ? `Retrieved ${searchRes.results.length} source records that may discuss historical precedents; their content and relevance still require assessment.`
             : `Historical mirroring limited: ${searchRes.error}`;
 
           specialistTraces.push({
