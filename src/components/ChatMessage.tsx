@@ -461,6 +461,19 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
+        {isUser && message.processingStatus === 'processing' && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} role="status" aria-live="polite">
+            <span>Processing</span>
+            <Loader2 className="inline h-3.5 w-3.5 animate-spin" aria-label="Processing" />
+          </div>
+        )}
+        {isUser && message.processingStatus === 'failed' && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
+          <div className="mt-1 flex items-center justify-end gap-1 text-[11px] text-red-500" role="status" aria-live="polite">
+            <span>Processing failed</span>
+            <AlertCircle className="inline h-3.5 w-3.5" aria-label="Processing failed" />
+          </div>
+        )}
+
         {/* Display only explicit provider-backed state; user messages have no inferred ticks. */}
         {!isUser && message.status && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
           <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
