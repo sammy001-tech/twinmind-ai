@@ -77,14 +77,20 @@ class OwnerAuthService {
   }
 
   public isAuthenticated(request: Request): boolean {
+    const authHeader = request.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      if (this.isValidSessionToken(token)) return true;
+    }
     return this.isValidSessionToken(readCookie(request, OWNER_SESSION_COOKIE));
   }
 
-  public setSessionCookie(response: Response): void {
-    response.cookie(OWNER_SESSION_COOKIE, this.createSessionToken(), {
+  public setSessionCookie(response: Response, token?: string): void {
+    const sessionToken = token || this.createSessionToken();
+    response.cookie(OWNER_SESSION_COOKIE, sessionToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: true,
+      sameSite: 'none',
       path: '/',
       maxAge: OWNER_SESSION_TTL_SECONDS * 1000,
     });
@@ -93,8 +99,8 @@ class OwnerAuthService {
   public clearSessionCookie(response: Response): void {
     response.clearCookie(OWNER_SESSION_COOKIE, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: true,
+      sameSite: 'none',
       path: '/',
     });
   }

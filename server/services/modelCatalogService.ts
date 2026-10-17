@@ -242,17 +242,24 @@ class ModelCatalogService {
       const eligible: string[] = [];
 
       for await (const model of pager) {
-                // Validate provider-returned capabilities because the SDK Model type omits this API metadata.
-                const rawModel = model as unknown as { name?: unknown; displayName?: unknown; description?: unknown; supportedGenerationMethods?: unknown };
-                const id = typeof rawModel.name === 'string' ? rawModel.name.replace(/^models\//, '') : '';
-                const methods = Array.isArray(rawModel.supportedGenerationMethods)
-                  ? rawModel.supportedGenerationMethods.filter((item): item is string => typeof item === 'string')
-                  : [];
-                if (!id) continue;
+        // Validate provider-returned capabilities because the SDK Model type omits this API metadata.
+        const rawModel = model as unknown as {
+          name?: unknown;
+          displayName?: unknown;
+          description?: unknown;
+          supportedActions?: unknown;
+          supportedGenerationMethods?: unknown;
+        };
+        const id = typeof rawModel.name === 'string' ? rawModel.name.replace(/^models\//, '') : '';
+        const actions = [
+          ...(Array.isArray(rawModel.supportedActions) ? rawModel.supportedActions : []),
+          ...(Array.isArray(rawModel.supportedGenerationMethods) ? rawModel.supportedGenerationMethods : []),
+        ].filter((item): item is string => typeof item === 'string');
+        if (!id) continue;
 
         const matches = type === 'embedding'
-          ? id.toLowerCase().includes('embedding') && methods.includes('embedContent')
-          : id.toLowerCase().includes('tts') && methods.includes('generateContent');
+          ? id.toLowerCase().includes('embedding') && (actions.includes('embedContent') || actions.includes('asyncBatchEmbedContent'))
+          : id.toLowerCase().includes('tts') && (actions.includes('generateContent') || actions.includes('predict'));
 
         if (matches) eligible.push(id);
       }
@@ -265,10 +272,18 @@ class ModelCatalogService {
       }
 
       if (!eligible.length) throw new Error(`MODEL_CAPABILITY_UNAVAILABLE:gemini:${type}`);
-      if (eligible.length > 1) {
-        throw new Error(`MODEL_CAPABILITY_SELECTION_REQUIRED:gemini:${type}:${eligible.join(',')}`);
+      if (type === 'tts') {
+        const preferredTts = eligible.find((m) => m === 'gemini-3.8-flash-tts')
+          || eligible.find((m) => m === 'gemini-3.1-flash-tts-preview')
+          || eligible.find((m) => m === 'gemini-2.5-flash-preview-tts')
+          || eligible.find((m) => m.includes('flash') && m.includes('tts'))
+          || eligible[0];
+        return preferredTts;
       }
-      return eligible[0];
+      const preferredEmb = eligible.find((m) => m === 'gemini-embedding-2')
+        || eligible.find((m) => m === 'gemini-embedding-001')
+        || eligible[0];
+      return preferredEmb;
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('MODEL_')) throw err;
       console.warn(`[ModelCatalogService] Live Gemini ${type} capability discovery failed:`, err);

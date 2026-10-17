@@ -22,9 +22,13 @@ import {
   Globe,
   Send,
   Radio,
+  Play,
+  Square,
+  Loader2,
 } from 'lucide-react';
 import { LiveModelInfo } from '../types/index.ts';
 import { ThemeMode } from '../hooks/useTheme.ts';
+import { apiFetch } from '../utils/apiFetch.ts';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -93,10 +97,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveName,
   isEmbedded = false,
 }) => {
-  const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral' | ''>(
-    activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral'
-      ? activeProvider
-      : ''
+  const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral'>(
+    activeProvider === 'groq' || activeProvider === 'mistral' ? activeProvider : 'gemini'
   );
 
   const [modelsByProvider, setModelsByProvider] = useState<{
@@ -174,6 +176,98 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   });
   const [catalogueDiagnostics, setCatalogueDiagnostics] = useState<Record<string, { status?: string; errorCode?: string; httpStatus?: number }>>({});
 
+  // Dynamic Voice Persona (TTS) State
+  interface VoiceOption {
+    id: string;
+    name: string;
+    gender: string;
+    tone: string;
+    sampleText: string;
+  }
+  const [availableVoices, setAvailableVoices] = useState<VoiceOption[]>([]);
+  const [isLoadingVoices, setIsLoadingVoices] = useState(false);
+  const [voicesProviderInfo, setVoicesProviderInfo] = useState<{
+    providerName: string;
+    supportsTts: boolean;
+    ttsModel: string | null;
+    fallbackNotice?: string;
+  }>({
+    providerName: 'Google Gemini',
+    supportsTts: false,
+    ttsModel: null,
+  });
+  const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
+  const [testVoiceError, setTestVoiceError] = useState<string | null>(null);
+  const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
+
+  const loadVoices = async (targetProvider?: string) => {
+    setIsLoadingVoices(true);
+    setTestVoiceError(null);
+    try {
+      const p = targetProvider || activeProvider || 'gemini';
+      const res = await apiFetch(`/api/tts/voices?provider=${encodeURIComponent(p)}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.voices)) {
+        setAvailableVoices(data.voices);
+        setVoicesProviderInfo({
+          providerName: data.providerName || p,
+          supportsTts: Boolean(data.supportsTts),
+          ttsModel: data.ttsModel || null,
+          fallbackNotice: data.fallbackNotice,
+        });
+        if (!voice && data.voices.length > 0) {
+          onVoiceChange(data.voices[0].id);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to load dynamic TTS voices:', err);
+    } finally {
+      setIsLoadingVoices(false);
+    }
+  };
+
+  const handleTestVoice = async (voiceItem: VoiceOption) => {
+    if (activeAudio) {
+      activeAudio.pause();
+      setActiveAudio(null);
+    }
+    if (testingVoiceId === voiceItem.id) {
+      setTestingVoiceId(null);
+      return;
+    }
+    setTestingVoiceId(voiceItem.id);
+    setTestVoiceError(null);
+    try {
+      const res = await apiFetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: voiceItem.sampleText,
+          voice: voiceItem.id,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success || !data.audioDataUrl) {
+        throw new Error(data.error || 'Failed to generate voice preview');
+      }
+      const audio = new Audio(data.audioDataUrl);
+      audio.playbackRate = voiceSpeed || 1;
+      setActiveAudio(audio);
+      audio.onended = () => {
+        setTestingVoiceId(null);
+        setActiveAudio(null);
+      };
+      audio.onerror = () => {
+        setTestVoiceError(`Audio playback error for ${voiceItem.name}`);
+        setTestingVoiceId(null);
+        setActiveAudio(null);
+      };
+      await audio.play();
+    } catch (err) {
+      setTestVoiceError(err instanceof Error ? err.message : 'Could not play voice preview');
+      setTestingVoiceId(null);
+    }
+  };
 
   // Neon PostgreSQL Database State
   const [dbStatus, setDbStatus] = useState<{
@@ -636,7 +730,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const loadCredentialSources = async () => {
     try {
-      const response = await fetch('/api/settings');
+      const response = await apiFetch('/api/settings');
       const data = await response.json();
       if (!response.ok || !data?.settings?.apiKeySources) return;
       const sources = data.settings.apiKeySources as Record<string, unknown>;
@@ -674,7 +768,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       testedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     });
     try {
-      const res = await fetch('/api/db/test', {
+      const res = await apiFetch('/api/db/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ databaseUrl: dbUrlInput.trim() }),
@@ -725,7 +819,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       if (mKey) headers['x-mistral-key'] = mKey;
 
       // Query models from backend (returns live Gemini from Google GenAI + live Groq/Mistral if keys exist)
-      const res = await fetch('/api/models/all', { headers });
+      const res = await apiFetch('/api/models/all', { headers });
       if (!res.ok) {
         throw new Error('Failed to load models list from server.');
       }
@@ -750,7 +844,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           singleHeaders['x-api-key'] = customMistralKey || mistralKeyInput;
         }
         if (!selectedProviderTab) throw new Error('Select a provider tab before requesting its individual catalogue.');
-        const singleRes = await fetch(`/api/models/live?provider=${selectedProviderTab}`, {
+        const singleRes = await apiFetch(`/api/models/live?provider=${selectedProviderTab}`, {
           headers: singleHeaders,
         });
         const singleData = await singleRes.json();
@@ -787,8 +881,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       loadTavilyStatus();
       loadTelegramStatus();
       loadTwilioSettings();
+      loadVoices();
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen) {
+      loadVoices(activeProvider);
+    }
+  }, [isOpen, activeProvider]);
+
+  useEffect(() => {
+    if (!isOpen && activeAudio) {
+      activeAudio.pause();
+      setActiveAudio(null);
+      setTestingVoiceId(null);
+    }
+  }, [isOpen, activeAudio]);
 
   useEffect(() => {
     // When tab changes, update custom input placeholder with current model of that provider
@@ -796,6 +905,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setCustomModelInput(currentModelForTab);
     setSearchFilter('');
   }, [selectedProviderTab, providerModels]);
+
+  useEffect(() => {
+    if (activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral') {
+      setSelectedProviderTab(activeProvider);
+    }
+  }, [activeProvider]);
 
   if (!isOpen) return null;
 
@@ -2530,32 +2645,135 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </form>
         </div>
 
-        {/* Voice Selection */}
-        <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3">
-          <div className="flex items-center gap-2">
-            <Volume2 className="w-4 h-4 text-amber-500 dark:text-amber-400" />
-            <h3 className="text-xs font-semibold text-slate-900 dark:text-white">Voice Note Persona (TTS)</h3>
+        {/* Dynamic Voice Selection (Provider Driven) */}
+        <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3.5">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Volume2 className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+              <h3 className="text-xs font-semibold text-slate-900 dark:text-white">Voice Note Persona (TTS)</h3>
+            </div>
+            <div className="flex items-center gap-1.5 text-[11px]">
+              <span className="text-slate-500 dark:text-slate-400">Provider:</span>
+              <span className="font-semibold text-slate-900 dark:text-white flex items-center gap-1">
+                {voicesProviderInfo.supportsTts && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
+                )}
+                {voicesProviderInfo.providerName}
+              </span>
+              {voicesProviderInfo.ttsModel && (
+                <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-[10px] font-mono text-slate-600 dark:text-slate-400">
+                  {voicesProviderInfo.ttsModel}
+                </span>
+              )}
+            </div>
           </div>
+
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Configure the voice identifier accepted by the selected speech model:
+            Select an official voice persona supported by the active AI speech model. Test any voice before selecting:
           </p>
 
-          <div className="space-y-1.5">
-            <label htmlFor="tts-voice-id" className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-              Provider voice identifier
-            </label>
-            <input
-              id="tts-voice-id"
-              type="text"
-              value={voice}
-              onChange={(event) => onVoiceChange(event.target.value)}
-              placeholder="Enter a voice ID supported by the configured TTS model"
-              className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-amber-500"
-            />
-            <p className="text-[10px] text-slate-500 dark:text-slate-400">
-              Voice IDs are not preselected. The provider validates the configured ID when audio is generated.
-            </p>
-          </div>
+          {voicesProviderInfo.fallbackNotice && (
+            <div className="p-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 text-xs">
+              {voicesProviderInfo.fallbackNotice}
+            </div>
+          )}
+
+          {testVoiceError && (
+            <div className="p-2.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{testVoiceError}</span>
+            </div>
+          )}
+
+          {isLoadingVoices ? (
+            <div className="py-6 flex items-center justify-center gap-2 text-xs text-slate-500">
+              <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+              <span>Loading provider voices...</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {availableVoices.map((v) => {
+                const isSelected = (voice || 'Puck') === v.id;
+                const isTesting = testingVoiceId === v.id;
+                return (
+                  <div
+                    key={v.id}
+                    onClick={() => onVoiceChange(v.id)}
+                    className={`p-3 rounded-lg border transition cursor-pointer flex flex-col justify-between gap-2.5 ${
+                      isSelected
+                        ? 'border-amber-500 bg-amber-500/10 dark:bg-amber-500/10 shadow-xs'
+                        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${
+                            isSelected
+                              ? 'border-amber-500 bg-amber-500'
+                              : 'border-slate-300 dark:border-slate-700'
+                          }`}>
+                            {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-white dark:bg-slate-950" />}
+                          </span>
+                          <span className="text-xs font-bold text-slate-900 dark:text-white">{v.name}</span>
+                        </div>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                          {v.gender}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 dark:text-slate-400 pl-5.5">
+                        {v.tone}
+                      </p>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200/60 dark:border-slate-800/60 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleTestVoice(v);
+                        }}
+                        className={`px-2.5 py-1 rounded text-[11px] font-medium transition flex items-center gap-1.5 ${
+                          isTesting
+                            ? 'bg-amber-500 text-slate-950 font-bold animate-pulse'
+                            : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        {isTesting ? (
+                          <>
+                            <Square className="w-3 h-3 fill-current text-slate-950" />
+                            <span>Stop</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="w-3 h-3 fill-current text-amber-500" />
+                            <span>Test Voice</span>
+                          </>
+                        )}
+                      </button>
+
+                      {isSelected ? (
+                        <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5" /> Active Persona
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onVoiceChange(v.id);
+                          }}
+                          className="text-[10px] text-slate-500 hover:text-slate-300 font-medium"
+                        >
+                          Select
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Voice Note Auto-Play & Speed Settings */}
           <div className="pt-2 border-t border-slate-200 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">

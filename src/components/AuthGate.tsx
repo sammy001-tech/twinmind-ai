@@ -14,7 +14,10 @@ export default function AuthGate({ children }: AuthGateProps) {
 
   async function checkSession() {
     try {
-      const response = await fetch('/api/auth/session', { credentials: 'same-origin' });
+      const storedToken = localStorage.getItem('twinmind_owner_token');
+      const headers: Record<string, string> = {};
+      if (storedToken) headers['Authorization'] = `Bearer ${storedToken}`;
+      const response = await fetch('/api/auth/session', { credentials: 'include', headers });
       const result = await response.json();
       if (!result.configured) {
         setState('unconfigured');
@@ -37,7 +40,7 @@ export default function AuthGate({ children }: AuthGateProps) {
     try {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
-        credentials: 'same-origin',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ password }),
       });
@@ -45,6 +48,9 @@ export default function AuthGate({ children }: AuthGateProps) {
       if (!response.ok) {
         setError(result.error || 'Authentication failed.');
         return;
+      }
+      if (result.token) {
+        localStorage.setItem('twinmind_owner_token', result.token);
       }
       setPassword('');
       setState('authenticated');
@@ -55,8 +61,12 @@ export default function AuthGate({ children }: AuthGateProps) {
 
   async function signOut() {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+      const storedToken = localStorage.getItem('twinmind_owner_token');
+      const headers: Record<string, string> = {};
+      if (storedToken) headers['Authorization'] = `Bearer ${storedToken}`;
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers });
     } finally {
+      localStorage.removeItem('twinmind_owner_token');
       setState('locked');
       setPassword('');
     }

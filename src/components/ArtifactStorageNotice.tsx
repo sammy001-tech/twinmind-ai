@@ -89,6 +89,10 @@ export const ArtifactStorageNotice: React.FC = () => {
   const mode = state.status === 'ready' ? state.storage.mode : 'unavailable';
   const isDatabaseBacked = mode === 'database';
   const isUnavailable = state.status === 'unavailable' || mode === 'unavailable';
+
+  // Do not clutter the chat UI when database-backed artifact storage is active and healthy.
+  if (isDatabaseBacked && !isUnavailable) return null;
+
   const statusMessage = state.status === 'ready'
     ? state.storage.warning
     : state.message;

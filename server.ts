@@ -154,8 +154,9 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
   }
 
   loginAttempts.delete(ipKey);
-  ownerAuthService.setSessionCookie(res);
-  res.json({ success: true, expiresInSeconds: 12 * 60 * 60 });
+  const token = ownerAuthService.createSessionToken();
+  ownerAuthService.setSessionCookie(res, token);
+  res.json({ success: true, token, expiresInSeconds: 12 * 60 * 60 });
 });
 
 app.post('/api/auth/logout', (_req: Request, res: Response) => {
@@ -1648,6 +1649,26 @@ Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreemen
   }
 });
 
+// Convert raw PCM audio returned by speech synthesis models into standard browser-playable WAV
+function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1): Buffer {
+  const header = Buffer.alloc(44);
+  const dataLength = pcmBuffer.length;
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataLength, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
+  header.writeUInt16LE(1, 20);  // AudioFormat (1 for PCM)
+  header.writeUInt16LE(numChannels, 22); // NumChannels
+  header.writeUInt32LE(sampleRate, 24);  // SampleRate
+  header.writeUInt32LE(sampleRate * numChannels * 2, 28); // ByteRate
+  header.writeUInt16LE(numChannels * 2, 32); // BlockAlign
+  header.writeUInt16LE(16, 34); // BitsPerSample
+  header.write('data', 36);
+  header.writeUInt32LE(dataLength, 40);
+  return Buffer.concat([header, pcmBuffer]);
+}
+
 // Text-to-Speech (Voice Note generation) using dynamic model resolution
 app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -1701,17 +1722,90 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
       });
     });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const inlinePart = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    const base64Audio = inlinePart?.data;
     if (!base64Audio) {
       res.status(502).json({ success: false, code: 'TTS_OUTPUT_UNAVAILABLE', error: 'The selected model returned no audio data.' });
       return;
     }
 
-    res.json({ success: true, audioDataUrl: `data:audio/wav;base64,${base64Audio}` });
+    let sampleRate = 24000;
+    if (inlinePart?.mimeType) {
+      const match = inlinePart.mimeType.match(/rate=(\d+)/);
+      if (match) sampleRate = parseInt(match[1], 10);
+    }
+    const pcmBuffer = Buffer.from(base64Audio, 'base64');
+    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, 1);
+
+    res.json({ success: true, audioDataUrl: `data:audio/wav;base64,${wavBuffer.toString('base64')}` });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Speech synthesis failed.';
     console.error('[TTS] Request failed:', message);
     res.status(502).json({ success: false, code: message.split(':')[0] || 'TTS_FAILED', error: message });
+  }
+});
+
+// Query dynamic TTS voices supported by the active AI provider
+app.get('/api/tts/voices', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const settings = settingsManager.getSettings();
+    const requestedProvider = typeof req.query.provider === 'string' ? req.query.provider.trim() : '';
+    const provider = requestedProvider || settings.activeProvider || 'gemini';
+
+    const geminiKey = resolveProviderCredential(
+      process.env.GEMINI_API_KEY,
+      settings.customGeminiKey,
+      req.get('x-gemini-key') || req.get('x-api-key')
+    ).key;
+
+    let ttsModel = '';
+    let supportsTts = false;
+    if (geminiKey) {
+      try {
+        ttsModel = await modelCatalogService.resolveSpecializedModel('tts', geminiKey);
+        supportsTts = Boolean(ttsModel);
+      } catch (mErr) {
+        console.warn('[TTS Voices] Could not resolve specialized TTS model:', mErr);
+      }
+    }
+
+    const geminiVoices = [
+      { id: 'Puck', name: 'Puck', gender: 'Neutral', tone: 'Energetic & engaging', sampleText: 'Hello! I am Puck, your energetic AI companion.' },
+      { id: 'Charon', name: 'Charon', gender: 'Deeper', tone: 'Calm, authoritative & steady', sampleText: 'Hello. I am Charon, a deep and steady voice for thoughtful discussions.' },
+      { id: 'Kore', name: 'Kore', gender: 'Clear', tone: 'Balanced, clear & professional', sampleText: 'Hi there! I am Kore, a clear and balanced voice persona.' },
+      { id: 'Fenrir', name: 'Fenrir', gender: 'Deeper', tone: 'Rich, resonant & grounded', sampleText: 'Greetings. I am Fenrir, ready to assist you with a grounded persona.' },
+      { id: 'Aoede', name: 'Aoede', gender: 'Melodic', tone: 'Warm, expressive & friendly', sampleText: 'Hello! I am Aoede, bringing a warm and expressive voice to our chats.' },
+    ];
+
+    if (provider === 'gemini') {
+      res.json({
+        success: true,
+        provider: 'gemini',
+        providerName: 'Google Gemini',
+        supportsTts,
+        ttsModel: ttsModel || null,
+        activeVoice: settings.voice || 'Puck',
+        voices: geminiVoices,
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      provider,
+      providerName: provider === 'groq' ? 'Groq LPUs' : 'Mistral AI',
+      supportsTts,
+      ttsModel: ttsModel || null,
+      activeVoice: settings.voice || 'Puck',
+      fallbackNotice: `${provider === 'groq' ? 'Groq' : 'Mistral'} focuses on text models. Voice notes will use the Gemini TTS engine.`,
+      voices: geminiVoices,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      code: 'TTS_VOICES_FETCH_FAILED',
+      error: err instanceof Error ? err.message : 'Failed to query voice capabilities',
+    });
   }
 });
 
