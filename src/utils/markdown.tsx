@@ -1,24 +1,98 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { Check, Copy } from 'lucide-react';
 
-// Render inline bold, italic, and code formatting
+/**
+ * Only absolute HTTP(S) links are interactive. This keeps Markdown labels readable
+ * without making javascript:, data:, or protocol-relative URLs navigable.
+ */
+export function isSafeExternalMarkdownUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 export const renderInlineMarkdown = (str: string): React.ReactNode => {
-  const parts = str.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`)/g);
+  const parts = str.split(/(\[[^\]]+\]\([^)]+\)|\*\*.*?\*\*|\*.*?\*|`.*?`)/g);
   return parts.map((part, i) => {
+    const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (linkMatch) {
+      const [, label, url] = linkMatch;
+      return isSafeExternalMarkdownUrl(url)
+        ? (
+          <a
+            key={i}
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-amber-700 underline decoration-amber-500/40 underline-offset-2 hover:decoration-amber-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50 dark:text-amber-300 dark:hover:text-amber-200 break-words"
+          >
+            {label}
+          </a>
+        )
+        : <span key={i} className="break-words">{label}</span>;
+    }
     if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={i} className="font-semibold text-slate-900 dark:text-white break-words">{part.slice(2, -2)}</strong>;
+      return <strong key={i} className="font-semibold text-slate-950 dark:text-white break-words">{part.slice(2, -2)}</strong>;
     }
     if (part.startsWith('*') && part.endsWith('*')) {
       return <em key={i} className="italic text-slate-800 dark:text-slate-200 break-words">{part.slice(1, -1)}</em>;
     }
     if (part.startsWith('`') && part.endsWith('`')) {
       return (
-        <code key={i} className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-black/30 font-mono text-xs text-amber-700 dark:text-amber-300 break-all whitespace-pre-wrap">
+        <code key={i} className="rounded-md border border-slate-200/80 bg-slate-100 px-1.5 py-0.5 font-mono text-[0.875em] font-medium text-amber-800 break-all whitespace-pre-wrap dark:border-slate-700/70 dark:bg-slate-950/70 dark:text-amber-200">
           {part.slice(1, -1)}
         </code>
       );
     }
     return <span key={i} className="break-words">{part}</span>;
   });
+};
+
+interface CodeBlockProps {
+  language: string;
+  code: string;
+}
+
+const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
+  const handleCopy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard access is unavailable in this browser.');
+      }
+      await navigator.clipboard.writeText(code);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  };
+
+  return (
+    <section aria-label={language ? language + ' code block' : 'Code block'} className="my-4 min-w-0 overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm dark:border-slate-700/80 dark:bg-slate-950/90">
+      <div className="flex min-h-10 items-center justify-between gap-3 border-b border-slate-200/90 bg-slate-50 px-3 sm:px-4 dark:border-slate-800 dark:bg-slate-900/90">
+        <span className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+          {language || 'Code'}
+        </span>
+        <button
+          type="button"
+          onClick={() => void handleCopy()}
+          aria-label={copyState === 'copied' ? 'Code copied' : 'Copy code'}
+          title={copyState === 'failed' ? 'Clipboard access failed' : copyState === 'copied' ? 'Copied' : 'Copy code'}
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
+        >
+          {copyState === 'copied' ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+          <span>{copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy code'}</span>
+        </button>
+      </div>
+      <pre className="max-h-[32rem] overflow-auto overscroll-x-contain p-3.5 text-[13px] leading-6 text-slate-800 sm:p-4 dark:text-slate-100">
+        <code className="font-mono whitespace-pre">{code}</code>
+      </pre>
+    </section>
+  );
 };
 
 // Render message body with full markdown formatting (including proper tables, headers, code blocks, lists)
@@ -56,16 +130,7 @@ export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
         i++; // skip closing ```
       }
       elements.push(
-        <div key={`code-${i}`} className="my-2.5 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-300 dark:border-slate-800 overflow-hidden font-mono text-xs shadow-md">
-          {lang && (
-            <div className="px-3 py-1 bg-slate-200 dark:bg-slate-900 border-b border-slate-300 dark:border-slate-800 text-[10px] text-amber-700 dark:text-amber-400 font-semibold uppercase tracking-wider">
-              {lang}
-            </div>
-          )}
-          <pre className="p-3 whitespace-pre-wrap break-all text-slate-800 dark:text-amber-200/90 leading-relaxed font-mono text-[12px]">
-            <code>{codeLines.join('\n')}</code>
-          </pre>
-        </div>
+        <CodeBlock key={`code-${i}`} language={lang} code={codeLines.join('\n')} />
       );
       continue;
     }
