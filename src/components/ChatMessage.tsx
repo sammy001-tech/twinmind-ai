@@ -711,7 +711,7 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   voiceSpeed = 1,
   onVoiceSpeedChange,
   isDark = true,
-  streamingMessageId, 
+  streamingMessageId,
 }) => {
   const groups = groupMessagesBySender(messages, 5 * 60 * 1000);
 
