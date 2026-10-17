@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { getChatScrollState } from './utils/chatScroll.ts';
 import { normalizeDynamicPromptTemplates } from './utils/dynamicPrompts.ts';
+import { resolveMessageProcessingStatus, resolvePersistedMessageStatus } from './utils/messageStatus.ts';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
@@ -293,6 +294,7 @@ export default function App() {
             createdAt: m.created_at ? new Date(m.created_at).getTime() : undefined,
             channel: m.channel,
             status: resolvePersistedMessageStatus(m.metadata?.deliveryStatus),
+            processingStatus: resolveMessageProcessingStatus(m.metadata?.processingStatus),
             modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
           }));
