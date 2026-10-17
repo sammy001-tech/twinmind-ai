@@ -63,6 +63,14 @@ export class WhatsAppWorker {
     }
   }
 
+  private async sendReply(to: string, bodyText?: string, mediaUrl?: string | string[]) {
+    const result = await twilioService.sendWhatsAppMessage(to, bodyText, mediaUrl);
+    if (!result.success) {
+      throw new Error(result.error || 'WHATSAPP_DELIVERY_FAILED: provider rejected the outbound message');
+    }
+    return result;
+  }
+
   private async executeJobPayload(job: JobRecord) {
     const userMessage = (job.payload.body || job.payload.Body || '').trim();
     const senderPhone = job.senderPhone;
@@ -126,13 +134,13 @@ export class WhatsAppWorker {
     if (pendingConfirmation) {
       if (confirmationService.isAffirmative(userMessage)) {
         const commitRes = await confirmationService.commitConfirmation(pendingConfirmation.actionId, senderPhone);
-        await twilioService.sendWhatsAppMessage(senderPhone, commitRes.replyMessage);
+        await this.sendReply(senderPhone, commitRes.replyMessage);
         return;
       }
 
       if (confirmationService.isNegative(userMessage)) {
         const cancelRes = confirmationService.cancelConfirmation(senderPhone);
-        await twilioService.sendWhatsAppMessage(senderPhone, cancelRes);
+        await this.sendReply(senderPhone, cancelRes);
         return;
       }
     }
@@ -160,7 +168,7 @@ export class WhatsAppWorker {
         if (!prompt) {
           throw new Error('AI_OUTPUT_SCHEMA_INVALID: clarification is required but the model did not provide usable text');
         }
-        await twilioService.sendWhatsAppMessage(senderPhone, `🤔 ${prompt}`);
+        await this.sendReply(senderPhone, `🤔 ${prompt}`);
         return;
       }
 
@@ -168,7 +176,7 @@ export class WhatsAppWorker {
       switch (classification.intent) {
         case 'DEBATE_REQUEST': {
           const topic = classification.extractedParams.debateTopic || userMessage;
-          await twilioService.sendWhatsAppMessage(
+          await this.sendReply(
             senderPhone,
             `🥊 *TwinMind Swarm Debate Initiated*\n\nTopic: "${topic}"\nExecuting multi-agent evidence gathering and stress-testing. Stand by for the Chief Arbiter verdict...`
           );
@@ -176,13 +184,13 @@ export class WhatsAppWorker {
           const debateRes = await twinAgentService.executeMultiAgentDebate(topic, 'whatsapp', activeProvider, activeModel);
 
           if (debateRes.error) {
-            await twilioService.sendWhatsAppMessage(senderPhone, `⚠️ Debate failed: ${debateRes.error}`);
+            await this.sendReply(senderPhone, `⚠️ Debate failed: ${debateRes.error}`);
             return;
           }
 
           const synthesis = String(debateRes.synthesis || debateRes.recommendation || 'Debate complete.');
           const replyText = `🎯 *CHIEF ARBITER DEBATE VERDICT*\n\n${synthesis}\n\n_Decision recorded in Knowledge Vault (#${debateRes.decisionId || 'saved'})_`;
-          await twilioService.sendWhatsAppMessage(senderPhone, replyText);
+          await this.sendReply(senderPhone, replyText);
           return;
         }
 
@@ -201,7 +209,7 @@ export class WhatsAppWorker {
           }
 
           if (!targetDecisionId) {
-            await twilioService.sendWhatsAppMessage(
+            await this.sendReply(
               senderPhone,
               `❓ Which decision outcome are you logging? Please specify the decision ID (e.g., "Outcome for decision #3: success").`
             );
@@ -214,7 +222,7 @@ export class WhatsAppWorker {
             reportedStatus,
             reportedNotes
           );
-          await twilioService.sendWhatsAppMessage(senderPhone, promptMessage);
+          await this.sendReply(senderPhone, promptMessage);
           return;
         }
 
@@ -226,21 +234,21 @@ export class WhatsAppWorker {
             const decision = await neonDb.getDecisionById(targetId);
             if (decision) {
               const reply = `📌 *Decision #${decision.id}: ${decision.title}*\n\n*Recommendation*: ${decision.recommendation || 'None'}\n*Confidence*: ${decision.confidence}%\n*Created*: ${decision.created_at?.slice(0, 10) || 'Recent'}`;
-              await twilioService.sendWhatsAppMessage(senderPhone, reply);
+              await this.sendReply(senderPhone, reply);
               return;
             }
           }
 
           const recentDecisions = await neonDb.getDecisions(3);
           if (recentDecisions.length === 0) {
-            await twilioService.sendWhatsAppMessage(senderPhone, `📂 No stored decisions found in your Knowledge Vault.`);
+            await this.sendReply(senderPhone, `📂 No stored decisions found in your Knowledge Vault.`);
             return;
           }
 
           const listText = recentDecisions
             .map((d) => `• *#${d.id}*: ${d.title} (${d.confidence}% conf)`)
             .join('\n');
-          await twilioService.sendWhatsAppMessage(
+          await this.sendReply(
             senderPhone,
             `📚 *Recent Strategic Decisions*\n\n${listText}\n\nReply with a decision ID for full details!`
           );
@@ -253,7 +261,7 @@ export class WhatsAppWorker {
           const notesCount = summary.totalIndexedKnowledgeNotes || 0;
 
           const reply = `📊 *TwinMind System Status*\n\n• *Recorded Decisions*: ${count}\n• *Vault Notes*: ${notesCount}\n• *Active Provider*: ${activeProvider.toUpperCase()} (${activeModel})\n\nHow can I assist your decision-making today?`;
-          await twilioService.sendWhatsAppMessage(senderPhone, reply);
+          await this.sendReply(senderPhone, reply);
           return;
         }
       }
@@ -272,7 +280,7 @@ export class WhatsAppWorker {
 
     const reply = typeof turnResult?.reply === 'string' ? turnResult.reply.trim() : '';
     if (!reply) throw new Error('AI_OUTPUT_EMPTY: provider returned no usable reply');
-    const delivered = await twilioService.sendWhatsAppMessage(senderPhone, reply);
+    const delivered = await this.sendReply(senderPhone, reply);
     if (!delivered.success) throw new Error(`DELIVERY_FAILED: ${delivered.error || 'WhatsApp response was not accepted by Twilio'}`);
 
     // Deliver generated artifacts (PDF, Excel .xlsx, CSV, Markdown) directly via WhatsApp mediaUrl
@@ -293,7 +301,7 @@ export class WhatsAppWorker {
             }
             const signedPath = artifactAccessService.createSignedPath(fileName);
             const mediaUrl = `${parsedBaseUrl.origin}${signedPath}`;
-            const artifactDelivery = await twilioService.sendWhatsAppMessage(
+            const artifactDelivery = await this.sendReply(
               senderPhone,
               `📄 *Generated Document*: ${fileName}`,
               mediaUrl
