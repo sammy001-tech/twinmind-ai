@@ -631,7 +631,7 @@ class SpecialistSwarmService {
       customTavilyKey,
       modelOverride,
       signal: externalSignal,
-      deadlineMs = 35_000,
+      deadlineMs = resolveBoundedIntegerSetting(process.env, 'TWINMIND_SWARM_DEADLINE_MS', 75_000, 10_000, 300_000),
       callbacks,
     } = options;
 
@@ -647,6 +647,14 @@ class SpecialistSwarmService {
     if (!configuredModel) {
       throw new Error('MODEL_CONFIGURATION_REQUIRED: select an explicit model for the specialist swarm provider');
     }
+
+    // Validate every dynamic research limit before starting workers or performing external side effects.
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_SEARCH_RESULT_LIMIT', 6, 1, 10);
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_FOLLOW_UP_LIMIT', 2, 0, 4);
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_EXTRACT_LIMIT', 5, 1, 10);
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_SOURCE_CONTENT_LIMIT', 12000, 1000, 30000);
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_REPORT_SOURCE_LIMIT', 8, 1, 20);
+    resolveResearchSearchDepth(process.env);
 
     const providerApiKey = effectiveProvider === 'gemini'
       ? (process.env.GEMINI_API_KEY || settings.customGeminiKey || options.customGeminiKey)
@@ -1735,11 +1743,12 @@ RULES FOR SYNTHESIS:
 
     const hasSpecialistSuccess = specialistTraces.some((t) => t.status === 'success');
     const hasSpecialistError = specialistTraces.some((t) => t.status === 'error');
+    const hasToolError = specialistTraces.some((trace) => trace.tools.some((tool) => tool.status === 'error'));
 
     let overallStatus: SwarmSessionStatus = 'completed';
     if (!hasSpecialistSuccess && !synthSuccess) {
       overallStatus = 'failed';
-    } else if (hasSpecialistError || !synthSuccess) {
+    } else if (hasSpecialistError || hasToolError || !synthSuccess) {
       overallStatus = 'completed_with_errors';
     }
 
