@@ -1,12 +1,14 @@
 /**
  * Multi-Agent Specialist Swarm Resource & Lifecycle Manager (Milestone 1)
  * Enforces:
- * 1. Global 6-call tool budget (retries included)
- * 2. Root AbortController + AbortSignal.any() with 35-second global deadline
+ * 1. Runtime-configured, bounded global tool-call budget (retries included)
+ * 2. Root AbortController + AbortSignal.any() with a runtime-configured deadline
  * 3. Provider-specific circuit breakers (Tavily, Gemini, Neon)
  * 4. Observable status taxonomy ('running', 'completed', 'completed_with_errors', 'failed', 'cancelled', 'timed_out')
  * 5. Immediate late-result discard after termination
  */
+
+import { resolveBoundedIntegerSetting } from './researchEvidence.ts';
 
 export type SwarmSessionStatus =
   | 'running'
@@ -17,7 +19,7 @@ export type SwarmSessionStatus =
   | 'timed_out';
 
 export class SwarmBudgetExceededError extends Error {
-  constructor(message = 'SWARM_BUDGET_EXHAUSTED: Global 6 tool-call budget reached for this session.') {
+  constructor(message = 'SWARM_BUDGET_EXHAUSTED: the configured global tool-call budget was reached for this session.') {
     super(message);
     this.name = 'SwarmBudgetExceededError';
   }
@@ -218,7 +220,7 @@ export class SwarmSessionRegistry {
       userId = 'authenticated-owner',
       tenantId = 'single-owner-workspace',
       channel = 'web',
-      deadlineMs = 35_000,
+      deadlineMs = resolveBoundedIntegerSetting(process.env, 'TWINMIND_SWARM_DEADLINE_MS', 75_000, 10_000, 300_000),
       externalSignal,
     } = options;
 
@@ -233,7 +235,9 @@ export class SwarmSessionRegistry {
 
     const combinedSignal = AbortSignal.any(signalsToCombine);
 
-    const budget = new SwarmToolBudget(6);
+    const budget = new SwarmToolBudget(
+      resolveBoundedIntegerSetting(process.env, 'TWINMIND_SWARM_TOOL_BUDGET', 12, 6, 40),
+    );
 
     const scope: SwarmSessionExecutionScope = {
       sessionId,
