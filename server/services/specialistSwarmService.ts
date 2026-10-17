@@ -1,8 +1,8 @@
 /**
- * Multi-Agent Specialist Swarm Engine (Milestone 2: Code & Security Auditor Specialist)
- * Strictly enforces ZeroMock & Zero-Fallback Policy:
- * 1. Global 6-tool budget across all specialists (retries consume budget).
- * 2. Root AbortController + AbortSignal.any() with 35-second global deadline.
+ * Multi-Agent Specialist Swarm Engine with evidence-bound live research.
+ * Enforces the repository's ZeroMock & Zero-Fallback policy:
+ * 1. Runtime-configured, bounded tool budget shared by searches and extraction.
+ * 2. Root AbortController + AbortSignal.any() with a runtime-configured deadline.
  * 3. Provider-specific circuit breakers (Tavily, Gemini, Neon).
  * 4. 4,000-token context ceiling per specialist.
  * 5. Three active specialists: DeepResearcher (Web), DataAnalyst (AST Math), CodeAuditor (TypeScript AST Security).
@@ -1571,7 +1571,6 @@ class SpecialistSwarmService {
         .sort((left, right) => Number(right.extracted) - Number(left.extracted))
         .slice(0, reportSourceLimit);
       const sourceIds = new Map(reportSources.map((source, index) => [source.url, `S${index + 1}`] as const));
-      const validSourceIds = new Set(sourceIds.values());
 
       let evidenceContext = '';
       for (const trace of specialistTraces) {
@@ -1643,6 +1642,10 @@ class SpecialistSwarmService {
       }
       // Enforce 4,000-token context ceiling on prompt payload
       const boundedEvidence = this.enforceContextCeiling(evidenceContext, 4000);
+      // Only permit citations whose full source record survived context-budget enforcement.
+      const validSourceIds = new Set(
+        [...sourceIds.values()].filter((id) => boundedEvidence.includes(`- [${id}] Title:`)),
+      );
 
       const brandName = process.env.APP_BRAND_NAME || 'TwinMind AI';
       const synthesisPrompt = `You are the Chief-of-Staff Arbiter of ${brandName} (Digital Twin & Thinking Partner).
