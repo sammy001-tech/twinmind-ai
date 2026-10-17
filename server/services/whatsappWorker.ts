@@ -44,6 +44,8 @@ export class WhatsAppWorker {
 
       try {
         await this.executeJobPayload(job);
+        const processingFinalized = await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'completed');
+        if (!processingFinalized) throw new Error('PERSISTENCE_FAILED: WhatsApp inbound processing completion was not durably recorded');
         const completed = await jobQueueService.completeJob(job.jobId, this.workerLeaseId);
         if (!completed) throw new Error('PERSISTENCE_FAILED: WhatsApp job completion was not durably recorded');
       } finally {
@@ -53,6 +55,8 @@ export class WhatsAppWorker {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error(`[WhatsAppWorker] Error processing job ${job?.jobId || 'unknown'}:`, errorMsg);
       if (job) {
+        const safeErrorCode = errorMsg.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'WHATSAPP_PROCESSING_FAILED';
+        await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'failed', safeErrorCode);
         await jobQueueService.failJob(job.jobId, this.workerLeaseId, errorMsg);
         let userFacingError = `⚠️ TwinMind encountered an issue: ${errorMsg}`;
         if (errorMsg.includes('401') || errorMsg.includes('API_KEY_INVALID') || errorMsg.includes('unauthorized') || errorMsg.includes('API key')) {
@@ -93,8 +97,13 @@ export class WhatsAppWorker {
       metadata: {
         source: 'twilio',
         hasMedia: Boolean(mediaUrl0),
+        processingStatus: 'processing',
       },
     }, job.messageSid);
+    const processingStarted = await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'processing');
+    if (!processingStarted) {
+      throw new Error('PERSISTENCE_FAILED: WhatsApp inbound processing state could not be recorded');
+    }
 
     if (mediaUrl0) {
       try {
