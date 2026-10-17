@@ -11,6 +11,15 @@ import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
 import { resolveProviderCredential } from '../services/providerCredentialService.ts';
+import {
+  isTelegramMode,
+  isValidTelegramWebhookUrl,
+  parseTelegramOwnerId,
+  resolveTelegramMode,
+  resolveTelegramToken,
+  shouldAttemptTelegramStart,
+  type TelegramMode,
+} from '../services/telegramConfigService.ts';
 import type { AppSettings } from '../../src/types/index.ts';
 
 export interface TelegramConfig {
@@ -57,35 +66,16 @@ function generatePairingCode(): string {
   return code;
 }
 
-// Normalize secrets at the boundary without logging or returning their values.
-function cleanConfigSecret(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  const cleaned = value.trim().replace(/^["']|["']$/g, '');
-  return !cleaned || cleaned.includes('...') || cleaned === '********' ? '' : cleaned;
-}
-
-function parseOwnerId(value: unknown): number | null {
-  if (typeof value !== 'string' && typeof value !== 'number') return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-// Environment values remain authoritative; database-backed values are used when environment values are absent.
+// Environment values remain authoritative; persisted Settings are used when environment values are absent.
 function loadConfig(): TelegramConfig {
   const saved = settingsManager.getSettings();
-  const envMode = process.env.TELEGRAM_MODE;
-  const savedMode = saved.telegramMode;
-  const mode: 'polling' | 'webhook' = envMode === 'polling' || envMode === 'webhook'
-    ? envMode
-    : savedMode === 'webhook' ? 'webhook' : 'polling';
-
   return {
-    token: cleanConfigSecret(process.env.TELEGRAM_BOT_TOKEN) || cleanConfigSecret(saved.telegramToken),
-    ownerId: parseOwnerId(process.env.TELEGRAM_OWNER_ID) ?? parseOwnerId(saved.telegramOwnerId),
+    token: resolveTelegramToken(process.env.TELEGRAM_BOT_TOKEN, saved.telegramToken),
+    ownerId: parseTelegramOwnerId(process.env.TELEGRAM_OWNER_ID) ?? parseTelegramOwnerId(saved.telegramOwnerId),
     ownerUsername: null,
     pairingCode: generatePairingCode(),
-    mode,
-    webhookUrl: cleanConfigSecret(process.env.TELEGRAM_WEBHOOK_URL) || cleanConfigSecret(saved.telegramWebhookUrl),
+    mode: resolveTelegramMode(process.env.TELEGRAM_MODE, saved.telegramMode),
+    webhookUrl: resolveTelegramToken(process.env.TELEGRAM_WEBHOOK_URL, saved.telegramWebhookUrl),
     activeProvider: saved.activeProvider || '',
     activeModel: saved.activeModel || '',
   };
@@ -658,7 +648,7 @@ class TelegramBotManager {
   }
 
   public async updateConfig(newConfig: Partial<TelegramConfig>): Promise<{ success: boolean; message: string }> {
-    if (newConfig.mode !== undefined && newConfig.mode !== 'polling' && newConfig.mode !== 'webhook') {
+    if (newConfig.mode !== undefined && !isTelegramMode(newConfig.mode)) {
       return {
         success: false,
         message: 'Telegram mode must be either polling or webhook.',
@@ -667,20 +657,11 @@ class TelegramBotManager {
 
     if (newConfig.webhookUrl !== undefined) {
       const trimmedUrl = newConfig.webhookUrl.trim();
-      if (trimmedUrl) {
-        let validHttpsUrl = false;
-        try {
-          const parsed = new URL(trimmedUrl);
-          validHttpsUrl = parsed.protocol === 'https:' && Boolean(parsed.hostname) && !parsed.username && !parsed.password;
-        } catch {
-          validHttpsUrl = false;
-        }
-        if (!validHttpsUrl) {
-          return {
-            success: false,
-            message: 'Telegram requires a valid HTTPS webhook URL (e.g. https://your-service.onrender.com).',
-          };
-        }
+      if (!isValidTelegramWebhookUrl(trimmedUrl)) {
+        return {
+          success: false,
+          message: 'Telegram requires a valid HTTPS webhook URL (e.g. https://your-service.onrender.com).',
+        };
       }
     }
 
@@ -717,7 +698,7 @@ class TelegramBotManager {
     this.config = nextConfig;
 
     // A manual Save also retries startup when the current config is saved but the bot is stopped.
-    if (this.config.token && (runtimeConfigChanged || !this.isRunning)) {
+    if (shouldAttemptTelegramStart(Boolean(this.config.token), runtimeConfigChanged, this.isRunning)) {
       const started = await this.start();
       return {
         success: started,
