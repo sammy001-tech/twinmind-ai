@@ -1,6 +1,9 @@
 import type { Request } from 'express';
 import twilio from 'twilio';
 import { settingsManager } from '../db/settingsService.ts';
+import { neonDb } from '../db/neonService.ts';
+import { persistChannelMessage } from './channelConversationService.ts';
+import { splitChannelMessage } from './channelMessagePolicy.ts';
 import type { AppSettings } from '../../src/types/index.ts';
 
 export interface ResolvedTwilioConfig {
@@ -91,7 +94,7 @@ export class TwilioService {
   /**
    * Validate incoming X-Twilio-Signature against current server credentials
    */
-  public validateSignature(req: Request): boolean {
+  public validateSignature(req: Request, canonicalUrlOverride?: string): boolean {
     const signature = req.headers['x-twilio-signature'] as string;
     if (!signature) {
       console.warn('[TwilioService] Missing X-Twilio-Signature header');
@@ -109,7 +112,7 @@ export class TwilioService {
     }
 
     try {
-      const configuredWebhookUrl = (process.env.TWILIO_WEBHOOK_URL || '').trim();
+      const configuredWebhookUrl = (canonicalUrlOverride ?? process.env.TWILIO_WEBHOOK_URL ?? '').trim();
       let url: string;
       if (configuredWebhookUrl) {
         const canonical = new URL(configuredWebhookUrl);
@@ -194,39 +197,131 @@ export class TwilioService {
     to: string,
     bodyText?: string,
     mediaUrl?: string | string[]
-  ): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+  ): Promise<{
+    success: boolean;
+    messageSid?: string;
+    messageSids?: string[];
+    providerStatus?: string;
+    persistenceStatus?: 'saved' | 'failed';
+    error?: string;
+  }> {
     const safeBody = (bodyText || '').trim();
-
-    if (!safeBody && !mediaUrl) {
-      console.warn(`[TwilioService] Skipping WhatsApp send to ${to}: message body and mediaUrl are empty.`);
+    const hasMedia = Boolean(mediaUrl && (Array.isArray(mediaUrl) ? mediaUrl.length > 0 : mediaUrl.trim()));
+    if (!safeBody && !hasMedia) {
+      console.warn('[TwilioService] Refusing to send an empty WhatsApp message.');
       return { success: false, error: 'Message body or mediaUrl must be provided.' };
     }
 
     const config = this.getResolvedConfig();
-    if (!config) {
-      return { success: false, error: 'Twilio is not configured.' };
-    }
+    if (!config) return { success: false, error: 'Twilio is not configured.' };
 
+    let statusCallback: string | undefined;
     try {
-      const client = this.getClient(config);
-      const formattedTo = this.formatWhatsAppNumber(to);
-
-      const mediaArray = mediaUrl ? (Array.isArray(mediaUrl) ? mediaUrl : [mediaUrl]) : undefined;
-
-      const message = await client.messages.create({
-        from: config.whatsappNumber,
-        to: formattedTo,
-        body: safeBody || ' ',
-        ...(mediaArray && mediaArray.length > 0 ? { mediaUrl: mediaArray } : {}),
-      });
-
-      console.log(`[TwilioService] Outbound WhatsApp message sent to ${formattedTo}. SID: ${message.sid}`);
-      return { success: true, messageSid: message.sid };
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error('[TwilioService] Failed to send WhatsApp message:', errorMsg);
-      return { success: false, error: errorMsg };
+      const configuredCallback = (process.env.TWILIO_STATUS_CALLBACK_URL || '').trim();
+      if (configuredCallback) {
+        const parsed = new URL(configuredCallback);
+        if (
+          parsed.protocol !== 'https:' ||
+          parsed.username ||
+          parsed.password ||
+          parsed.search ||
+          parsed.hash ||
+          parsed.pathname !== '/api/twilio/status'
+        ) {
+          return { success: false, error: 'TWILIO_STATUS_CALLBACK_URL_INVALID: configure an HTTPS /api/twilio/status URL without credentials or query parameters.' };
+        }
+        statusCallback = parsed.toString();
+      }
+    } catch {
+      return { success: false, error: 'TWILIO_STATUS_CALLBACK_URL_INVALID: the configured callback URL is malformed.' };
     }
+
+    const chunks = splitChannelMessage(safeBody, 'whatsapp');
+    const messageParts = chunks.length > 0 ? chunks : [''];
+    const mediaArray = hasMedia ? (Array.isArray(mediaUrl) ? mediaUrl : [mediaUrl as string]) : undefined;
+    const client = this.getClient(config);
+    const formattedTo = this.formatWhatsAppNumber(to);
+    const recipient = this.normalizePhoneNumber(to);
+    const settings = settingsManager.getSettings();
+    const messageSids: string[] = [];
+    let persistenceStatus: 'saved' | 'failed' = 'saved';
+    let lastProviderStatus = 'accepted';
+
+    for (let index = 0; index < messageParts.length; index++) {
+      const part = messageParts[index];
+      const contentForHistory = part.trim() || (hasMedia ? '[Media attachment]' : '');
+      let pendingMessage: { threadId: string; messageId: number };
+
+      try {
+        pendingMessage = await persistChannelMessage({
+          channel: 'whatsapp',
+          externalIdentity: recipient,
+          role: 'assistant',
+          content: contentForHistory,
+          ...(settings.activeProvider ? { provider: settings.activeProvider } : {}),
+          ...(settings.activeModel ? { model: settings.activeModel } : {}),
+          deliveryStatus: 'pending',
+          metadata: { hasMedia: index === 0 && Boolean(hasMedia) },
+        });
+      } catch (error) {
+        const errorCode = error instanceof Error ? error.message : 'PERSISTENCE_FAILED';
+        console.error('[TwilioService] Refusing outbound WhatsApp delivery without a durable message record:', errorCode);
+        return { success: false, error: errorCode };
+      }
+
+      try {
+        const message = await client.messages.create({
+          from: config.whatsappNumber,
+          to: formattedTo,
+          body: part.trim() || (hasMedia ? ' ' : ''),
+          ...(index === 0 && mediaArray && mediaArray.length > 0 ? { mediaUrl: mediaArray } : {}),
+          ...(statusCallback ? { statusCallback } : {}),
+        });
+
+        messageSids.push(message.sid);
+        if (typeof message.status === 'string' && message.status.trim()) {
+          lastProviderStatus = message.status;
+        }
+        const updated = await neonDb.updateMessageMetadata(pendingMessage.messageId, {
+          deliveryStatus: 'accepted',
+          providerMessageSid: message.sid,
+          providerStatus: lastProviderStatus,
+        });
+        if (!updated) {
+          persistenceStatus = 'failed';
+          console.warn('[TwilioService] WhatsApp message was accepted by Twilio, but its provider SID/status could not be saved.');
+        }
+
+        console.log('[TwilioService] WhatsApp message accepted by provider; its SID was recorded when persistence is available.');
+      } catch (err: unknown) {
+        const errorCode = err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code ?? '')
+          : '';
+        await neonDb.updateMessageMetadata(pendingMessage.messageId, {
+          deliveryStatus: 'failed',
+          ...(errorCode ? { deliveryErrorCode: errorCode } : {}),
+        });
+
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error('[TwilioService] WhatsApp provider request failed:', errorCode || 'provider error');
+        return {
+          success: false,
+          ...(messageSids.length ? { messageSids, messageSid: messageSids[messageSids.length - 1] } : {}),
+          persistenceStatus,
+          error: messageSids.length > 0
+            ? 'PARTIAL_DELIVERY_FAILED: one or more earlier message chunks were accepted before a later chunk failed.'
+            : errorMsg,
+        };
+      }
+    }
+
+    return {
+      success: true,
+      messageSid: messageSids[messageSids.length - 1],
+      messageSids,
+      providerStatus: lastProviderStatus,
+      persistenceStatus,
+    };
   }
 
   /**
