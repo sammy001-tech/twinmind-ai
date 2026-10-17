@@ -8,10 +8,12 @@ export function isTelegramMode(value: unknown): value is TelegramMode {
 
 export function resolveTelegramMode(environmentMode: unknown, savedMode: unknown): TelegramMode {
   if (environmentMode !== undefined && environmentMode !== null && String(environmentMode).trim()) {
-    if (isTelegramMode(environmentMode)) return environmentMode;
+    const normalizedEnvironmentMode = typeof environmentMode === 'string' ? environmentMode.trim() : environmentMode;
+    if (isTelegramMode(normalizedEnvironmentMode)) return normalizedEnvironmentMode;
     throw new Error('INVALID_TELEGRAM_MODE');
   }
-  if (isTelegramMode(savedMode)) return savedMode;
+  const normalizedSavedMode = typeof savedMode === 'string' ? savedMode.trim() : savedMode;
+  if (isTelegramMode(normalizedSavedMode)) return normalizedSavedMode;
   return 'polling';
 }
 
