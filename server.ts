@@ -25,7 +25,7 @@ import { ownerAuthService } from './server/services/authService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
 import { getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
-import { evaluateSameOriginRequest, resolveProviderCredential } from './server/services/providerCredentialService.ts';
+import { evaluateSameOriginRequest, resolveProviderCredential, resolveCredentialForVerification } from './server/services/providerCredentialService.ts';
 
 dotenv.config();
 
@@ -515,7 +515,7 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   if (provider === 'gemini') {
     const sKey = settingsManager.getSettings().customGeminiKey;
     const eKey = process.env.GEMINI_API_KEY;
-    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
+    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Gemini API key (starting with AIza or AQ.) or configure GEMINI_API_KEY.' });
@@ -563,7 +563,7 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   if (provider === 'groq') {
     const sKey = settingsManager.getSettings().customGroqKey;
     const eKey = process.env.GROQ_API_KEY;
-    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
+    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Groq API key to test (starting with gsk_).' });
@@ -600,7 +600,7 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   if (provider === 'mistral') {
     const sKey = settingsManager.getSettings().customMistralKey;
     const eKey = process.env.MISTRAL_API_KEY;
-    const effectiveKey = resolveProviderCredential(eKey, sKey, userProvidedKey).key;
+    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Mistral API key to test.' });

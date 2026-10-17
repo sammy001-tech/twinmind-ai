@@ -41,13 +41,13 @@ interface SettingsModalProps {
   voice: string;
   onVoiceChange: (voice: string) => void;
   customGeminiKey: string;
-  onSaveGeminiKey: (key: string) => void;
+  onSaveGeminiKey: (key: string) => void | Promise<void>;
   customGroqKey: string;
-  onSaveGroqKey: (key: string) => void;
+  onSaveGroqKey: (key: string) => void | Promise<void>;
   customMistralKey: string;
-  onSaveMistralKey: (key: string) => void;
+  onSaveMistralKey: (key: string) => void | Promise<void>;
   customTavilyKey?: string;
-  onSaveTavilyKey?: (key: string) => void;
+  onSaveTavilyKey?: (key: string) => void | Promise<void>;
   themeMode?: ThemeMode;
   onThemeModeChange?: (mode: ThemeMode) => void;
   autoPlayVoice?: boolean;
@@ -117,16 +117,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [nameInput, setNameInput] = useState(userName);
   const [nickInput, setNickInput] = useState(nickname);
   const [isSavingIdentity, setIsSavingIdentity] = useState(false);
-  const [geminiKeyInput, setGeminiKeyInput] = useState(customGeminiKey);
+  const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [showGeminiKey, setShowGeminiKey] = useState(false);
-  const [groqKeyInput, setGroqKeyInput] = useState(customGroqKey);
+  const [groqKeyInput, setGroqKeyInput] = useState('');
   const [showGroqKey, setShowGroqKey] = useState(false);
-  const [mistralKeyInput, setMistralKeyInput] = useState(customMistralKey);
+  const [mistralKeyInput, setMistralKeyInput] = useState('');
   const [showMistralKey, setShowMistralKey] = useState(false);
-  const [tavilyKeyInput, setTavilyKeyInput] = useState(customTavilyKey);
+  const [tavilyKeyInput, setTavilyKeyInput] = useState('');
   const [showTavilyKey, setShowTavilyKey] = useState(false);
   const [showTwilioSid, setShowTwilioSid] = useState(false);
   const [isTestingTavily, setIsTestingTavily] = useState(false);
+  const [isSavingTavily, setIsSavingTavily] = useState(false);
+  const [savingProviderKey, setSavingProviderKey] = useState<'gemini' | 'groq' | 'mistral' | null>(null);
+  const [providerKeySaveFeedback, setProviderKeySaveFeedback] = useState<Record<string, { type: 'success' | 'error'; text: string }>>({});
   const [tavilyFeedback, setTavilyFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Dynamic Key Test Status State (dynamically loaded and persisted via Neon DB /api/settings)
@@ -563,20 +566,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const handleSaveTavily = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const trimmed = tavilyKeyInput.trim();
-    if (onSaveTavilyKey) {
-      onSaveTavilyKey(trimmed);
+    if (!trimmed || trimmed.includes('...') || trimmed === '********') {
+      setTavilyFeedback({ type: 'error', text: 'Enter a new Tavily key before saving. Blank inputs keep the stored credential unchanged.' });
+      return;
     }
+
+    setIsSavingTavily(true);
+    setTavilyFeedback(null);
     try {
-      await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customTavilyKey: trimmed }),
-      });
-      setFeedbackToast('Tavily API key saved and synchronized.');
+      if (onSaveTavilyKey) {
+        await onSaveTavilyKey(trimmed);
+      } else {
+        const response = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customTavilyKey: trimmed }),
+        });
+        const data = await response.json().catch(() => null);
+        if (!response.ok || data?.success !== true) {
+          throw new Error(typeof data?.error === 'string' ? data.error : 'Unable to persist the Tavily key.');
+        }
+      }
+      setTavilyKeyInput('');
+      setTavilyFeedback({ type: 'success', text: 'Tavily API key saved and persisted.' });
+      setFeedbackToast('Tavily API key saved.');
       setTimeout(() => setFeedbackToast(null), 3000);
       await loadTavilyStatus();
-    } catch (err) {
-      console.warn('Failed to sync Tavily key to server:', err);
+    } catch (err: unknown) {
+      setTavilyFeedback({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save the Tavily key.' });
+    } finally {
+      setIsSavingTavily(false);
     }
   };
 
@@ -761,17 +780,58 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
-  const handleSaveKeys = (e: React.FormEvent) => {
-    e.preventDefault();
-    onSaveGeminiKey(geminiKeyInput.trim());
-    onSaveGroqKey(groqKeyInput.trim());
-    onSaveMistralKey(mistralKeyInput.trim());
-    if (tavilyKeyInput.trim() !== customTavilyKey) {
-      handleSaveTavily();
+  const handleSaveProviderKey = async (provider: 'gemini' | 'groq' | 'mistral', value: string): Promise<boolean> => {
+    const key = value.trim();
+    if (!key || key.includes('...') || key === '********') {
+      setProviderKeySaveFeedback((prev) => ({
+        ...prev,
+        [provider]: { type: 'error', text: 'Enter a new key before saving. Blank inputs keep the stored credential unchanged.' },
+      }));
+      return false;
     }
-    setFeedbackToast('API credentials saved. Refreshing catalogs...');
-    setTimeout(() => setFeedbackToast(null), 2500);
-    loadAllModels();
+
+    setSavingProviderKey(provider);
+    setProviderKeySaveFeedback((prev) => ({ ...prev, [provider]: { type: 'success', text: '' } }));
+    try {
+      if (provider === 'gemini') await onSaveGeminiKey(key);
+      else if (provider === 'groq') await onSaveGroqKey(key);
+      else await onSaveMistralKey(key);
+
+      if (provider === 'gemini') setGeminiKeyInput('');
+      else if (provider === 'groq') setGroqKeyInput('');
+      else setMistralKeyInput('');
+
+      setProviderKeySaveFeedback((prev) => ({
+        ...prev,
+        [provider]: { type: 'success', text: 'Key saved to Neon PostgreSQL. The raw key is no longer shown in this form.' },
+      }));
+      return true;
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unable to save this provider key.';
+      setProviderKeySaveFeedback((prev) => ({ ...prev, [provider]: { type: 'error', text: message } }));
+      return false;
+    } finally {
+      setSavingProviderKey(null);
+    }
+  };
+
+  const handleSaveKeys = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const results: boolean[] = [];
+    if (geminiKeyInput.trim()) results.push(await handleSaveProviderKey('gemini', geminiKeyInput));
+    if (groqKeyInput.trim()) results.push(await handleSaveProviderKey('groq', groqKeyInput));
+    if (mistralKeyInput.trim()) results.push(await handleSaveProviderKey('mistral', mistralKeyInput));
+
+    if (!results.length) {
+      setFeedbackToast('Enter a new provider key, then use its Save Key button.');
+      setTimeout(() => setFeedbackToast(null), 3000);
+      return;
+    }
+    if (results.every(Boolean)) {
+      setFeedbackToast('Entered provider keys were saved. Refreshing live catalogs...');
+      setTimeout(() => setFeedbackToast(null), 3000);
+      await loadAllModels();
+    }
   };
 
   const handleTestGemini = async () => {
@@ -1533,7 +1593,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </span>
           </div>
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Configure your custom Gemini API key (or use AI Studio pre-configured key), along with optional Groq or Mistral API keys. Click <strong>Test Connection</strong> to verify live authentication; verified status persists across page refreshes.
+            Configure saved Gemini, Groq, and Mistral credentials. A configured <code>GEMINI_API_KEY</code>, <code>GROQ_API_KEY</code>, or <code>MISTRAL_API_KEY</code> environment variable takes precedence during app execution; Test Connection checks the key entered here when one is provided. Leave fields blank to keep existing keys.
           </p>
 
           <form onSubmit={handleSaveKeys} className="space-y-4">
@@ -1542,7 +1602,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                   <span>Google Gemini API Key (Core Brain)</span>
-                  <span className="text-[10px] text-slate-400">(Optional override)</span>
+                  <span className="text-[10px] text-slate-400">(Saved credential)</span>
                 </label>
                 {renderKeyStatusBadge("gemini")}
               </div>
@@ -1593,7 +1653,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-              <div className="flex justify-end pt-0.5">
+              <div className="flex justify-end gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => { void handleSaveProviderKey('gemini', geminiKeyInput); }}
+                  disabled={savingProviderKey === 'gemini' || !geminiKeyInput.trim()}
+                  className="px-2.5 py-1 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 text-xs font-medium border border-amber-500/30 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{savingProviderKey === 'gemini' ? 'Saving...' : 'Save Key'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleTestGemini}
@@ -1604,6 +1673,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>{keyTestMap["gemini"]?.status === "testing" ? "Testing Key..." : "Test Connection"}</span>
                 </button>
               </div>
+              {providerKeySaveFeedback.gemini?.text && (
+                <p role="status" className={`text-xs ${providerKeySaveFeedback.gemini.type === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                  {providerKeySaveFeedback.gemini.text}
+                </p>
+              )}
             </div>
 
             {/* Groq Key */}
@@ -1662,7 +1736,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-              <div className="flex justify-end pt-0.5">
+              <div className="flex justify-end gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => { void handleSaveProviderKey('groq', groqKeyInput); }}
+                  disabled={savingProviderKey === 'groq' || !groqKeyInput.trim()}
+                  className="px-2.5 py-1 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 text-xs font-medium border border-amber-500/30 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{savingProviderKey === 'groq' ? 'Saving...' : 'Save Key'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleTestGroq}
@@ -1673,6 +1756,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>{keyTestMap["groq"]?.status === "testing" ? "Testing Key..." : "Test Connection"}</span>
                 </button>
               </div>
+              {providerKeySaveFeedback.groq?.text && (
+                <p role="status" className={`text-xs ${providerKeySaveFeedback.groq.type === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                  {providerKeySaveFeedback.groq.text}
+                </p>
+              )}
             </div>
 
             {/* Mistral Key */}
@@ -1731,7 +1819,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               )}
 
-              <div className="flex justify-end pt-0.5">
+              <div className="flex justify-end gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => { void handleSaveProviderKey('mistral', mistralKeyInput); }}
+                  disabled={savingProviderKey === 'mistral' || !mistralKeyInput.trim()}
+                  className="px-2.5 py-1 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 text-xs font-medium border border-amber-500/30 transition flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{savingProviderKey === 'mistral' ? 'Saving...' : 'Save Key'}</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleTestMistral}
@@ -1742,6 +1839,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <span>{keyTestMap["mistral"]?.status === "testing" ? "Testing Key..." : "Test Connection"}</span>
                 </button>
               </div>
+              {providerKeySaveFeedback.mistral?.text && (
+                <p role="status" className={`text-xs ${providerKeySaveFeedback.mistral.type === 'success' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                  {providerKeySaveFeedback.mistral.text}
+                </p>
+              )}
             </div>
 
             <div className="flex justify-end pt-2">
@@ -1842,9 +1944,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               <button
                 type="submit"
-                className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow-sm transition"
+                disabled={isSavingTavily || !tavilyKeyInput.trim()}
+                className="px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
               >
-                Save Tavily Key
+                {isSavingTavily ? 'Saving...' : 'Save Tavily Key'}
               </button>
             </div>
           </form>

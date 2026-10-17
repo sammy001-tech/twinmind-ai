@@ -513,24 +513,38 @@ export default function App() {
     syncSettingsToServer({ voice: newVoice });
   };
 
-  const handleSaveGeminiKey = (key: string) => {
-    setCustomGeminiKey(key);
-    syncSettingsToServer({ customGeminiKey: key });
+  const persistCredentialSetting = async (
+    field: 'customGeminiKey' | 'customGroqKey' | 'customMistralKey' | 'customTavilyKey',
+    key: string,
+    updateClientValue: (value: string) => void,
+  ) => {
+    const response = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: key }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || data?.success !== true) {
+      throw new Error(typeof data?.error === 'string' ? data.error : 'Credential persistence failed. Check Neon database connectivity.');
+    }
+    const sanitizedValue = data.settings?.[field];
+    updateClientValue(typeof sanitizedValue === 'string' ? sanitizedValue : '');
   };
 
-  const handleSaveGroqKey = (key: string) => {
-    setCustomGroqKey(key);
-    syncSettingsToServer({ customGroqKey: key });
+  const handleSaveGeminiKey = async (key: string) => {
+    await persistCredentialSetting('customGeminiKey', key, setCustomGeminiKey);
   };
 
-  const handleSaveMistralKey = (key: string) => {
-    setCustomMistralKey(key);
-    syncSettingsToServer({ customMistralKey: key });
+  const handleSaveGroqKey = async (key: string) => {
+    await persistCredentialSetting('customGroqKey', key, setCustomGroqKey);
   };
 
-  const handleSaveTavilyKey = (key: string) => {
-    setCustomTavilyKey(key);
-    syncSettingsToServer({ customTavilyKey: key });
+  const handleSaveMistralKey = async (key: string) => {
+    await persistCredentialSetting('customMistralKey', key, setCustomMistralKey);
+  };
+
+  const handleSaveTavilyKey = async (key: string) => {
+    await persistCredentialSetting('customTavilyKey', key, setCustomTavilyKey);
   };
 
   const handleMessagesScroll = () => {
@@ -1454,6 +1468,15 @@ export default function App() {
           setActiveTab('chat');
           handleSendMessage(text);
         }}
+      />
+
+      {/* Home dashboard Telegram card opens this modal through isTelegramModalOpen. */}
+      <TelegramModal
+        isOpen={isTelegramModalOpen}
+        onClose={() => setIsTelegramModalOpen(false)}
+        brandName={brandName}
+        userName={userName}
+        nickname={nickname}
       />
     </div>
   );

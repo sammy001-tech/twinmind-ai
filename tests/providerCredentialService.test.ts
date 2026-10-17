@@ -1,9 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { evaluateSameOriginRequest, resolveProviderCredential } from '../server/services/providerCredentialService.ts';
+import { evaluateSameOriginRequest, resolveProviderCredential, resolveCredentialForVerification } from '../server/services/providerCredentialService.ts';
 
-test('environment credential takes precedence over saved Settings and request values', () => {
+test('environment credential takes precedence over saved Settings and request values at runtime', () => {
   assert.deepEqual(resolveProviderCredential('env-key', 'saved-key', 'request-key'), { key: 'env-key', source: 'environment' });
+});
+test('connection test verifies an explicitly supplied key rather than silently using the environment key', () => {
+  assert.deepEqual(resolveCredentialForVerification('entered-key', 'env-key', 'saved-key'), { key: 'entered-key', source: 'request' });
+});
+test('connection test falls back to environment then saved Settings only when no key was entered', () => {
+  assert.deepEqual(resolveCredentialForVerification('', 'env-key', 'saved-key'), { key: 'env-key', source: 'environment' });
+  assert.deepEqual(resolveCredentialForVerification('', '', 'saved-key'), { key: 'saved-key', source: 'settings' });
+  assert.deepEqual(resolveCredentialForVerification('********', '', 'saved-key'), { key: 'saved-key', source: 'settings' });
 });
 test('saved Settings key is the fallback when environment key is absent', () => {
   assert.deepEqual(resolveProviderCredential('', 'saved-key', 'request-key'), { key: 'saved-key', source: 'settings' });

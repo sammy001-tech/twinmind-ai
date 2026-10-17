@@ -172,17 +172,40 @@ class SettingsManager {
     if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
     if (isMasked(filteredPatch.telegramToken)) delete filteredPatch.telegramToken;
 
-    this.currentSettings = {
+    const nextSettings: AppSettings = {
       ...this.currentSettings,
       ...filteredPatch,
       activeModel,
       providerModels: updatedProviderModels,
     };
+    const credentialFields = [
+      'customGeminiKey',
+      'customGroqKey',
+      'customMistralKey',
+      'customTavilyKey',
+    ] as const;
+    const isCredentialUpdate = credentialFields.some((field) =>
+      Object.prototype.hasOwnProperty.call(filteredPatch, field)
+    );
 
-    // Save to Disk immediately
+    // Credentials are intentionally excluded from the local settings file. Do not acknowledge a
+    // credential update unless Neon confirms the durable write, and do not commit it to memory first.
+    if (isCredentialUpdate) {
+      const persisted = await neonDb.saveSettings(nextSettings as unknown as Record<string, unknown>);
+      if (!persisted) {
+        throw new Error(
+          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Provider API keys require a healthy Neon PostgreSQL connection; no credential change was applied.',
+        );
+      }
+      this.currentSettings = nextSettings;
+      this.saveToDisk();
+      return this.getSettings();
+    }
+
+    this.currentSettings = nextSettings;
     this.saveToDisk();
 
-    // Save to Neon PostgreSQL if connected (synchronously persisted)
+    // Non-secret preferences may still be saved locally when Neon is unavailable.
     try {
       await neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>);
     } catch (err) {
