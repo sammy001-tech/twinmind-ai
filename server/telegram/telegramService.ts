@@ -716,11 +716,14 @@ class TelegramBotManager {
     if (runtimeConfigChanged && this.isRunning) await this.stop();
     this.config = nextConfig;
 
-    if (runtimeConfigChanged && this.config.token) {
+    // A manual Save also retries startup when the current config is saved but the bot is stopped.
+    if (this.config.token && (runtimeConfigChanged || !this.isRunning)) {
       const started = await this.start();
       return {
         success: started,
-        message: started ? 'Telegram bot restarted and configuration verified.' : 'Configuration was saved, but Telegram could not start. Inspect the Telegram status logs.',
+        message: started
+          ? 'Telegram bot is running and its configuration was verified.'
+          : 'Configuration was saved, but Telegram could not start. Inspect the Telegram status logs.',
       };
     }
     return { success: true, message: 'Telegram configuration saved and persisted.' };
