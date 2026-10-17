@@ -292,6 +292,7 @@ export default function App() {
               : '',
             createdAt: m.created_at ? new Date(m.created_at).getTime() : undefined,
             channel: m.channel,
+            status: resolvePersistedMessageStatus(m.metadata?.deliveryStatus),
             modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
           }));
