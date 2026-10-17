@@ -1204,7 +1204,6 @@ class TelegramBotManager {
         this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]' });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         await this.replyLongText(ctx, responseText);
-        await this.recordSyncedMessage('assistant', responseText, false, 'accepted');
 
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
       } catch (err: unknown) {
