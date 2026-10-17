@@ -298,6 +298,12 @@ export default function App() {
           }));
           pendingThreadRestoreRef.current = threadId;
           setMessages(loaded);
+          const savedChannel = data.messages.find((message: any) =>
+            message.channel === 'web' || message.channel === 'telegram' || message.channel === 'whatsapp'
+          )?.channel;
+          if (savedChannel === 'web' || savedChannel === 'telegram' || savedChannel === 'whatsapp') {
+            setChannel(savedChannel);
+          }
           setActiveThreadId(threadId);
           syncSettingsToServer({ activeThreadId: threadId });
         }
