@@ -143,9 +143,13 @@ class TelegramBotManager {
           const userId = from.id;
 
           if (this.config.ownerId === userId) {
-            this.config.ownerId = userId;
-            this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
-            await saveConfig(this.config);
+            const nextConfig = {
+              ...this.config,
+              ownerId: userId,
+              ownerUsername: from.username || from.first_name || settingsManager.getSettings().userName || '',
+            };
+            await saveConfig(nextConfig);
+            this.config = nextConfig;
             this.log('auth', `Paired with owner ID ${userId} (@${from.username || from.first_name})`);
 
             const keyboard = new InlineKeyboard()
@@ -467,28 +471,24 @@ class TelegramBotManager {
 
           const parts = args.trim().split(/\s+/);
           const first = parts[0].toLowerCase();
+          let nextProvider = this.config.activeProvider;
+          let nextModel = this.config.activeModel;
 
           if (first === 'groq' || first === 'mistral' || first === 'gemini') {
-            this.config.activeProvider = first;
-            if (parts.length > 1) {
-              this.config.activeModel = parts.slice(1).join(' ').trim();
-            }
+            nextProvider = first;
+            if (parts.length > 1) nextModel = parts.slice(1).join(' ').trim();
           } else {
-            if (first.includes('gemini')) {
-              this.config.activeProvider = 'gemini';
-            } else if (first.includes('llama') || first.includes('deepseek') || first.includes('gemma')) {
-              this.config.activeProvider = 'groq';
-            } else if (first.includes('mistral') || first.includes('codestral') || first.includes('pixtral')) {
-              this.config.activeProvider = 'mistral';
-            }
-            this.config.activeModel = args.trim();
+            if (first.includes('gemini')) nextProvider = 'gemini';
+            else if (first.includes('llama') || first.includes('deepseek') || first.includes('gemma')) nextProvider = 'groq';
+            else if (first.includes('mistral') || first.includes('codestral') || first.includes('pixtral')) nextProvider = 'mistral';
+            nextModel = args.trim();
           }
 
-          await saveConfig(this.config);
-          settingsManager.updateSettings({
-            activeProvider: this.config.activeProvider as 'gemini' | 'groq' | 'mistral',
-            activeModel: this.config.activeModel,
-          }).catch(() => {});
+          await settingsManager.updateSettings({
+            activeProvider: nextProvider as 'gemini' | 'groq' | 'mistral',
+            activeModel: nextModel,
+          });
+          this.config = { ...this.config, activeProvider: nextProvider, activeModel: nextModel };
 
           await ctx.reply(`✅ Switched active model to \`${this.config.activeModel}\` (${this.config.activeProvider.toUpperCase()})`, {
             parse_mode: 'Markdown',
@@ -810,7 +810,12 @@ class TelegramBotManager {
         this.isRunning = true;
         return true;
       } else {
-        // Webhook Mode
+        // Webhook Mode requires both a valid URL and the configured request-signing secret.
+        if (!this.config.webhookUrl) {
+          this.log('error', 'TELEGRAM_WEBHOOK_URL is required before enabling Telegram webhook mode.');
+          this.isRunning = false;
+          return false;
+        }
         if (this.config.webhookUrl) {
           const webhookSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
           if (!webhookSecret) {
@@ -831,8 +836,6 @@ class TelegramBotManager {
             this.log('error', `Telegram webhook registration failed: ${setData.description || 'provider rejected request'}`);
             return false;
           }
-        } else {
-          this.log('info', 'Webhook mode enabled without a configured URL.');
         }
         await this.syncTelegramCommandMenu();
         this.isRunning = true;
@@ -898,9 +901,13 @@ class TelegramBotManager {
         const startParts = text.trim().split(/\\s+/);
         const suppliedCode = startParts[0]?.startsWith('/start') ? (startParts[1] || '') : '';
         if (suppliedCode && suppliedCode === this.config.pairingCode) {
-          this.config.ownerId = userId;
-          this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
-          await saveConfig(this.config);
+          const nextConfig = {
+            ...this.config,
+            ownerId: userId,
+            ownerUsername: from.username || from.first_name || settingsManager.getSettings().userName || '',
+          };
+          await saveConfig(nextConfig);
+          this.config = nextConfig;
           this.log('auth', `Owner pairing completed for Telegram user ID ${userId}`);
           await ctx.reply('Pairing successful. This Telegram account is now linked as the owner.', { parse_mode: 'Markdown' });
           return;
@@ -936,18 +943,15 @@ class TelegramBotManager {
       } else if (data === 'action_summary') {
         const handler = this.commandRegistry.find((h) => h.command === 'summary');
         if (handler) await handler.execute(ctx, '');
-      } else if (data === 'set_model_gemini') {
-        this.config.activeProvider = 'gemini';
-        await saveConfig(this.config);
-        await ctx.reply('✅ Switched active provider to Google Gemini.');
-      } else if (data === 'set_model_groq') {
-        this.config.activeProvider = 'groq';
-        await saveConfig(this.config);
-        await ctx.reply('✅ Switched active provider to Groq.');
-      } else if (data === 'set_model_mistral') {
-        this.config.activeProvider = 'mistral';
-        await saveConfig(this.config);
-        await ctx.reply('✅ Switched active provider to Mistral AI.');
+      } else if (data === 'set_model_gemini' || data === 'set_model_groq' || data === 'set_model_mistral') {
+        const nextProvider = data === 'set_model_gemini' ? 'gemini' : data === 'set_model_groq' ? 'groq' : 'mistral';
+        await settingsManager.updateSettings({
+          activeProvider: nextProvider,
+          activeModel: this.config.activeModel,
+        });
+        this.config = { ...this.config, activeProvider: nextProvider };
+        const providerName = nextProvider === 'gemini' ? 'Google Gemini' : nextProvider === 'groq' ? 'Groq' : 'Mistral AI';
+        await ctx.reply(`✅ Switched active provider to ${providerName}.`);
       } else if (data.startsWith('dyn_act_')) {
         // Dynamic Model-Generated Action Button Click
         const actionItem = this.dynamicActionCallbacks.get(data);
