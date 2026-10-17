@@ -694,7 +694,7 @@ interface GroupedChatMessageListProps {
   voiceSpeed?: number;
   onVoiceSpeedChange?: (speed: number) => void;
   isDark?: boolean;
-  isStreamingResponse?: boolean;
+  streamingMessageId?: string;
 }
 
 export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
@@ -711,13 +711,13 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   voiceSpeed = 1,
   onVoiceSpeedChange,
   isDark = true,
-  isStreamingResponse = false,
+  streamingMessageId, 
 }) => {
   const groups = groupMessagesBySender(messages, 5 * 60 * 1000);
 
   return (
     <div className="space-y-4 w-full overflow-x-hidden">
-      {groups.map((group, groupIndex) => {
+      {groups.map((group) => {
         const isUser = group.role === 'user';
         const hasMultiple = group.messages.length > 1;
 
@@ -756,12 +756,7 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
                     voiceSpeed={voiceSpeed}
                     onVoiceSpeedChange={onVoiceSpeedChange}
                     isDark={isDark}
-                    isStreaming={
-                      isStreamingResponse &&
-                      groupIndex === groups.length - 1 &&
-                      group.role === 'assistant' &&
-                      msgIdx === group.messages.length - 1
-                    }
+                    isStreaming={message.id === streamingMessageId}
                   />
                 ))}
               </div>
