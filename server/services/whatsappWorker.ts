@@ -7,6 +7,7 @@ import { twinAgentService } from './twinAgentService.ts';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
 import { artifactAccessService } from './artifactAccessService.ts';
+import { loadChannelConversationHistory, persistInboundChannelMessage } from './channelConversationService.ts';
 
 export class WhatsAppWorker {
   private isRunning = false;
@@ -71,6 +72,21 @@ export class WhatsAppWorker {
     let incomingAudioData: { mimeType: string; data: string; name?: string } | undefined;
     const mediaUrl0 = job.payload.MediaUrl0 || job.payload.mediaUrl0;
     const mediaContentType0 = job.payload.MediaContentType0 || job.payload.mediaContentType0 || 'image/jpeg';
+
+    // MessageSid is supplied by Twilio and backed by a unique database constraint.
+    // That idempotency key also guards inbound conversation persistence if a worker
+    // lease is recovered after an interrupted processing attempt.
+    const conversationHistory = await loadChannelConversationHistory('whatsapp', senderPhone);
+    await persistInboundChannelMessage({
+      channel: 'whatsapp',
+      externalIdentity: senderPhone,
+      role: 'user',
+      content: userMessage || (mediaUrl0 ? '[Media attachment]' : ''),
+      metadata: {
+        source: 'twilio',
+        hasMedia: Boolean(mediaUrl0),
+      },
+    }, job.messageSid);
 
     if (mediaUrl0) {
       try {
@@ -251,6 +267,7 @@ export class WhatsAppWorker {
       imageData: incomingImageData,
       audioData: incomingAudioData,
       channel: 'whatsapp',
+      conversationHistory,
     });
 
     const reply = typeof turnResult?.reply === 'string' ? turnResult.reply.trim() : '';
