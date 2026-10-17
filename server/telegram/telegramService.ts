@@ -1541,17 +1541,56 @@ class TelegramBotManager {
    * Send a proactive alert message to the paired owner.
    */
   public async sendProactiveMessage(text: string): Promise<boolean> {
-    if (!this.bot || !this.isRunning || !this.config.ownerId) {
+    if (!this.bot || !this.isRunning || this.config.ownerId === null) {
       console.warn('[TelegramBot] Cannot send proactive message: bot not running or owner not paired.');
       return false;
     }
 
+    const chunks = splitChannelMessage(text, 'telegram');
+    if (chunks.length === 0) return false;
+
+    let pending: { threadId: string; messageId: number } | undefined;
     try {
-      await this.bot.api.sendMessage(this.config.ownerId, text, { parse_mode: 'Markdown' });
-      this.log('info', `Proactive message sent to owner ID ${this.config.ownerId}`);
+      pending = await persistChannelMessage({
+        channel: 'telegram',
+        externalIdentity: this.config.ownerId,
+        role: 'assistant',
+        content: text,
+        ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
+        ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
+        deliveryStatus: 'pending',
+        metadata: { source: 'telegram', isProactive: true },
+      });
+
+      for (const chunk of chunks) {
+        await this.bot.api.sendMessage(this.config.ownerId, chunk);
+      }
+
+      const persisted = await neonDb.updateMessageMetadata(pending.messageId, {
+        deliveryStatus: 'accepted',
+        providerStatus: 'accepted',
+      });
+      if (!persisted) this.log('error', 'Telegram accepted a proactive message but its final status could not be saved.');
+
+      this.syncedMessages.unshift({
+        id: `tg-${randomUUID()}`,
+        sender: 'assistant',
+        text,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      if (this.syncedMessages.length > 50) this.syncedMessages.pop();
+      this.log('info', 'Proactive Telegram message accepted by Telegram.');
       return true;
     } catch (err) {
-      console.error('[TelegramBot] Failed to send proactive message:', err);
+      if (pending) {
+        const rawCode = err instanceof Error ? err.message : 'TELEGRAM_DELIVERY_FAILED';
+        const errorCode = rawCode.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'TELEGRAM_DELIVERY_FAILED';
+        await neonDb.updateMessageMetadata(pending.messageId, {
+          deliveryStatus: 'error',
+          deliveryErrorCode: errorCode,
+        });
+      }
+      console.error('[TelegramBot] Failed to send proactive Telegram message:', err instanceof Error ? err.message : 'provider request failed');
       return false;
     }
   }
