@@ -28,6 +28,46 @@ export function isDefaultTransientError(err: unknown): boolean {
   );
 }
 
+/**
+ * Stop awaiting a provider operation when its owning request/session is cancelled.
+ * If an SDK cannot cancel its underlying request, any later result is still discarded here.
+ */
+export function waitWithAbort<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+  operationName = 'Operation',
+): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    return Promise.reject(new Error(`[AbortableOperation] ${operationName} aborted before completion`));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const onAbort = () => finish(() => reject(
+      new Error(`[AbortableOperation] ${operationName} aborted before completion`),
+    ));
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 export async function callWithBoundedRetry<T>(
   fn: (attempt: number) => Promise<T>,
   options: RetryOptions = {}
@@ -54,7 +94,7 @@ export async function callWithBoundedRetry<T>(
     onAttempt?.(attempt);
 
     try {
-      return await fn(attempt);
+      return await waitWithAbort(fn(attempt), signal, operationName);
     } catch (err: unknown) {
       const transient = isTransient(err);
 

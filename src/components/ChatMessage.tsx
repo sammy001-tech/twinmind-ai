@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { ChatMessage, ChannelType } from '../types/index.ts';
 import { VoicePlayer } from './VoicePlayer.tsx';
 import { SwarmTraceFeed } from './SwarmTraceFeed.tsx';
+import { LiveResearchActivityFeed } from './LiveResearchActivityFeed.tsx';
 import {
   Volume2,
   Loader2,
@@ -323,6 +324,10 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
         {!isUser && message.swarmTrace && (
           <SwarmTraceFeed trace={message.swarmTrace} />
+        )}
+
+        {!isUser && message.researchActivity && message.researchActivity.length > 0 && (
+          <LiveResearchActivityFeed activities={message.researchActivity} />
         )}
 
         {message.imageData && !isEditing && (

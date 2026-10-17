@@ -840,6 +840,47 @@ export default function App() {
                   })
                   .catch(() => {});
               }
+              // Normal-chat live search and extraction events are rendered from actual tool responses.
+              if (
+                parsed.toolEvent &&
+                (parsed.toolEvent.toolName === 'searchWeb' || parsed.toolEvent.toolName === 'extractWebPages') &&
+                typeof parsed.toolEvent.toolId === 'string' &&
+                parsed.toolEvent.toolId.trim()
+              ) {
+                const toolEvent = parsed.toolEvent;
+                ensureAssistantMessage();
+                setMessages((prev) =>
+                  prev.map((msg) => {
+                    if (msg.id !== assistantId) return msg;
+                    const current = [...(msg.researchActivity || [])];
+                    const existingIndex = current.findIndex((activity) => activity.toolId === toolEvent.toolId);
+
+                    if (toolEvent.type === 'start') {
+                      if (existingIndex < 0) {
+                        current.push({
+                          toolId: toolEvent.toolId,
+                          toolName: toolEvent.toolName,
+                          status: 'running',
+                          input: toolEvent.args && typeof toolEvent.args === 'object' ? toolEvent.args : undefined,
+                        });
+                      }
+                    } else if (toolEvent.type === 'complete' && existingIndex >= 0) {
+                      const result = toolEvent.result;
+                      const resultRecord = result && typeof result === 'object' && !Array.isArray(result)
+                        ? result as Record<string, unknown>
+                        : null;
+                      current[existingIndex] = {
+                        ...current[existingIndex],
+                        status: resultRecord?.status === 'success' ? 'completed' : 'error',
+                        result,
+                      };
+                    }
+
+                    return { ...msg, researchActivity: current };
+                  })
+                );
+              }
+
               // Multi-Agent Specialist Swarm Real-Time Trace
               if (parsed.swarmEvent) {
                 ensureAssistantMessage();
@@ -915,7 +956,12 @@ export default function App() {
                         spec.summaryPreview = ev.summaryPreview;
                       }
                     } else if (ev.type === 'complete') {
-                      currentTrace.status = 'completed';
+                      const sessionStatus = ev.session?.status;
+                      currentTrace.status = sessionStatus === 'failed' || sessionStatus === 'completed_with_errors'
+                        ? 'error'
+                        : sessionStatus === 'cancelled' || sessionStatus === 'timed_out'
+                          ? 'aborted'
+                          : 'completed';
                       if (ev.session) {
                         currentTrace.totalDurationMs = ev.session.totalDurationMs;
                       }

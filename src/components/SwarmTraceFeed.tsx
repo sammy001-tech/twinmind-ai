@@ -82,7 +82,7 @@ export const SwarmTraceFeed: React.FC<SwarmTraceFeedProps> = ({ trace }) => {
         <div className="flex items-center gap-2">
           {isRunning ? (
             <Loader2 className="w-3.5 h-3.5 text-cyan-500 dark:text-cyan-400 animate-spin" />
-          ) : trace.status === 'error' ? (
+          ) : trace.status === 'error' || trace.status === 'aborted' ? (
             <AlertCircle className="w-3.5 h-3.5 text-rose-500 dark:text-rose-400" />
           ) : (
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
@@ -102,6 +102,12 @@ export const SwarmTraceFeed: React.FC<SwarmTraceFeedProps> = ({ trace }) => {
             <span className="font-mono tabular-nums text-[10px] text-slate-600 dark:text-slate-400 px-1.5 py-0.5 rounded bg-slate-200/80 dark:bg-slate-800/70 border border-slate-300 dark:border-slate-700/50">
               {totalDuration}
             </span>
+          )}
+          {trace.status === 'error' && (
+            <span className="text-[10px] font-medium text-rose-500">completed with errors</span>
+          )}
+          {trace.status === 'aborted' && (
+            <span className="text-[10px] font-medium text-rose-500">aborted or timed out</span>
           )}
           <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
             {trace.specialists.length} specialists
