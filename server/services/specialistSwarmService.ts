@@ -899,7 +899,7 @@ class SpecialistSwarmService {
             const queryBudget = Math.max(0, scope.budget.getRemaining() - 1);
             const maxFollowUpQueries = Math.min(followUpLimit, queryBudget);
 
-            if (maxFollowUpQueries > 0) {
+            if (followUpLimit > 0) {
               const planningStartedAt = Date.now();
               const searchEvidence = gatheredSources.map((source) => ({
                 title: source.title,
