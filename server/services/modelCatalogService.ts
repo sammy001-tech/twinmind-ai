@@ -10,6 +10,37 @@ export interface LiveModelInfo {
 
 export type ProviderId = 'gemini' | 'groq' | 'mistral';
 
+export interface LiveCatalogueResult {
+  models: LiveModelInfo[];
+  status: 'available' | 'unconfigured' | 'unavailable';
+  errorCode?: string;
+  httpStatus?: number;
+}
+
+/** Convert provider/network failures into safe diagnostics without exposing raw provider errors or credentials. */
+export function classifyGeminiCatalogueFailure(error: unknown): { errorCode: string; httpStatus?: number } {
+  const candidate = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const statusValue = candidate.status ?? candidate.statusCode ?? candidate.code;
+  const parsedStatus = typeof statusValue === 'number'
+    ? statusValue
+    : typeof statusValue === 'string' && /^\d{3}$/.test(statusValue)
+      ? Number(statusValue)
+      : undefined;
+  if (parsedStatus === 401) return { errorCode: 'GEMINI_AUTHENTICATION_REJECTED', httpStatus: parsedStatus };
+  if (parsedStatus === 403) return { errorCode: 'GEMINI_ACCESS_FORBIDDEN', httpStatus: parsedStatus };
+  if (parsedStatus === 429) return { errorCode: 'GEMINI_RATE_LIMITED', httpStatus: parsedStatus };
+  if (parsedStatus === 400) return { errorCode: 'GEMINI_REQUEST_REJECTED', httpStatus: parsedStatus };
+  if (parsedStatus !== undefined && parsedStatus >= 500) return { errorCode: 'GEMINI_PROVIDER_UNAVAILABLE', httpStatus: parsedStatus };
+
+  const codeText = String(candidate.code ?? '').toUpperCase();
+  const messageText = error instanceof Error ? error.message.toLowerCase() : '';
+  if (/ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR_CONNECT_TIMEOUT/.test(codeText) ||
+      /fetch failed|network|timeout|socket hang up/.test(messageText)) {
+    return { errorCode: 'GEMINI_NETWORK_REQUEST_FAILED' };
+  }
+  return { errorCode: 'GEMINI_CATALOG_REQUEST_FAILED' };
+}
+
 /**
  * Pure validation boundary shared by production resolution and unit tests.
  * A configured model is executable only when the current live catalogue contains it.
@@ -47,9 +78,9 @@ class ModelCatalogService {
    * Fetch models directly from Google's live catalogue. Only models whose API
    * metadata advertises generateContent are considered chat-capable.
    */
-  public async getLiveGeminiModels(apiKey?: string): Promise<LiveModelInfo[]> {
+  public async getLiveGeminiModelsDiagnostic(apiKey?: string): Promise<LiveCatalogueResult> {
     const key = this.normalizeKey(apiKey || process.env.GEMINI_API_KEY);
-    if (!key) return [];
+    if (!key) return { models: [], status: 'unconfigured', errorCode: 'PROVIDER_CREDENTIALS_MISSING' };
 
     try {
       const client = new GoogleGenAI({ apiKey: key });
@@ -73,11 +104,20 @@ class ModelCatalogService {
         });
       }
 
-      return models;
+      if (!models.length) {
+        return { models, status: 'unavailable', errorCode: 'GEMINI_NO_CHAT_CAPABLE_MODELS' };
+      }
+      return { models, status: 'available' };
     } catch (err) {
-      console.warn('[ModelCatalogService] Live Gemini catalogue query failed:', err);
-      return [];
+      const failure = classifyGeminiCatalogueFailure(err);
+      console.warn('[ModelCatalogService] Live Gemini catalogue query failed:', failure.errorCode, failure.httpStatus ?? '');
+      return { models: [], status: 'unavailable', ...failure };
     }
+  }
+
+  public async getLiveGeminiModels(apiKey?: string): Promise<LiveModelInfo[]> {
+    const result = await this.getLiveGeminiModelsDiagnostic(apiKey);
+    return result.models;
   }
 
   /** Fetch the currently listed models from Groq. No stale catalogue is returned on failure. */
