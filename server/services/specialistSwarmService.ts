@@ -1755,7 +1755,7 @@ class SpecialistSwarmService {
       // Enforce 4,000-token context ceiling on prompt payload
       const boundedEvidence = this.enforceContextCeiling(evidenceContext, 4000);
       // Only permit citations whose full source record survived context-budget enforcement.
-      const validSourceIds = new Set(
+      const validSourceIds = new Set<string>(
         [...sourceIds.values()].filter((id) => boundedEvidence.includes(`- [${id}] Title:`)),
       );
 
