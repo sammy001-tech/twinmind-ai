@@ -133,6 +133,15 @@ export function normalizeResearchExtractions(
   return normalizeSourceArray(results, maxContentChars, allowedSources);
 }
 
+/** Select only search modes supported by the live retrieval provider. */
+export function resolveResearchSearchDepth(env: Record<string, string | undefined>): 'basic' | 'advanced' {
+  const configured = env.TWINMIND_RESEARCH_SEARCH_DEPTH;
+  if (configured === undefined || configured.trim() === '') return 'advanced';
+  const value = configured.trim().toLowerCase();
+  if (value === 'basic' || value === 'advanced') return value;
+  throw new Error('RESEARCH_CONFIGURATION_INVALID:TWINMIND_RESEARCH_SEARCH_DEPTH: expected basic or advanced');
+}
+
 /**
  * Read a numeric operational limit from the runtime environment.
  * Defaults here are execution limits, not generated research content or claimed live facts.
