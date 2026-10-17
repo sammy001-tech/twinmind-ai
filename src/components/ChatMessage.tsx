@@ -372,7 +372,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
       >
         {/* Telegram Header Badge */}
         {!isUser && channel === 'telegram' && isFirstInGroup && (
-          <div className="flex items-center gap-1.5 mb-1 pb-1 border-b border-white/10 text-xs font-semibold text-sky-400">
+          <div className={`mb-1 flex items-center gap-1.5 border-b border-slate-200/70 pb-1 text-xs font-semibold dark:border-white/10 ${isDark ? 'text-sky-400' : 'text-sky-700'}`}>
             <span>Your Digital Twin</span>
             <span className="text-[10px] font-normal px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
               TWINMIND
@@ -382,7 +382,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
         {/* WhatsApp Header Badge */}
         {!isUser && channel === 'whatsapp' && isFirstInGroup && (
-          <div className="flex items-center gap-1.5 mb-1 text-xs font-semibold text-[#00a884]">
+          <div className={`mb-1 flex items-center gap-1.5 text-xs font-semibold ${isDark ? 'text-[#00a884]' : 'text-[#007a64]'}`}>
             <span>Your Digital Twin</span>
           </div>
         )}
@@ -461,17 +461,17 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
         {/* WhatsApp Checkmark Indicator */}
         {channel === 'whatsapp' && isUser && isLastInGroup && !isEditing && (
-          <div className="flex items-center justify-end gap-1 mt-1 text-[10.5px] text-[#8696a0]">
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-[#aebac1]' : 'text-[#52656f]'}`}>
             <span>{message.timestamp}</span>
-            <CheckCheck className="w-3.5 h-3.5 text-[#53bdeb] inline" />
+            <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-[#53bdeb]' : 'text-[#128c7e]'}`} />
           </div>
         )}
 
         {/* Telegram Checkmark Indicator */}
         {channel === 'telegram' && isUser && isLastInGroup && !isEditing && (
-          <div className="flex items-center justify-end gap-1 mt-1 text-[11px] text-sky-300/80">
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-sky-300/80' : 'text-slate-500'}`}>
             <span>{message.timestamp}</span>
-            <CheckCheck className="w-3.5 h-3.5 text-sky-400 inline" />
+            <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-sky-400' : 'text-sky-700'}`} />
           </div>
         )}
 
