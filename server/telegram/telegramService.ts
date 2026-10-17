@@ -10,6 +10,7 @@ import { knowledgeService } from '../db/knowledgeService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
+import { resolveProviderCredential } from '../services/providerCredentialService.ts';
 
 export interface TelegramConfig {
   token: string;
@@ -744,7 +745,6 @@ class TelegramBotManager {
   }
 
   public async refreshConfigurationFromSettings(): Promise<void> {
-    const saved = settingsManager.getSettings();
     const next = loadConfig();
     next.pairingCode = this.config.pairingCode;
     next.ownerUsername = this.config.ownerUsername;
@@ -1376,7 +1376,8 @@ class TelegramBotManager {
   private async generateVoiceBuffer(text: string): Promise<Buffer | null> {
     const settings = settingsManager.getSettings();
     const voice = (settings.voice || '').trim();
-    const apiKey = (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const apiKey = resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key;
+    const apiKey = resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key;
 
     if (!voice) {
       console.warn('[TelegramBot] Voice synthesis unavailable: no voice identifier is configured.');
