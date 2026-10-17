@@ -1081,11 +1081,30 @@ Respond in valid JSON:
     });
 
     const toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
+    const maxAgentToolCalls = resolveBoundedIntegerSetting(
+      process.env,
+      'TWINMIND_AGENT_MAX_TOOL_CALLS',
+      8,
+      1,
+      40,
+    );
+    let agentToolCallsUsed = 0;
 
-    // Helper to dispatch tool execution
+    // Helper to dispatch tool execution with a turn-wide, runtime-configured cap.
     const runTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
       const toolId = randomUUID();
       onToolStart?.(name, args, toolId);
+      if (agentToolCallsUsed >= maxAgentToolCalls) {
+        const rejected = {
+          status: 'error',
+          code: 'AGENT_TOOL_BUDGET_EXHAUSTED',
+          error: `The configured tool-call budget of ${maxAgentToolCalls} was exhausted; no additional provider call was made.`,
+        };
+        onToolComplete?.(name, rejected, toolId);
+        toolsExecuted.push({ toolName: name, args, result: rejected });
+        return rejected;
+      }
+      agentToolCallsUsed += 1;
       let result: unknown;
       if (name === 'searchWeb') {
         result = await this.executeSearchWeb(String(args.query || ''), customTavilyKey, options.signal);
