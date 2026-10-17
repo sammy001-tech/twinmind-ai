@@ -11,6 +11,7 @@ import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
 import { resolveProviderCredential } from '../services/providerCredentialService.ts';
+import type { AppSettings } from '../../src/types/index.ts';
 
 export interface TelegramConfig {
   token: string;
