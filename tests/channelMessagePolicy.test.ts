@@ -17,7 +17,7 @@ test('WhatsApp formatting normalizes double-asterisk Markdown to supported empha
 });
 
 test('channel splitting respects provider limits and preserves formatted text exactly', () => {
-  const source = Array.from({ length: 14 }, (_, index) => `Paragraph ${index + 1} with enough words to test a channel-safe split.`).join('\n\n');
+  const source = Array.from({ length: 100 }, (_, index) => `Paragraph ${index + 1} with enough words to test a channel-safe split.`).join('\n\n');
   for (const channel of ['telegram', 'whatsapp'] as const) {
     const formatted = formatChannelMessage(source, channel);
     const parts = splitChannelMessage(source, channel);
