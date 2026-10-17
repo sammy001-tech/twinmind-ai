@@ -823,10 +823,10 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     // Track full reply for database persistence
     let fullReply = '';
 
-    // Handle client disconnection / cancellation
+    // Cancel work when the response stream is abandoned, not when the request body finishes reading.
     const abortController = new AbortController();
-    req.on('close', () => {
-      abortController.abort();
+    res.on('close', () => {
+      if (!res.writableEnded) abortController.abort();
     });
 
     // Keep-alive heartbeat every 10s to prevent proxy timeouts
