@@ -244,11 +244,7 @@ class TelegramBotManager {
               .text('💾 Save as Note', `save_note_${encodeURIComponent(args.slice(0, 20))}`)
               .text('⚔️ Debate Topic', `debate_${encodeURIComponent(args.slice(0, 20))}`);
 
-            await ctx.reply(replyText, {
-              parse_mode: 'Markdown',
-              disable_web_page_preview: false,
-              reply_markup: keyboard,
-            });
+            await this.replyLongText(ctx, replyText, { reply_markup: keyboard });
           } catch (err: unknown) {
             console.error('Telegram search error:', err);
             await ctx.reply(`❌ *Search Failed:* ${err instanceof Error ? err.message : String(err)}`, {
@@ -302,7 +298,7 @@ class TelegramBotManager {
               `⚖️ *3 & 4. Critic Synthesis & Verdict:*\n${res.synthesis}\n\n` +
               `💾 *Persistence:* ${res.persistedToDb ? `✅ Saved to Neon DB (ID #${res.decisionId})` : '⚠️ DB offline'}`;
 
-            await ctx.reply(debateText, { parse_mode: 'Markdown' });
+            await this.replyLongText(ctx, debateText);
           } catch (err: unknown) {
             console.error('Debate error:', err);
             await ctx.reply(`❌ *Debate Failed:* ${err instanceof Error ? err.message : String(err)}`, {
@@ -345,7 +341,7 @@ class TelegramBotManager {
             summaryText += `• Revenue & External Metrics: *None recorded in database* (zero fabrication).\n`;
             summaryText += `• Open Tasks: *Tracking active conversation context.*\n`;
 
-            await ctx.reply(summaryText, { parse_mode: 'Markdown' });
+            await this.replyLongText(ctx, summaryText);
           } catch (err: unknown) {
             await ctx.reply(`❌ *Summary Generation Error:* ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -403,7 +399,7 @@ class TelegramBotManager {
               .text('💾 Confirmed in Vault', `save_decision_${a.confidenceLevel || 'Med'}`)
               .text('⚔️ Multi-Agent Debate', `debate_${encodeURIComponent(args.slice(0, 20))}`);
 
-            await ctx.reply(replyMessage, { parse_mode: 'Markdown', reply_markup: keyboard });
+            await this.replyLongText(ctx, replyMessage, { reply_markup: keyboard });
           } catch (err: unknown) {
             console.error('Decision command error:', err);
             await ctx.reply(`❌ Could not complete decision breakdown: ${err instanceof Error ? err.message : String(err)}`);
@@ -1023,7 +1019,7 @@ class TelegramBotManager {
           }
         } else {
           // Trigger twin agent turn dynamically with payload
-          await ctx.reply(`👉 *Executing:* ${actionItem.payload}`, { parse_mode: 'Markdown' });
+          await this.replyLongText(ctx, `Executing: ${actionItem.payload}`);
           await ctx.replyWithChatAction('typing');
 
           const callbackUpdateId = ctx.update?.update_id;
