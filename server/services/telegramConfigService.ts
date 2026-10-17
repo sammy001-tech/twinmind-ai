@@ -22,14 +22,39 @@ export function resolveTelegramToken(environmentToken: unknown, savedToken: unkn
 
 export function parseTelegramOwnerId(value: unknown): number | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null;
+  if (typeof value === 'string' && !value.trim()) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+export function resolveTelegramOwnerId(environmentValue: unknown, savedValue: unknown): number | null {
+  if (typeof environmentValue === 'string' && environmentValue.trim()) {
+    const ownerId = parseTelegramOwnerId(environmentValue);
+    if (ownerId === null) throw new Error('INVALID_TELEGRAM_OWNER_ID');
+    return ownerId;
+  }
+  if (typeof environmentValue === 'number') {
+    const ownerId = parseTelegramOwnerId(environmentValue);
+    if (ownerId === null) throw new Error('INVALID_TELEGRAM_OWNER_ID');
+    return ownerId;
+  }
+  return parseTelegramOwnerId(savedValue);
+}
+
+function cleanConfigurationString(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/^["']|["']$/g, '').trim();
+}
+
+export function resolveTelegramWebhookUrl(environmentValue: unknown, savedValue: unknown): string {
+  return cleanConfigurationString(environmentValue) || cleanConfigurationString(savedValue);
+}
+
 export function isValidTelegramWebhookUrl(value: unknown): boolean {
-  if (typeof value !== 'string' || !value.trim()) return true;
+  const cleaned = cleanConfigurationString(value);
+  if (!cleaned) return true;
   try {
-    const parsed = new URL(value.trim());
+    const parsed = new URL(cleaned);
     return parsed.protocol === 'https:' && Boolean(parsed.hostname) && !parsed.username && !parsed.password;
   } catch {
     return false;
