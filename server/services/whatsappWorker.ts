@@ -35,7 +35,7 @@ export class WhatsAppWorker {
       job = await jobQueueService.claimNextJob(this.workerLeaseId);
       if (!job) return;
 
-      console.log(`[WhatsAppWorker] Processing job ${job.jobId} for message from ${job.senderPhone}`);
+      console.log(`[WhatsAppWorker] Processing durable inbound job ${job.jobId}.`);
 
       // Start 15s heartbeat timer
       const heartbeatInterval = setInterval(() => {
@@ -53,7 +53,8 @@ export class WhatsAppWorker {
       }
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[WhatsAppWorker] Error processing job ${job?.jobId || 'unknown'}:`, errorMsg);
+      const safeLoggedError = errorMsg.replace(/\\+?\\d[\\d\\s().-]{5,}\\d/g, '[redacted contact number]');
+      console.error(`[WhatsAppWorker] Error processing job ${job?.jobId || 'unknown'}:`, safeLoggedError);
       if (job) {
         const safeErrorCode = errorMsg.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'WHATSAPP_PROCESSING_FAILED';
         await neonDb.updateInboundChannelProcessingStatus('whatsapp', job.messageSid, 'failed', safeErrorCode);
