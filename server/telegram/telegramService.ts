@@ -10,13 +10,25 @@ import { knowledgeService } from '../db/knowledgeService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
 import { twinAgentService } from '../services/twinAgentService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
+import { normalizeProviderCredential, resolveProviderCredential } from '../services/providerCredentialService.ts';
+import {
+  isTelegramMode,
+  isValidTelegramWebhookUrl,
+  resolveTelegramMode,
+  resolveTelegramOwnerId,
+  resolveTelegramToken,
+  resolveTelegramWebhookUrl,
+  shouldAttemptTelegramStart,
+  type TelegramMode,
+} from '../services/telegramConfigService.ts';
+import type { AppSettings } from '../../src/types/index.ts';
 
 export interface TelegramConfig {
   token: string;
   ownerId: number | null;
   ownerUsername: string | null;
   pairingCode: string;
-  mode: 'polling' | 'webhook';
+  mode: TelegramMode;
   webhookUrl: string;
   activeProvider: string;
   activeModel: string;
@@ -55,35 +67,30 @@ function generatePairingCode(): string {
   return code;
 }
 
-// Load persisted configuration prioritizing process.env when set
+// Environment values remain authoritative; persisted Settings are used when environment values are absent.
 function loadConfig(): TelegramConfig {
-  const currentSavedSettings = settingsManager.getSettings() as any;
-  const config: TelegramConfig = {
-    token: process.env.TELEGRAM_BOT_TOKEN || currentSavedSettings.telegramToken || '',
-    ownerId: process.env.TELEGRAM_OWNER_ID ? Number(process.env.TELEGRAM_OWNER_ID) : (currentSavedSettings.telegramOwnerId ? Number(currentSavedSettings.telegramOwnerId) : null),
+  const saved = settingsManager.getSettings();
+  return {
+    token: resolveTelegramToken(process.env.TELEGRAM_BOT_TOKEN, saved.telegramToken),
+    ownerId: resolveTelegramOwnerId(process.env.TELEGRAM_OWNER_ID, saved.telegramOwnerId),
     ownerUsername: null,
     pairingCode: generatePairingCode(),
-    mode: (process.env.TELEGRAM_MODE as 'polling' | 'webhook') || currentSavedSettings.telegramMode || 'polling',
-    webhookUrl: process.env.TELEGRAM_WEBHOOK_URL || currentSavedSettings.telegramWebhookUrl || '',
-    activeProvider: currentSavedSettings.activeProvider || '',
-    activeModel: currentSavedSettings.activeModel || '',
+    mode: resolveTelegramMode(process.env.TELEGRAM_MODE, saved.telegramMode),
+    webhookUrl: resolveTelegramWebhookUrl(process.env.TELEGRAM_WEBHOOK_URL, saved.telegramWebhookUrl),
+    activeProvider: saved.activeProvider || '',
+    activeModel: saved.activeModel || '',
   };
-
-  return config;
 }
 
-// Save configuration to settingsManager (Neon DB / twin-settings.json)
-function saveConfig(cfg: TelegramConfig) {
-  try {
-    settingsManager.updateSettings({
-      telegramToken: cfg.token,
-      telegramMode: cfg.mode,
-      telegramWebhookUrl: cfg.webhookUrl,
-      telegramOwnerId: cfg.ownerId ? String(cfg.ownerId) : undefined,
-    } as any).catch((err) => console.warn('Failed saving telegram config to settingsManager:', err));
-  } catch (err) {
-    console.error('Failed updating settingsManager for telegram config:', err);
-  }
+// Never report a configuration update successful when a credential or integration setting failed to persist.
+async function saveConfig(cfg: TelegramConfig, persistToken = false): Promise<void> {
+  const patch: Record<string, unknown> = {
+    telegramMode: cfg.mode,
+    telegramWebhookUrl: cfg.webhookUrl,
+    telegramOwnerId: cfg.ownerId ? String(cfg.ownerId) : '',
+  };
+  if (persistToken) patch.telegramToken = cfg.token;
+  await settingsManager.updateSettings(patch as Partial<AppSettings>);
 }
 
 class TelegramBotManager {
@@ -127,9 +134,13 @@ class TelegramBotManager {
           const userId = from.id;
 
           if (this.config.ownerId === userId) {
-            this.config.ownerId = userId;
-            this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
-            saveConfig(this.config);
+            const nextConfig = {
+              ...this.config,
+              ownerId: userId,
+              ownerUsername: from.username || from.first_name || settingsManager.getSettings().userName || '',
+            };
+            await saveConfig(nextConfig);
+            this.config = nextConfig;
             this.log('auth', `Paired with owner ID ${userId} (@${from.username || from.first_name})`);
 
             const keyboard = new InlineKeyboard()
@@ -451,28 +462,24 @@ class TelegramBotManager {
 
           const parts = args.trim().split(/\s+/);
           const first = parts[0].toLowerCase();
+          let nextProvider = this.config.activeProvider;
+          let nextModel = this.config.activeModel;
 
           if (first === 'groq' || first === 'mistral' || first === 'gemini') {
-            this.config.activeProvider = first;
-            if (parts.length > 1) {
-              this.config.activeModel = parts.slice(1).join(' ').trim();
-            }
+            nextProvider = first;
+            if (parts.length > 1) nextModel = parts.slice(1).join(' ').trim();
           } else {
-            if (first.includes('gemini')) {
-              this.config.activeProvider = 'gemini';
-            } else if (first.includes('llama') || first.includes('deepseek') || first.includes('gemma')) {
-              this.config.activeProvider = 'groq';
-            } else if (first.includes('mistral') || first.includes('codestral') || first.includes('pixtral')) {
-              this.config.activeProvider = 'mistral';
-            }
-            this.config.activeModel = args.trim();
+            if (first.includes('gemini')) nextProvider = 'gemini';
+            else if (first.includes('llama') || first.includes('deepseek') || first.includes('gemma')) nextProvider = 'groq';
+            else if (first.includes('mistral') || first.includes('codestral') || first.includes('pixtral')) nextProvider = 'mistral';
+            nextModel = args.trim();
           }
 
-          saveConfig(this.config);
-          settingsManager.updateSettings({
-            activeProvider: this.config.activeProvider as 'gemini' | 'groq' | 'mistral',
-            activeModel: this.config.activeModel,
-          }).catch(() => {});
+          await settingsManager.updateSettings({
+            activeProvider: nextProvider as 'gemini' | 'groq' | 'mistral',
+            activeModel: nextModel,
+          });
+          this.config = { ...this.config, activeProvider: nextProvider, activeModel: nextModel };
 
           await ctx.reply(`✅ Switched active model to \`${this.config.activeModel}\` (${this.config.activeProvider.toUpperCase()})`, {
             parse_mode: 'Markdown',
@@ -642,48 +649,79 @@ class TelegramBotManager {
   }
 
   public async updateConfig(newConfig: Partial<TelegramConfig>): Promise<{ success: boolean; message: string }> {
+    if (newConfig.mode !== undefined && !isTelegramMode(newConfig.mode)) {
+      return {
+        success: false,
+        message: 'Telegram mode must be either polling or webhook.',
+      };
+    }
+
     if (newConfig.webhookUrl !== undefined) {
       const trimmedUrl = newConfig.webhookUrl.trim();
-      if (trimmedUrl && !trimmedUrl.startsWith('https://')) {
+      if (!isValidTelegramWebhookUrl(trimmedUrl)) {
         return {
           success: false,
-          message: 'Telegram requires a valid HTTPS webhook URL (e.g. https://your-domain.com).',
+          message: 'Telegram requires a valid HTTPS webhook URL (e.g. https://your-service.onrender.com).',
         };
       }
     }
 
-    this.config = { ...this.config, ...newConfig };
-    saveConfig(this.config);
+    const environmentToken = normalizeProviderCredential(process.env.TELEGRAM_BOT_TOKEN);
+    const requestedToken = newConfig.token === undefined ? undefined : normalizeProviderCredential(newConfig.token);
+    if (requestedToken && environmentToken && requestedToken !== environmentToken) {
+      return {
+        success: false,
+        message: 'TELEGRAM_BOT_TOKEN is configured in the deployment environment and is authoritative. Update that Render variable or remove it before using a different token from Settings.',
+      };
+    }
+
+    const nextConfig: TelegramConfig = {
+      ...this.config,
+      ...newConfig,
+      ...(environmentToken ? { token: environmentToken } : {}),
+      ...(!environmentToken && requestedToken !== undefined ? { token: requestedToken } : {}),
+    };
+    // Do not mutate active runtime state until durable configuration has been accepted.
+    await saveConfig(nextConfig, newConfig.token !== undefined && !environmentToken);
 
     if (newConfig.activeProvider || newConfig.activeModel) {
-      settingsManager.updateSettings({
+      await settingsManager.updateSettings({
         ...(newConfig.activeProvider ? { activeProvider: newConfig.activeProvider as 'gemini' | 'groq' | 'mistral' } : {}),
         ...(newConfig.activeModel ? { activeModel: newConfig.activeModel } : {}),
-      }).catch(() => {});
+      });
     }
 
-    if (newConfig.token !== undefined || newConfig.mode !== undefined || newConfig.webhookUrl !== undefined) {
-      if (this.isRunning) {
-        await this.stop();
-      }
-      if (this.config.token) {
-        const started = await this.start();
-        return {
-          success: started,
-          message: started ? 'Telegram bot restarted and configured successfully' : 'Failed to start bot with provided token/mode',
-        };
-      }
-    }
+    const runtimeConfigChanged =
+      nextConfig.token !== this.config.token ||
+      nextConfig.mode !== this.config.mode ||
+      nextConfig.webhookUrl !== this.config.webhookUrl;
+    if (runtimeConfigChanged && this.isRunning) await this.stop();
+    this.config = nextConfig;
 
-    return { success: true, message: 'Settings saved' };
+    // A manual Save also retries startup when the current config is saved but the bot is stopped.
+    if (shouldAttemptTelegramStart(Boolean(this.config.token), runtimeConfigChanged, this.isRunning)) {
+      const started = await this.start();
+      return {
+        success: started,
+        message: started
+          ? 'Telegram bot is running and its configuration was verified.'
+          : 'Configuration was saved, but Telegram could not start. Inspect the Telegram status logs.',
+      };
+    }
+    return { success: true, message: 'Telegram configuration saved and persisted.' };
   }
 
-  public resetPairing(): string {
+
+  public async resetPairing(): Promise<string> {
     const newCode = generatePairingCode();
-    this.config.ownerId = null;
-    this.config.ownerUsername = null;
-    this.config.pairingCode = newCode;
-    saveConfig(this.config);
+    const nextConfig = {
+      ...this.config,
+      ownerId: null,
+      ownerUsername: null,
+      pairingCode: newCode,
+    };
+    await saveConfig(nextConfig);
+    this.config = nextConfig;
     this.log('auth', 'Owner pairing was reset. A new one-time code was generated.');
     return newCode;
   }
@@ -708,7 +746,24 @@ class TelegramBotManager {
     }
   }
 
+  public async refreshConfigurationFromSettings(): Promise<void> {
+    const next = loadConfig();
+    next.pairingCode = this.config.pairingCode;
+    next.ownerUsername = this.config.ownerUsername;
+
+    const changed = next.token !== this.config.token || next.mode !== this.config.mode || next.webhookUrl !== this.config.webhookUrl;
+    if (changed && this.isRunning) await this.stop();
+    this.config = next;
+    if (this.config.token && !this.isRunning) {
+      const started = await this.start();
+      if (!started) this.log('error', 'Telegram configuration was loaded from persistent settings, but bot startup failed.');
+    } else if (!this.config.token && this.isRunning) {
+      await this.stop();
+    }
+  }
+
   public async start(): Promise<boolean> {
+    if (this.isRunning && this.bot) return true;
     if (!this.config.token) {
       this.log('info', 'No TELEGRAM_BOT_TOKEN set. Waiting for user setup in UI or env.');
       return false;
@@ -756,7 +811,12 @@ class TelegramBotManager {
         this.isRunning = true;
         return true;
       } else {
-        // Webhook Mode
+        // Webhook Mode requires both a valid URL and the configured request-signing secret.
+        if (!this.config.webhookUrl) {
+          this.log('error', 'TELEGRAM_WEBHOOK_URL is required before enabling Telegram webhook mode.');
+          this.isRunning = false;
+          return false;
+        }
         if (this.config.webhookUrl) {
           const webhookSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
           if (!webhookSecret) {
@@ -777,8 +837,6 @@ class TelegramBotManager {
             this.log('error', `Telegram webhook registration failed: ${setData.description || 'provider rejected request'}`);
             return false;
           }
-        } else {
-          this.log('info', 'Webhook mode enabled without a configured URL.');
         }
         await this.syncTelegramCommandMenu();
         this.isRunning = true;
@@ -844,9 +902,13 @@ class TelegramBotManager {
         const startParts = text.trim().split(/\\s+/);
         const suppliedCode = startParts[0]?.startsWith('/start') ? (startParts[1] || '') : '';
         if (suppliedCode && suppliedCode === this.config.pairingCode) {
-          this.config.ownerId = userId;
-          this.config.ownerUsername = from.username || from.first_name || settingsManager.getSettings().userName || '';
-          saveConfig(this.config);
+          const nextConfig = {
+            ...this.config,
+            ownerId: userId,
+            ownerUsername: from.username || from.first_name || settingsManager.getSettings().userName || '',
+          };
+          await saveConfig(nextConfig);
+          this.config = nextConfig;
           this.log('auth', `Owner pairing completed for Telegram user ID ${userId}`);
           await ctx.reply('Pairing successful. This Telegram account is now linked as the owner.', { parse_mode: 'Markdown' });
           return;
@@ -882,18 +944,15 @@ class TelegramBotManager {
       } else if (data === 'action_summary') {
         const handler = this.commandRegistry.find((h) => h.command === 'summary');
         if (handler) await handler.execute(ctx, '');
-      } else if (data === 'set_model_gemini') {
-        this.config.activeProvider = 'gemini';
-        saveConfig(this.config);
-        await ctx.reply('✅ Switched active provider to Google Gemini.');
-      } else if (data === 'set_model_groq') {
-        this.config.activeProvider = 'groq';
-        saveConfig(this.config);
-        await ctx.reply('✅ Switched active provider to Groq.');
-      } else if (data === 'set_model_mistral') {
-        this.config.activeProvider = 'mistral';
-        saveConfig(this.config);
-        await ctx.reply('✅ Switched active provider to Mistral AI.');
+      } else if (data === 'set_model_gemini' || data === 'set_model_groq' || data === 'set_model_mistral') {
+        const nextProvider = data === 'set_model_gemini' ? 'gemini' : data === 'set_model_groq' ? 'groq' : 'mistral';
+        await settingsManager.updateSettings({
+          activeProvider: nextProvider,
+          activeModel: this.config.activeModel,
+        });
+        this.config = { ...this.config, activeProvider: nextProvider };
+        const providerName = nextProvider === 'gemini' ? 'Google Gemini' : nextProvider === 'groq' ? 'Groq' : 'Mistral AI';
+        await ctx.reply(`✅ Switched active provider to ${providerName}.`);
       } else if (data.startsWith('dyn_act_')) {
         // Dynamic Model-Generated Action Button Click
         const actionItem = this.dynamicActionCallbacks.get(data);
@@ -1323,7 +1382,7 @@ class TelegramBotManager {
   private async generateVoiceBuffer(text: string): Promise<Buffer | null> {
     const settings = settingsManager.getSettings();
     const voice = (settings.voice || '').trim();
-    const apiKey = (settings.customGeminiKey || process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    const apiKey = resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key;
 
     if (!voice) {
       console.warn('[TelegramBot] Voice synthesis unavailable: no voice identifier is configured.');

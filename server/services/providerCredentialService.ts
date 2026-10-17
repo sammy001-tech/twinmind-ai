@@ -12,6 +12,19 @@ export function normalizeProviderCredential(value: unknown): string {
   return key;
 }
 
+export function maskProviderCredential(value: unknown): string {
+  const key = normalizeProviderCredential(value);
+  if (!key) return '';
+  if (key.length < 8) return '********';
+  return `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
+export function resolveCredentialSourceForDisplay(environmentKey: unknown, settingsKey: unknown): ProviderCredentialSource {
+  if (normalizeProviderCredential(environmentKey)) return 'environment';
+  if (normalizeProviderCredential(settingsKey)) return 'settings';
+  return 'none';
+}
+
 export function resolveProviderCredential(environmentKey: unknown, settingsKey: unknown, requestKey?: unknown): ProviderCredentialResolution {
   const env = normalizeProviderCredential(environmentKey);
   if (env) return { key: env, source: 'environment' };

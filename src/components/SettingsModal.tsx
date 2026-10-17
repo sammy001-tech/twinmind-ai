@@ -168,6 +168,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     groq: boolean;
     mistral: boolean;
   }>({ gemini: false, groq: false, mistral: false });
+  type CredentialSource = 'environment' | 'settings' | 'none';
+  const [credentialSources, setCredentialSources] = useState<Record<'gemini' | 'groq' | 'mistral' | 'tavily' | 'telegram' | 'twilio', CredentialSource>>({
+    gemini: 'none', groq: 'none', mistral: 'none', tavily: 'none', telegram: 'none', twilio: 'none',
+  });
+  const [catalogueDiagnostics, setCatalogueDiagnostics] = useState<Record<string, { status?: string; errorCode?: string; httpStatus?: number }>>({});
 
 
   // Neon PostgreSQL Database State
@@ -486,9 +491,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       if (data.success) {
         setTgFeedback({ type: 'success', text: `New pairing code generated: ${data.pairingCode}` });
         await loadTelegramStatus();
+      } else {
+        setTgFeedback({
+          type: 'error',
+          text: data.error || data.message || 'Pairing changes could not be saved. Verify that Neon PostgreSQL is connected.',
+        });
       }
     } catch (err) {
-      console.error('Reset pairing error:', err);
+      setTgFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Pairing changes could not be saved.',
+      });
     }
   };
 
@@ -532,10 +545,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       const data = await res.json();
       const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       if (data.success) {
-        setTavilyFeedback({ type: 'success', text: data.message });
+        const message = credentialSources.tavily === 'environment'
+          ? `${data.message} The Render TAVILY_API_KEY remains authoritative for app execution.`
+          : data.message;
+        setTavilyFeedback({ type: 'success', text: message });
         updateKeyTestStatus('tavily', {
           status: 'success',
-          message: data.message,
+          message,
           testedAt: timeStr,
         });
       } else {
@@ -588,7 +604,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }
       }
       setTavilyKeyInput('');
-      setTavilyFeedback({ type: 'success', text: 'Tavily API key saved and persisted.' });
+      const environmentIsAuthoritative = credentialSources.tavily === 'environment';
+      setTavilyFeedback({
+        type: 'success',
+        text: environmentIsAuthoritative
+          ? 'Tavily key saved to Neon. Render TAVILY_API_KEY is still authoritative; update or remove it to use the saved key.'
+          : 'Tavily API key saved and persisted. The raw key remains hidden.',
+      });
+      await loadCredentialSources();
       setFeedbackToast('Tavily API key saved.');
       setTimeout(() => setFeedbackToast(null), 3000);
       await loadTavilyStatus();
@@ -608,6 +631,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } catch (err) {
       console.warn('Failed to fetch DB status:', err);
+    }
+  };
+
+  const loadCredentialSources = async () => {
+    try {
+      const response = await fetch('/api/settings');
+      const data = await response.json();
+      if (!response.ok || !data?.settings?.apiKeySources) return;
+      const sources = data.settings.apiKeySources as Record<string, unknown>;
+      const normalizeSource = (value: unknown): CredentialSource =>
+        value === 'environment' || value === 'settings' ? value : 'none';
+      setCredentialSources({
+        gemini: normalizeSource(sources.gemini),
+        groq: normalizeSource(sources.groq),
+        mistral: normalizeSource(sources.mistral),
+        tavily: normalizeSource(sources.tavily),
+        telegram: normalizeSource(sources.telegram),
+        twilio: normalizeSource(sources.twilio),
+      });
+    } catch (err) {
+      console.warn('Unable to load safe credential-source status:', err);
     }
   };
 
@@ -691,6 +735,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         groq: data.groq || [],
         mistral: data.mistral || [],
       });
+      if (data.diagnostics) setCatalogueDiagnostics(data.diagnostics);
       if (data.isLive) {
         setLiveStatus(data.isLive);
       }
@@ -731,10 +776,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setGeminiKeyInput(customGeminiKey);
-      setGroqKeyInput(customGroqKey);
-      setMistralKeyInput(customMistralKey);
-      setTavilyKeyInput(customTavilyKey);
+      // Never prefill secret inputs with masks: a mask is status, not key material.
+      setGeminiKeyInput('');
+      setGroqKeyInput('');
+      setMistralKeyInput('');
+      setTavilyKeyInput('');
+      loadCredentialSources();
       loadAllModels();
       loadDbStatus();
       loadTavilyStatus();
@@ -751,6 +798,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [selectedProviderTab, providerModels]);
 
   if (!isOpen) return null;
+
+  const credentialSourceDescription = (provider: 'gemini' | 'groq' | 'mistral') => {
+    const source = credentialSources[provider];
+    if (source === 'environment') {
+      return 'Active source: Render environment variable. It takes precedence over any saved Settings key during app execution.';
+    }
+    if (source === 'settings') {
+      return 'Saved credential detected in Neon. The raw key is hidden; enter a new key only to replace it.';
+    }
+    return 'No credential detected in the deployment environment or saved Settings. Enter a key and save it to Neon.';
+  };
 
   const handleSelectModel = (provider: 'gemini' | 'groq' | 'mistral', modelId: string) => {
     const liveModels = modelsByProvider[provider];
@@ -801,10 +859,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       else if (provider === 'groq') setGroqKeyInput('');
       else setMistralKeyInput('');
 
+      const activeSource = credentialSources[provider];
       setProviderKeySaveFeedback((prev) => ({
         ...prev,
-        [provider]: { type: 'success', text: 'Key saved to Neon PostgreSQL. The raw key is no longer shown in this form.' },
+        [provider]: {
+          type: 'success',
+          text: activeSource === 'environment'
+            ? 'Key saved to Neon PostgreSQL. The Render environment variable remains authoritative at runtime; update or remove it to use the saved Settings key.'
+            : 'Key saved to Neon PostgreSQL. The raw key is hidden and will not be redisplayed.',
+        },
       }));
+      await loadCredentialSources();
+      await loadAllModels();
       return true;
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unable to save this provider key.';
@@ -1377,7 +1443,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             >
               <span>Google Gemini</span>
               <span className="text-[10px] px-1.5 py-0.2 rounded bg-black/20 dark:bg-black/30 font-mono flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
+                {liveStatus.gemini && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />}
                 {modelsByProvider.gemini.length}
               </span>
             </button>
@@ -1418,6 +1484,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
             </button>
           </div>
+          {selectedProviderTab === 'gemini' && catalogueDiagnostics.gemini?.errorCode && (
+            <div role="status" className="rounded-lg border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-[11px] text-rose-700 dark:text-rose-300">
+              <strong>Live Gemini catalogue unavailable:</strong> {catalogueDiagnostics.gemini.errorCode}.
+              {' '}Credential source: {credentialSources.gemini}. Review Render's GEMINI_API_KEY value and its Google API access; saved Settings keys do not override that environment variable.
+            </div>
+          )}
 
           {/* Direct Input Override for this provider */}
           <form onSubmit={handleApplyCustomModel} className="flex items-center gap-2">
@@ -1612,7 +1684,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type={showGeminiKey ? "text" : "password"}
                   value={geminiKeyInput}
                   onChange={(e) => setGeminiKeyInput(e.target.value)}
-                  placeholder="AQ... or AIzaSy..."
+                  placeholder={credentialSources.gemini === "settings" ? "Saved key hidden — enter replacement" : credentialSources.gemini === "environment" ? "Render key is active — enter replacement only if needed" : "Paste Gemini API key"}
                   className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
                 />
                 <button
@@ -1624,6 +1696,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {showGeminiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
               </div>
+              <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">{credentialSourceDescription('gemini')}</p>
 
               {keyTestMap["gemini"]?.message && (
                 <div
@@ -1695,7 +1768,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type={showGroqKey ? "text" : "password"}
                   value={groqKeyInput}
                   onChange={(e) => setGroqKeyInput(e.target.value)}
-                  placeholder="gsk_..."
+                  placeholder={credentialSources.groq === "settings" ? "Saved key hidden — enter replacement" : credentialSources.groq === "environment" ? "Render key is active — enter replacement only if needed" : "Paste Groq API key"}
                   className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
                 <button
@@ -1707,6 +1780,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {showGroqKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
               </div>
+              <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">{credentialSourceDescription('groq')}</p>
 
               {keyTestMap["groq"]?.message && (
                 <div
@@ -1778,7 +1852,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type={showMistralKey ? "text" : "password"}
                   value={mistralKeyInput}
                   onChange={(e) => setMistralKeyInput(e.target.value)}
-                  placeholder="mis_..."
+                  placeholder={credentialSources.mistral === "settings" ? "Saved key hidden — enter replacement" : credentialSources.mistral === "environment" ? "Render key is active — enter replacement only if needed" : "Paste Mistral API key"}
                   className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-3 pr-10 py-1.5 text-xs font-mono text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-amber-500"
                 />
                 <button
@@ -1790,6 +1864,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   {showMistralKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
               </div>
+              <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">{credentialSourceDescription('mistral')}</p>
 
               {keyTestMap["mistral"]?.message && (
                 <div

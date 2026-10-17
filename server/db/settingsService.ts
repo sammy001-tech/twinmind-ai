@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type { AppSettings } from '../../src/types/index.ts';
 import { neonDb } from './neonService.ts';
+import { maskProviderCredential, normalizeProviderCredential, resolveCredentialSourceForDisplay } from '../services/providerCredentialService.ts';
 
 const SETTINGS_FILE_PATH = path.join(process.cwd(), 'twin-settings.json');
 
@@ -17,16 +18,20 @@ const DEFAULT_SETTINGS: AppSettings = {
   voice: process.env.TTS_VOICE || '',
   userName: process.env.USER_NAME || '',
   nickname: process.env.USER_NICKNAME || '',
-  customGeminiKey: process.env.GEMINI_API_KEY || '',
-  customGroqKey: process.env.GROQ_API_KEY || '',
-  customMistralKey: process.env.MISTRAL_API_KEY || '',
-  customTavilyKey: process.env.TAVILY_API_KEY || '',
+  customGeminiKey: '',
+  customGroqKey: '',
+  customMistralKey: '',
+  customTavilyKey: '',
+  telegramToken: '',
+  telegramOwnerId: process.env.TELEGRAM_OWNER_ID || '',
+  telegramMode: process.env.TELEGRAM_MODE === 'webhook' ? 'webhook' : 'polling',
+  telegramWebhookUrl: process.env.TELEGRAM_WEBHOOK_URL || '',
   autoPlayVoice: false,
   voiceSpeed: 1,
   customPrompts: [],
   activeThreadId: null,
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID || '',
-  twilioAuthToken: process.env.TWILIO_AUTH_TOKEN || '',
+  twilioAuthToken: '',
   twilioWhatsAppNumber: process.env.TWILIO_WHATSAPP_NUMBER || '',
   userPhoneNumber: process.env.TWILIO_USER_PHONE_NUMBER || process.env.USER_PHONE_NUMBER || '',
   enableWhatsAppAlerts: false,
@@ -178,23 +183,37 @@ class SettingsManager {
       activeModel,
       providerModels: updatedProviderModels,
     };
-    const credentialFields = [
+    const durableFields = [
       'customGeminiKey',
       'customGroqKey',
       'customMistralKey',
       'customTavilyKey',
+      'twilioAccountSid',
+      'twilioAuthToken',
+      'twilioWhatsAppNumber',
+      'userPhoneNumber',
+      'telegramToken',
+      'telegramMode',
+      'telegramWebhookUrl',
+      'telegramOwnerId',
     ] as const;
-    const isCredentialUpdate = credentialFields.some((field) =>
+    const requiresDurableWrite = durableFields.some((field) =>
       Object.prototype.hasOwnProperty.call(filteredPatch, field)
     );
 
-    // Credentials are intentionally excluded from the local settings file. Do not acknowledge a
-    // credential update unless Neon confirms the durable write, and do not commit it to memory first.
-    if (isCredentialUpdate) {
+    // Credentials and integration configuration must survive restarts. Never acknowledge a
+    // durable setting unless Neon confirms the write; do not commit it to memory first.
+    if (requiresDurableWrite) {
+      const connected = await neonDb.ensureConnected();
+      if (!connected) {
+        throw new Error(
+          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
+        );
+      }
       const persisted = await neonDb.saveSettings(nextSettings as unknown as Record<string, unknown>);
       if (!persisted) {
         throw new Error(
-          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Provider API keys require a healthy Neon PostgreSQL connection; no credential change was applied.',
+          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
         );
       }
       this.currentSettings = nextSettings;
@@ -216,8 +235,7 @@ class SettingsManager {
   }
 
   /**
-   * Return sanitized settings for client-side use (masks sensitive keys)
-   * Includes environment variable fallbacks for display in UI when settings are empty.
+   * Return an explicit client DTO with secret masks and safe credential-source metadata..
    */
   public getSanitizedSettings(overrides: Partial<AppSettings> = {}) {
     const s = { ...this.getSettings(), ...overrides };
@@ -228,11 +246,9 @@ class SettingsManager {
       telegramOwnerId?: string;
     };
 
-    const mask = (key?: string) => {
-      if (!key) return '';
-      if (key.length < 8) return '********';
-      return `${key.slice(0, 4)}...${key.slice(-4)}`;
-    };
+    const mask = maskProviderCredential;
+    const normalizeCredential = normalizeProviderCredential;
+    const credentialSource = resolveCredentialSourceForDisplay;
 
     // Explicit client DTO: unknown persisted properties and raw secrets are never spread into responses.
     return {
@@ -243,10 +259,11 @@ class SettingsManager {
       voice: s.voice || '',
       userName: s.userName || '',
       nickname: s.nickname || '',
-      customGeminiKey: mask(process.env.GEMINI_API_KEY || s.customGeminiKey),
-      customGroqKey: mask(process.env.GROQ_API_KEY || s.customGroqKey),
-      customMistralKey: mask(process.env.MISTRAL_API_KEY || s.customMistralKey),
-      customTavilyKey: mask(process.env.TAVILY_API_KEY || s.customTavilyKey),
+      // Display the saved Settings credential, not the environment key; source/precedence is exposed separately.
+      customGeminiKey: mask(s.customGeminiKey),
+      customGroqKey: mask(s.customGroqKey),
+      customMistralKey: mask(s.customMistralKey),
+      customTavilyKey: mask(s.customTavilyKey),
       autoPlayVoice: s.autoPlayVoice,
       voiceSpeed: s.voiceSpeed,
       customPrompts: s.customPrompts || [],
@@ -260,21 +277,23 @@ class SettingsManager {
       proactiveAlertChannel: s.proactiveAlertChannel,
       keyTestStatuses: s.keyTestStatuses,
       themeMode: s.themeMode,
-      telegramToken: runtime.telegramToken ? '********' : '',
+      telegramToken: mask(runtime.telegramToken),
       telegramMode: runtime.telegramMode || '',
       telegramWebhookUrl: runtime.telegramWebhookUrl || '',
-      hasTelegramToken: Boolean(runtime.telegramToken || process.env.TELEGRAM_BOT_TOKEN),
-      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY || s.customGeminiKey),
-      hasGroqKey: Boolean(process.env.GROQ_API_KEY || s.customGroqKey),
-      hasMistralKey: Boolean(process.env.MISTRAL_API_KEY || s.customMistralKey),
-      hasTavilyKey: Boolean(process.env.TAVILY_API_KEY || s.customTavilyKey),
+      hasTelegramToken: Boolean(normalizeCredential(process.env.TELEGRAM_BOT_TOKEN) || normalizeCredential(runtime.telegramToken)),
+      hasGeminiKey: Boolean(normalizeCredential(process.env.GEMINI_API_KEY) || normalizeCredential(s.customGeminiKey)),
+      hasGroqKey: Boolean(normalizeCredential(process.env.GROQ_API_KEY) || normalizeCredential(s.customGroqKey)),
+      hasMistralKey: Boolean(normalizeCredential(process.env.MISTRAL_API_KEY) || normalizeCredential(s.customMistralKey)),
+      hasTavilyKey: Boolean(normalizeCredential(process.env.TAVILY_API_KEY) || normalizeCredential(s.customTavilyKey)),
       apiKeySources: {
-        gemini: process.env.GEMINI_API_KEY ? 'environment' : s.customGeminiKey ? 'settings' : 'none',
-        groq: process.env.GROQ_API_KEY ? 'environment' : s.customGroqKey ? 'settings' : 'none',
-        mistral: process.env.MISTRAL_API_KEY ? 'environment' : s.customMistralKey ? 'settings' : 'none',
-        tavily: process.env.TAVILY_API_KEY ? 'environment' : s.customTavilyKey ? 'settings' : 'none',
+        gemini: credentialSource(process.env.GEMINI_API_KEY, s.customGeminiKey),
+        groq: credentialSource(process.env.GROQ_API_KEY, s.customGroqKey),
+        mistral: credentialSource(process.env.MISTRAL_API_KEY, s.customMistralKey),
+        tavily: credentialSource(process.env.TAVILY_API_KEY, s.customTavilyKey),
+        telegram: credentialSource(process.env.TELEGRAM_BOT_TOKEN, runtime.telegramToken),
+        twilio: credentialSource(process.env.TWILIO_AUTH_TOKEN, s.twilioAuthToken),
       },
-      twilioTokenConfigured: Boolean(s.twilioAuthToken || process.env.TWILIO_AUTH_TOKEN),
+      twilioTokenConfigured: Boolean(normalizeCredential(s.twilioAuthToken) || normalizeCredential(process.env.TWILIO_AUTH_TOKEN)),
     };
   }
 }

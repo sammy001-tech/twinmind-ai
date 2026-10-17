@@ -180,6 +180,10 @@ export interface AppSettings {
   activeThreadId?: string | null;
   twilioAccountSid?: string;
   twilioAuthToken?: string;
+  telegramToken?: string;
+  telegramMode?: 'polling' | 'webhook';
+  telegramWebhookUrl?: string;
+  telegramOwnerId?: string;
   twilioWhatsAppNumber?: string;
   userPhoneNumber?: string;
   enableWhatsAppAlerts?: boolean;

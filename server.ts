@@ -1,7 +1,7 @@
+import 'dotenv/config';
 import express from 'express';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
-import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -27,7 +27,6 @@ import { getArtifactStorageStatus } from './server/services/artifactStorageServi
 import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
 import { evaluateSameOriginRequest, resolveProviderCredential, resolveCredentialForVerification } from './server/services/providerCredentialService.ts';
 
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -416,17 +415,17 @@ app.post('/api/twilio/whatsapp', async (req: Request, res: Response): Promise<vo
 // Live Multi-Model Status & Capabilities probe (Strict Zero-Fallback Policy)
 app.get('/api/models/status', async (_req: Request, res: Response) => {
   const settings = settingsManager.getSettings();
-  const keys = {
-    gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey).key,
-    groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey).key,
-    mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey).key,
+  const credentials = {
+    gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey),
+    groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey),
+    mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey),
   };
-
-  const [geminiModels, groqModels, mistralModels] = await Promise.all([
-    modelCatalogService.getLiveModels('gemini', keys.gemini),
-    modelCatalogService.getLiveModels('groq', keys.groq),
-    modelCatalogService.getLiveModels('mistral', keys.mistral),
+  const [geminiCatalogue, groqModels, mistralModels] = await Promise.all([
+    modelCatalogService.getLiveGeminiModelsDiagnostic(credentials.gemini.key),
+    modelCatalogService.getLiveModels('groq', credentials.groq.key),
+    modelCatalogService.getLiveModels('mistral', credentials.mistral.key),
   ]);
+  const geminiModels = geminiCatalogue.models;
 
   const catalogueStatus = (key: string, models: unknown[]) =>
     !key ? 'unconfigured' : models.length ? 'available' : 'unavailable';
@@ -445,27 +444,32 @@ app.get('/api/models/status', async (_req: Request, res: Response) => {
       {
         id: 'gemini',
         name: 'Google Gemini',
-        hasKey: Boolean(keys.gemini),
-        enabled: Boolean(keys.gemini && geminiModels.length),
-        catalogueStatus: catalogueStatus(keys.gemini, geminiModels),
+        hasKey: Boolean(credentials.gemini.key),
+        credentialSource: credentials.gemini.source,
+        enabled: Boolean(credentials.gemini.key && geminiModels.length),
+        catalogueStatus: catalogueStatus(credentials.gemini.key, geminiModels),
         liveModelCount: geminiModels.length,
+        ...(geminiCatalogue.errorCode ? { errorCode: geminiCatalogue.errorCode } : {}),
+        ...(geminiCatalogue.httpStatus ? { httpStatus: geminiCatalogue.httpStatus } : {}),
         ...providerModel('gemini', geminiModels),
       },
       {
         id: 'groq',
         name: 'Groq',
-        hasKey: Boolean(keys.groq),
-        enabled: Boolean(keys.groq && groqModels.length),
-        catalogueStatus: catalogueStatus(keys.groq, groqModels),
+        hasKey: Boolean(credentials.groq.key),
+        credentialSource: credentials.groq.source,
+        enabled: Boolean(credentials.groq.key && groqModels.length),
+        catalogueStatus: catalogueStatus(credentials.groq.key, groqModels),
         liveModelCount: groqModels.length,
         ...providerModel('groq', groqModels),
       },
       {
         id: 'mistral',
         name: 'Mistral AI',
-        hasKey: Boolean(keys.mistral),
-        enabled: Boolean(keys.mistral && mistralModels.length),
-        catalogueStatus: catalogueStatus(keys.mistral, mistralModels),
+        hasKey: Boolean(credentials.mistral.key),
+        credentialSource: credentials.mistral.source,
+        enabled: Boolean(credentials.mistral.key && mistralModels.length),
+        catalogueStatus: catalogueStatus(credentials.mistral.key, mistralModels),
         liveModelCount: mistralModels.length,
         ...providerModel('mistral', mistralModels),
       },
@@ -473,20 +477,28 @@ app.get('/api/models/status', async (_req: Request, res: Response) => {
   });
 });
 
-// Diagnostic endpoint to verify Environment Key format and basic connectivity
+// Verify the Render Gemini environment credential and return a safe, actionable diagnostic.
 app.get('/api/keys/verify-env', async (_req: Request, res: Response) => {
-  const envKey = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+  const envKey = normalizeProviderApiKey(process.env.GEMINI_API_KEY);
   if (!envKey) {
-    res.status(503).json({ success: false, code: 'PROVIDER_CREDENTIALS_MISSING', provider: 'gemini' });
+    res.status(503).json({
+      success: false,
+      code: 'PROVIDER_CREDENTIALS_MISSING',
+      provider: 'gemini',
+      credentialSource: 'environment',
+    });
     return;
   }
 
-  const models = await modelCatalogService.getLiveGeminiModels(envKey);
-  if (!models.length) {
-    res.status(502).json({
+  const diagnostic = await modelCatalogService.getLiveGeminiModelsDiagnostic(envKey);
+  if (diagnostic.status !== 'available') {
+    const responseStatus = diagnostic.httpStatus === 401 || diagnostic.httpStatus === 403 ? diagnostic.httpStatus : 502;
+    res.status(responseStatus).json({
       success: false,
-      code: 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+      code: diagnostic.errorCode || 'LIVE_MODEL_CATALOG_UNAVAILABLE',
       provider: 'gemini',
+      credentialSource: 'environment',
+      ...(diagnostic.httpStatus ? { providerHttpStatus: diagnostic.httpStatus } : {}),
       checkedAt: new Date().toISOString(),
     });
     return;
@@ -495,7 +507,8 @@ app.get('/api/keys/verify-env', async (_req: Request, res: Response) => {
   res.json({
     success: true,
     provider: 'gemini',
-    liveModelCount: models.length,
+    credentialSource: 'environment',
+    liveModelCount: diagnostic.models.length,
     checkedAt: new Date().toISOString(),
   });
 });
@@ -513,57 +526,61 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   const userProvidedKey = isMasked(cleanKey) ? '' : cleanKey;
 
   if (provider === 'gemini') {
-    const sKey = settingsManager.getSettings().customGeminiKey;
-    const eKey = process.env.GEMINI_API_KEY;
-    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
+    const settingsKey = settingsManager.getSettings().customGeminiKey;
+    const resolution = resolveCredentialForVerification(userProvidedKey, process.env.GEMINI_API_KEY, settingsKey);
 
-    if (!effectiveKey) {
-      res.status(400).json({ success: false, error: 'Please enter a Gemini API key (starting with AIza or AQ.) or configure GEMINI_API_KEY.' });
+    if (!resolution.key) {
+      res.status(400).json({
+        success: false,
+        code: 'PROVIDER_CREDENTIALS_MISSING',
+        error: 'No Gemini credential is available. Enter a key or configure GEMINI_API_KEY in Render.',
+        credentialSource: 'none',
+      });
       return;
     }
 
-    try {
-      const startTime = Date.now();
-      const testClient = new GoogleGenAI({
-        apiKey: effectiveKey,
-        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+    const diagnostic = await modelCatalogService.getLiveGeminiModelsDiagnostic(resolution.key);
+    if (diagnostic.status !== 'available') {
+      const errorMessages: Record<string, string> = {
+        GEMINI_AUTHENTICATION_REJECTED: 'Google rejected this credential. Verify the key in Google AI Studio and its API access.',
+        GEMINI_ACCESS_FORBIDDEN: 'Google denied access to the Gemini model catalogue for this credential or project.',
+        GEMINI_RATE_LIMITED: 'Google rate-limited the catalogue request. Try again later.',
+        GEMINI_REQUEST_REJECTED: 'Google rejected the catalogue request. Check key restrictions and API configuration.',
+        GEMINI_PROVIDER_UNAVAILABLE: 'Google Gemini is temporarily unavailable.',
+        GEMINI_NETWORK_REQUEST_FAILED: 'The server could not reach the Google Gemini API.',
+        GEMINI_NO_CHAT_CAPABLE_MODELS: 'Google returned no models supporting generateContent for this credential.',
+        GEMINI_CATALOG_PAGINATION_LIMIT: 'The live Gemini catalogue exceeded the safe pagination limit.',
+        GEMINI_CATALOG_RESPONSE_INVALID: 'Google returned an unexpected Gemini catalogue response.',
+        GEMINI_CATALOG_REQUEST_FAILED: 'The live Gemini catalogue request failed. Inspect the server diagnostic code.',
+      };
+      const statusCode = diagnostic.httpStatus === 401 || diagnostic.httpStatus === 403
+        ? diagnostic.httpStatus
+        : diagnostic.errorCode === 'PROVIDER_CREDENTIALS_MISSING' ? 400 : 502;
+      res.status(statusCode).json({
+        success: false,
+        code: diagnostic.errorCode || 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+        error: errorMessages[diagnostic.errorCode || ''] || 'Gemini catalogue is unavailable.',
+        credentialSource: resolution.source,
+        ...(diagnostic.httpStatus ? { providerHttpStatus: diagnostic.httpStatus } : {}),
       });
-      // Verify live access with Google GenAI
-      const pager = await testClient.models.list();
-      let count = 0;
-      for await (const m of pager) {
-        if (m.name) count++;
-        if (count >= 3) break;
-      }
-      const latencyMs = Date.now() - startTime;
-      res.json({
-        success: true,
-        message: `Gemini API key verified in ${latencyMs}ms! Connected to Google GenAI.`,
-        latencyMs,
-      });
-    } catch (err: any) {
-      console.warn('Gemini test key error:', err);
-      let errorMsg = err?.message || 'Gemini API authentication failed.';
-      
-      // Try to parse clean message from raw Google RPC JSON if present
-      try {
-        if (errorMsg.includes('{')) {
-          const parsed = JSON.parse(errorMsg.substring(errorMsg.indexOf('{')));
-          if (parsed.error?.message) {
-            errorMsg = parsed.error.message;
-          }
-        }
-      } catch {}
-
-      res.status(401).json({ success: false, error: errorMsg });
+      return;
     }
+
+    res.json({
+      success: true,
+      code: 'GEMINI_CREDENTIAL_VERIFIED',
+      message: `Gemini credential verified; ${diagnostic.models.length} chat-capable models are available. Credential source: ${resolution.source}.`,
+      credentialSource: resolution.source,
+      liveModelCount: diagnostic.models.length,
+    });
     return;
   }
 
   if (provider === 'groq') {
     const sKey = settingsManager.getSettings().customGroqKey;
     const eKey = process.env.GROQ_API_KEY;
-    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
+    const resolution = resolveCredentialForVerification(userProvidedKey, eKey, sKey);
+    const effectiveKey = resolution.key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Groq API key to test (starting with gsk_).' });
@@ -581,7 +598,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
         const modelCount = Array.isArray(data.data) ? data.data.length : 0;
         res.json({
           success: true,
-          message: `Groq API key verified in ${latencyMs}ms! Connected to Groq LPUs (${modelCount} models available).`,
+          message: `Groq API key verified in ${latencyMs}ms! ${modelCount} models available. Credential source: ${resolution.source}.`,
+          credentialSource: resolution.source,
           latencyMs,
         });
       } else {
@@ -600,7 +618,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   if (provider === 'mistral') {
     const sKey = settingsManager.getSettings().customMistralKey;
     const eKey = process.env.MISTRAL_API_KEY;
-    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
+    const resolution = resolveCredentialForVerification(userProvidedKey, eKey, sKey);
+    const effectiveKey = resolution.key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Mistral API key to test.' });
@@ -618,7 +637,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
         const modelCount = Array.isArray(data.data) ? data.data.length : 0;
         res.json({
           success: true,
-          message: `Mistral API key verified in ${latencyMs}ms! Connected to Mistral AI (${modelCount} models available).`,
+          message: `Mistral API key verified in ${latencyMs}ms! ${modelCount} models available. Credential source: ${resolution.source}.`,
+          credentialSource: resolution.source,
           latencyMs,
         });
       } else {
@@ -649,14 +669,41 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
   const requestKey = normalizeProviderApiKey(req.get(`x-${provider}-key`) || req.get('x-api-key'));
   const environmentKey = provider === 'gemini' ? process.env.GEMINI_API_KEY : provider === 'groq' ? process.env.GROQ_API_KEY : process.env.MISTRAL_API_KEY;
   const settingsKey = provider === 'gemini' ? settings.customGeminiKey : provider === 'groq' ? settings.customGroqKey : settings.customMistralKey;
-  const key = resolveProviderCredential(environmentKey, settingsKey, requestKey).key;
+  const resolution = resolveProviderCredential(environmentKey, settingsKey, requestKey);
 
-  if (!key) {
-    res.status(503).json({ success: false, provider, code: 'PROVIDER_CREDENTIALS_MISSING', models: [], isLiveApi: false });
+  if (!resolution.key) {
+    res.status(503).json({ success: false, provider, code: 'PROVIDER_CREDENTIALS_MISSING', models: [], isLiveApi: false, credentialSource: 'none' });
     return;
   }
 
-  const models = await modelCatalogService.getLiveModels(provider, key);
+  if (provider === 'gemini') {
+    const diagnostic = await modelCatalogService.getLiveGeminiModelsDiagnostic(resolution.key);
+    if (diagnostic.status !== 'available') {
+      const statusCode = diagnostic.httpStatus === 401 || diagnostic.httpStatus === 403 ? diagnostic.httpStatus : 502;
+      res.status(statusCode).json({
+        success: false,
+        provider,
+        code: diagnostic.errorCode || 'LIVE_MODEL_CATALOG_UNAVAILABLE',
+        models: [],
+        isLiveApi: false,
+        credentialSource: resolution.source,
+        ...(diagnostic.httpStatus ? { providerHttpStatus: diagnostic.httpStatus } : {}),
+        checkedAt: new Date().toISOString(),
+      });
+      return;
+    }
+    res.json({
+      success: true,
+      provider,
+      models: diagnostic.models,
+      isLiveApi: true,
+      credentialSource: resolution.source,
+      checkedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const models = await modelCatalogService.getLiveModels(provider, resolution.key);
   if (!models.length) {
     res.status(502).json({
       success: false,
@@ -664,6 +711,7 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
       code: 'LIVE_MODEL_CATALOG_UNAVAILABLE',
       models: [],
       isLiveApi: false,
+      credentialSource: resolution.source,
       checkedAt: new Date().toISOString(),
     });
     return;
@@ -674,23 +722,25 @@ app.get('/api/models/live', async (req: Request, res: Response): Promise<void> =
     provider,
     models,
     isLiveApi: true,
+    credentialSource: resolution.source,
     checkedAt: new Date().toISOString(),
   });
 });
 
 app.get('/api/models/all', async (req: Request, res: Response): Promise<void> => {
   const settings = settingsManager.getSettings();
-  const keys = {
-    gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey, req.get('x-gemini-key')).key,
-    groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey, req.get('x-groq-key')).key,
-    mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey, req.get('x-mistral-key')).key,
+  const credentials = {
+    gemini: resolveProviderCredential(process.env.GEMINI_API_KEY, settings.customGeminiKey, req.get('x-gemini-key')),
+    groq: resolveProviderCredential(process.env.GROQ_API_KEY, settings.customGroqKey, req.get('x-groq-key')),
+    mistral: resolveProviderCredential(process.env.MISTRAL_API_KEY, settings.customMistralKey, req.get('x-mistral-key')),
   };
 
-  const [gemini, groq, mistral] = await Promise.all([
-    modelCatalogService.getLiveModels('gemini', keys.gemini),
-    modelCatalogService.getLiveModels('groq', keys.groq),
-    modelCatalogService.getLiveModels('mistral', keys.mistral),
+  const [geminiCatalogue, groq, mistral] = await Promise.all([
+    modelCatalogService.getLiveGeminiModelsDiagnostic(credentials.gemini.key),
+    modelCatalogService.getLiveModels('groq', credentials.groq.key),
+    modelCatalogService.getLiveModels('mistral', credentials.mistral.key),
   ]);
+  const gemini = geminiCatalogue.models;
 
   res.json({
     gemini,
@@ -698,15 +748,27 @@ app.get('/api/models/all', async (req: Request, res: Response): Promise<void> =>
     mistral,
     checkedAt: new Date().toISOString(),
     isLive: {
-      gemini: Boolean(keys.gemini && gemini.length),
-      groq: Boolean(keys.groq && groq.length),
-      mistral: Boolean(keys.mistral && mistral.length),
+      gemini: Boolean(credentials.gemini.key && gemini.length),
+      groq: Boolean(credentials.groq.key && groq.length),
+      mistral: Boolean(credentials.mistral.key && mistral.length),
     },
     counts: { gemini: gemini.length, groq: groq.length, mistral: mistral.length },
     configured: {
-      gemini: Boolean(keys.gemini),
-      groq: Boolean(keys.groq),
-      mistral: Boolean(keys.mistral),
+      gemini: Boolean(credentials.gemini.key),
+      groq: Boolean(credentials.groq.key),
+      mistral: Boolean(credentials.mistral.key),
+    },
+    credentialSources: {
+      gemini: credentials.gemini.source,
+      groq: credentials.groq.source,
+      mistral: credentials.mistral.source,
+    },
+    diagnostics: {
+      gemini: {
+        status: geminiCatalogue.status,
+        ...(geminiCatalogue.errorCode ? { errorCode: geminiCatalogue.errorCode } : {}),
+        ...(geminiCatalogue.httpStatus ? { httpStatus: geminiCatalogue.httpStatus } : {}),
+      },
     },
   });
 });
@@ -1678,21 +1740,44 @@ app.get('/api/telegram/status', (req: Request, res: Response) => {
 
 // Update Telegram bot configuration (token, mode, webhookUrl)
 app.post('/api/telegram/config', async (req: Request, res: Response) => {
-  const { token, mode, webhookUrl, activeProvider, activeModel } = req.body;
-  const result = await telegramBotManager.updateConfig({
-    ...(token !== undefined ? { token: token.trim() } : {}),
-    ...(mode ? { mode } : {}),
-    ...(webhookUrl !== undefined ? { webhookUrl: webhookUrl.trim() } : {}),
-    ...(activeProvider ? { activeProvider } : {}),
-    ...(activeModel ? { activeModel } : {}),
-  });
-  res.json({ ...result, status: telegramBotManager.getStatus() });
+  const { token, mode, webhookUrl, activeProvider, activeModel } = req.body || {};
+  try {
+    const result = await telegramBotManager.updateConfig({
+      ...(token !== undefined ? { token: typeof token === 'string' ? token.trim() : '' } : {}),
+      ...(mode ? { mode } : {}),
+      ...(webhookUrl !== undefined ? { webhookUrl: typeof webhookUrl === 'string' ? webhookUrl.trim() : '' } : {}),
+      ...(activeProvider ? { activeProvider } : {}),
+      ...(activeModel ? { activeModel } : {}),
+    });
+    res.status(result.success ? 200 : 400).json({ ...result, status: telegramBotManager.getStatus() });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Telegram configuration could not be saved.';
+    const isPersistenceFailure = message.startsWith('CREDENTIAL_PERSISTENCE_UNAVAILABLE');
+    res.status(isPersistenceFailure ? 503 : 500).json({
+      success: false,
+      code: isPersistenceFailure ? 'CREDENTIAL_PERSISTENCE_UNAVAILABLE' : 'TELEGRAM_CONFIGURATION_FAILED',
+      message: isPersistenceFailure
+        ? 'Telegram token was not applied because durable credential storage is unavailable. Check the Neon database connection.'
+        : 'Telegram configuration failed. Check server diagnostics.',
+    });
+  }
 });
 
 // Reset owner pairing and generate new code
-app.post('/api/telegram/reset-pairing', (req: Request, res: Response) => {
-  const newCode = telegramBotManager.resetPairing();
-  res.json({ success: true, pairingCode: newCode, status: telegramBotManager.getStatus() });
+app.post('/api/telegram/reset-pairing', async (_req: Request, res: Response) => {
+  try {
+    const newCode = await telegramBotManager.resetPairing();
+    res.json({ success: true, pairingCode: newCode, status: telegramBotManager.getStatus() });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Telegram pairing could not be saved.';
+    res.status(503).json({
+      success: false,
+      code: 'CREDENTIAL_PERSISTENCE_UNAVAILABLE',
+      error: message.startsWith('CREDENTIAL_PERSISTENCE_UNAVAILABLE')
+        ? 'Telegram pairing changes require a healthy Neon database connection.'
+        : 'Telegram pairing changes could not be saved.',
+    });
+  }
 });
 
 // Test bot token with Telegram getMe API
@@ -2297,22 +2382,26 @@ Do not invent facts about the user or assume details absent from these records. 
 });
 
 // Tavily AI Key Status & Verification Endpoints (Strict Zero-Fallback Policy)
-app.get('/api/tavily/status', (req: Request, res: Response): void => {
-  const configured = !!(process.env.TAVILY_API_KEY || settingsManager.getSettings().customTavilyKey);
-  const source = process.env.TAVILY_API_KEY ? 'environment' : settingsManager.getSettings().customTavilyKey ? 'settings' : 'none';
+app.get('/api/tavily/status', (_req: Request, res: Response): void => {
+  const savedKey = settingsManager.getSettings().customTavilyKey;
+  const credential = resolveProviderCredential(process.env.TAVILY_API_KEY, savedKey);
+  const mask = (key: string): string => key.length < 8 ? '********' : `${key.slice(0, 4)}...${key.slice(-4)}`;
   res.json({
-    configured,
-    source,
-    maskedKey: configured ? 'tvly-••••••••••••' : null,
+    configured: Boolean(credential.key),
+    source: credential.source,
+    maskedKey: credential.key ? mask(credential.key) : null,
   });
 });
 
 app.post('/api/tavily/test', async (req: Request, res: Response): Promise<void> => {
-  const apiKey = resolveProviderCredential(process.env.TAVILY_API_KEY, settingsManager.getSettings().customTavilyKey, req.body.apiKey).key;
-  if (!apiKey) {
+  const savedKey = settingsManager.getSettings().customTavilyKey;
+  const resolution = resolveCredentialForVerification(req.body?.apiKey, process.env.TAVILY_API_KEY, savedKey);
+  if (!resolution.key) {
     res.status(400).json({
       success: false,
-      error: 'Tavily API Key is not configured. Please enter your Tavily key (starting with tvly-) in Settings or set TAVILY_API_KEY.',
+      code: 'PROVIDER_CREDENTIALS_MISSING',
+      error: 'Tavily API key is not configured. Enter a key or configure TAVILY_API_KEY in Render.',
+      credentialSource: 'none',
     });
     return;
   }
@@ -2323,30 +2412,36 @@ app.post('/api/tavily/test', async (req: Request, res: Response): Promise<void> 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        api_key: apiKey,
+        api_key: resolution.key,
         query: 'ping test',
         max_results: 1,
       }),
     });
     const latencyMs = Date.now() - startTime;
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      res.status(400).json({
+      res.status(502).json({
         success: false,
-        error: `Tavily API error (${response.status}): ${errText || 'Invalid API key or quota exceeded'}`,
+        code: 'TAVILY_PROVIDER_REJECTED',
+        error: `Tavily API rejected the request (HTTP ${response.status}). Check the credential, API access, and quota.`,
+        credentialSource: resolution.source,
+        providerHttpStatus: response.status,
       });
       return;
     }
-    const data = await response.json();
+    await response.json();
     res.json({
       success: true,
-      message: `Tavily API connection verified in ${latencyMs}ms. Real-time search is active.`,
+      code: 'TAVILY_CREDENTIAL_VERIFIED',
+      message: `Tavily credential verified in ${latencyMs}ms. Credential source: ${resolution.source}.`,
+      credentialSource: resolution.source,
       latencyMs,
     });
-  } catch (err: unknown) {
-    res.status(500).json({
+  } catch {
+    res.status(502).json({
       success: false,
-      error: err instanceof Error ? err.message : 'Failed to reach Tavily API endpoint.',
+      code: 'TAVILY_NETWORK_REQUEST_FAILED',
+      error: 'The server could not complete a request to the Tavily API.',
+      credentialSource: resolution.source,
     });
   }
 });
@@ -2722,6 +2817,7 @@ app.listen(PORT, '0.0.0.0', async () => {
       const connected = await neonDb.ensureConnected();
       if (!connected) return;
       await settingsManager.syncFromDatabase();
+      await telegramBotManager.refreshConfigurationFromSettings();
       databaseSettingsHydrated = true;
       console.log('[NeonDB] Database-backed settings hydration completed.');
     } catch (dbErr) {
