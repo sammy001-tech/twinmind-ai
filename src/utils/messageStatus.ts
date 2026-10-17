@@ -45,3 +45,10 @@ export function getMessageDeliveryStatusLabel(status: MessageDeliveryStatus): st
     case 'error': return 'Failed';
   }
 }
+
+export type MessageProcessingStatus = 'processing' | 'completed' | 'failed';
+
+export function resolveMessageProcessingStatus(value: unknown): MessageProcessingStatus | undefined {
+  if (value === 'processing' || value === 'completed' || value === 'failed') return value;
+  return undefined;
+}
