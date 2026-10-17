@@ -5,6 +5,8 @@
  * They never manufacture sources, titles, excerpts, publication dates, scores, or search queries.
  */
 
+import { isIP } from 'node:net';
+
 export interface ResearchSource {
   title: string;
   url: string;
@@ -18,6 +20,52 @@ export interface AdaptiveResearchPlan {
   unresolvedQuestions: string[];
 }
 
+function isNonPublicHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.home.arpa') ||
+    !host.includes('.')
+  ) {
+    return true;
+  }
+
+  const ipVersion = isIP(host);
+  if (ipVersion === 4) {
+    const octets = host.split('.').map(Number);
+    const [a, b, d] = octets;
+    return (
+      a === 0 || a === 10 || a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 192 && b === 0) ||
+      (a === 198 && (b === 18 || b === 19 || b === 51)) ||
+      (a === 203 && b === 0 && d === 113) ||
+      a >= 224
+    );
+  }
+  if (ipVersion === 6) {
+    return (
+      host === '::' ||
+      host === '::1' ||
+      host.startsWith('fe8') ||
+      host.startsWith('fe9') ||
+      host.startsWith('fea') ||
+      host.startsWith('feb') ||
+      host.startsWith('fc') ||
+      host.startsWith('fd') ||
+      host.startsWith('ff') ||
+      host.startsWith('::ffff:')
+    );
+  }
+  return false;
+}
+
 function canonicalHttpUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
   try {
@@ -26,7 +74,8 @@ function canonicalHttpUrl(value: unknown): string | null {
       (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') ||
       !parsed.hostname ||
       parsed.username ||
-      parsed.password
+      parsed.password ||
+      isNonPublicHostname(parsed.hostname)
     ) {
       return null;
     }
@@ -95,7 +144,7 @@ function normalizeSourceArray(
 
 /** Normalize, validate, and deduplicate requested source URLs without accepting non-HTTP protocols. */
 export function normalizeResearchUrls(value: unknown, maxUrls = 5): string[] {
-  if (!Array.isArray(value)) return [];
+  if (!Array.isArray(value) || !Number.isSafeInteger(maxUrls) || maxUrls <= 0) return [];
   const unique = new Set<string>();
   for (const candidate of value) {
     const url = canonicalHttpUrl(candidate);
