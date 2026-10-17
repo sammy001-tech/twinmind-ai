@@ -1573,6 +1573,20 @@ class SpecialistSwarmService {
       const sourceIds = new Map(reportSources.map((source, index) => [source.url, `S${index + 1}`] as const));
 
       let evidenceContext = '';
+
+      if (reportSources.length > 0) {
+        evidenceContext += '\n<untrusted_web_evidence source="live_tavily_research">\n';
+        for (const source of reportSources) {
+          const sourceId = sourceIds.get(source.url);
+          if (!sourceId) continue;
+          evidenceContext += `- [${sourceId}] Title: ${source.title}\n  URL: ${source.url}\n  Evidence type: ${source.extracted ? 'extracted page content' : 'search-provider excerpt'}\n`;
+          if (source.publishedDate) evidenceContext += `  Provider-reported publication date: ${source.publishedDate}\n`;
+          evidenceContext += `  Content: ${source.content.slice(0, source.extracted ? 1400 : 600)}\n`;
+          evidenceContext += `  Search queries associated with this source: ${JSON.stringify([...source.sourceQueries])}\n`;
+        }
+        evidenceContext += '</untrusted_web_evidence>\n';
+      }
+
       for (const trace of specialistTraces) {
         evidenceContext += `\n### Specialist: ${trace.roleName} (${trace.specialist})\n`;
         evidenceContext += `Status: ${trace.status}\n`;
@@ -1628,18 +1642,6 @@ class SpecialistSwarmService {
         }
       }
 
-      if (reportSources.length > 0) {
-        evidenceContext += '\n<untrusted_web_evidence source="live_tavily_research">\n';
-        for (const source of reportSources) {
-          const sourceId = sourceIds.get(source.url);
-          if (!sourceId) continue;
-          evidenceContext += `- [${sourceId}] Title: ${source.title}\n  URL: ${source.url}\n  Evidence type: ${source.extracted ? 'extracted page content' : 'search-provider excerpt'}\n`;
-          if (source.publishedDate) evidenceContext += `  Provider-reported publication date: ${source.publishedDate}\n`;
-          evidenceContext += `  Content: ${source.content.slice(0, source.extracted ? 1400 : 600)}\n`;
-          evidenceContext += `  Search queries associated with this source: ${JSON.stringify([...source.sourceQueries])}\n`;
-        }
-        evidenceContext += '</untrusted_web_evidence>\n';
-      }
       // Enforce 4,000-token context ceiling on prompt payload
       const boundedEvidence = this.enforceContextCeiling(evidenceContext, 4000);
       // Only permit citations whose full source record survived context-budget enforcement.
