@@ -25,6 +25,7 @@ These settings control bounded execution, not research facts. Existing live cred
 | `TWINMIND_SWARM_TOOL_BUDGET` | `12` | Integer from `6` to `40` tool calls, including retries |
 | `TWINMIND_SWARM_DEADLINE_MS` | `75000` | Integer from `10000` to `300000` milliseconds |
 | `TWINMIND_AGENT_MAX_TOOL_ROUNDS` | `4` | Integer from `1` to `8` model/tool rounds |
+| `TWINMIND_AGENT_MAX_TOOL_CALLS` | `8` | Integer from `1` to `40` total tool executions per normal chat turn |
 
 If a variable is not set, its documented execution-limit default applies. These are safety and resource limits, not static or substituted research outputs. Start with the defaults; increase the limits only after measuring actual provider latency, rate limits, source coverage, and cost.
 
