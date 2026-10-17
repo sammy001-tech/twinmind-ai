@@ -51,7 +51,7 @@ export const LiveResearchActivityFeed: React.FC<LiveResearchActivityFeedProps> =
         <div className="space-y-3 p-3">
           {activities.map((activity) => {
             const result = asRecord(activity.result);
-            const sourcesValue = activity.toolName === 'searchWeb' ? result?.sources : result?.sources;
+            const sourcesValue = result?.sources;
             const sources = Array.isArray(sourcesValue)
               ? sourcesValue.filter((source) => source && typeof source === 'object' && !Array.isArray(source)) as Record<string, unknown>[]
               : [];
@@ -114,9 +114,9 @@ export const LiveResearchActivityFeed: React.FC<LiveResearchActivityFeedProps> =
                               <span>{sourceTitle}</span>
                               <ExternalLink className="h-3 w-3 shrink-0" />
                             </a>
-                          ) : (
-                            <span className="text-[11px]">{sourceTitle || 'Source title unavailable'}</span>
-                          )}
+                          ) : sourceTitle ? (
+                            <span className="text-[11px]">{sourceTitle}</span>
+                          ) : null}
                           {summary && <p className="mt-0.5 whitespace-pre-wrap break-words text-[10px] text-slate-500 dark:text-slate-400">{summary}</p>}
                         </div>
                       );
