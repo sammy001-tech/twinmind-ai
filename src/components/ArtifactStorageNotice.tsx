@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
 
 type StorageMode = 'database' | 'unavailable';
 
@@ -37,6 +37,7 @@ function parseStorageStatus(value: unknown): ArtifactStorageStatus | null {
 
 export const ArtifactStorageNotice: React.FC = () => {
   const [state, setState] = useState<RequestState>({ status: 'loading' });
+  const [isDismissed, setIsDismissed] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -76,7 +77,7 @@ export const ArtifactStorageNotice: React.FC = () => {
     return () => controller.abort();
   }, []);
 
-  if (state.status === 'loading') return null;
+  if (state.status === 'loading' || isDismissed) return null;
 
   const mode = state.status === 'ready' ? state.storage.mode : 'unavailable';
   const isDatabaseBacked = mode === 'database';
@@ -98,7 +99,7 @@ export const ArtifactStorageNotice: React.FC = () => {
       {state.status === 'ready' && state.storage.mode === 'database'
         ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
         : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />}
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <p className="font-semibold">
           {state.status === 'unavailable' || isUnavailable
             ? 'Database-backed artifact storage unavailable'
@@ -108,6 +109,15 @@ export const ArtifactStorageNotice: React.FC = () => {
         </p>
         <p className="mt-0.5 break-words">{statusMessage}</p>
       </div>
+      <button
+        type="button"
+        onClick={() => setIsDismissed(true)}
+        aria-label="Dismiss artifact storage status"
+        title="Dismiss"
+        className="ml-1 shrink-0 rounded-md p-1 text-slate-500 hover:bg-slate-200 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
+      </button>
     </div>
   );
 };
