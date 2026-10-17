@@ -22,18 +22,8 @@ export interface AdaptiveResearchPlan {
 
 function isNonPublicHostname(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.endsWith('.local') ||
-    host.endsWith('.internal') ||
-    host.endsWith('.home.arpa') ||
-    !host.includes('.')
-  ) {
-    return true;
-  }
-
   const ipVersion = isIP(host);
+
   if (ipVersion === 4) {
     const octets = host.split('.').map(Number);
     const [a, b, d] = octets;
@@ -63,7 +53,15 @@ function isNonPublicHostname(hostname: string): boolean {
       host.startsWith('::ffff:')
     );
   }
-  return false;
+
+  return (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.home.arpa') ||
+    !host.includes('.')
+  );
 }
 
 function canonicalHttpUrl(value: unknown): string | null {
