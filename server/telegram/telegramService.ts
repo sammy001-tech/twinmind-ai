@@ -971,7 +971,6 @@ class TelegramBotManager {
             undefined,
             `telegram:${this.config.ownerId}:${updateId}`,
           );
-          this.conversationHistory.push({ role: 'user', content: inboundText });
           if (this.conversationHistory.length > 20) this.conversationHistory = this.conversationHistory.slice(-20);
         }
       }
@@ -1026,6 +1025,17 @@ class TelegramBotManager {
           // Trigger twin agent turn dynamically with payload
           await ctx.reply(`👉 *Executing:* ${actionItem.payload}`, { parse_mode: 'Markdown' });
           await ctx.replyWithChatAction('typing');
+
+          const callbackUpdateId = ctx.update?.update_id;
+          if (typeof callbackUpdateId === 'number' && Number.isSafeInteger(callbackUpdateId)) {
+            await this.recordSyncedMessage(
+              'user',
+              actionItem.payload,
+              false,
+              undefined,
+              `telegram:${this.config.ownerId}:${callbackUpdateId}`,
+            );
+          }
 
           const turnResult = await twinAgentService.executeTurn({
             userPrompt: actionItem.payload,
@@ -1111,6 +1121,7 @@ class TelegramBotManager {
         });
 
         const responseText = turnResult.reply;
+        this.conversationHistory.push({ role: 'user', content: text });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         if (this.conversationHistory.length > 20) {
           this.conversationHistory = this.conversationHistory.slice(-20);
@@ -1192,6 +1203,7 @@ class TelegramBotManager {
         });
 
         const responseText = turnResult.reply;
+        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Photo]: ${caption}` : '[Uploaded Photo]' });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         await this.replyLongText(ctx, responseText);
         await this.recordSyncedMessage('assistant', responseText, false, 'accepted');
@@ -1259,6 +1271,7 @@ class TelegramBotManager {
         }
 
         const responseText = turnResult.reply;
+        this.conversationHistory.push({ role: 'user', content: caption ? `[Uploaded Document ${doc.file_name || 'file'}]: ${caption}` : `[Uploaded Document ${doc.file_name || 'file'}]` });
         this.conversationHistory.push({ role: 'assistant', content: responseText });
         await this.replyLongText(ctx, responseText);
         await this.recordSyncedMessage('assistant', responseText, false, 'accepted');
@@ -1301,6 +1314,7 @@ class TelegramBotManager {
         });
 
         const reply = turnResult.reply;
+        this.conversationHistory.push({ role: 'user', content: '[Voice Note Audio Sent]' });
         this.conversationHistory.push({ role: 'assistant', content: reply });
         await this.replyLongText(ctx, reply);
         await this.recordSyncedMessage('assistant', reply, true, 'accepted');
