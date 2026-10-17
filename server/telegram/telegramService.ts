@@ -14,9 +14,10 @@ import { resolveProviderCredential } from '../services/providerCredentialService
 import {
   isTelegramMode,
   isValidTelegramWebhookUrl,
-  parseTelegramOwnerId,
   resolveTelegramMode,
+  resolveTelegramOwnerId,
   resolveTelegramToken,
+  resolveTelegramWebhookUrl,
   shouldAttemptTelegramStart,
   type TelegramMode,
 } from '../services/telegramConfigService.ts';
@@ -27,7 +28,7 @@ export interface TelegramConfig {
   ownerId: number | null;
   ownerUsername: string | null;
   pairingCode: string;
-  mode: 'polling' | 'webhook';
+  mode: TelegramMode;
   webhookUrl: string;
   activeProvider: string;
   activeModel: string;
@@ -71,11 +72,11 @@ function loadConfig(): TelegramConfig {
   const saved = settingsManager.getSettings();
   return {
     token: resolveTelegramToken(process.env.TELEGRAM_BOT_TOKEN, saved.telegramToken),
-    ownerId: parseTelegramOwnerId(process.env.TELEGRAM_OWNER_ID) ?? parseTelegramOwnerId(saved.telegramOwnerId),
+    ownerId: resolveTelegramOwnerId(process.env.TELEGRAM_OWNER_ID, saved.telegramOwnerId),
     ownerUsername: null,
     pairingCode: generatePairingCode(),
     mode: resolveTelegramMode(process.env.TELEGRAM_MODE, saved.telegramMode),
-    webhookUrl: resolveTelegramToken(process.env.TELEGRAM_WEBHOOK_URL, saved.telegramWebhookUrl),
+    webhookUrl: resolveTelegramWebhookUrl(process.env.TELEGRAM_WEBHOOK_URL, saved.telegramWebhookUrl),
     activeProvider: saved.activeProvider || '',
     activeModel: saved.activeModel || '',
   };
