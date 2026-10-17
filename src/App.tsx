@@ -956,7 +956,12 @@ export default function App() {
                         spec.summaryPreview = ev.summaryPreview;
                       }
                     } else if (ev.type === 'complete') {
-                      currentTrace.status = 'completed';
+                      const sessionStatus = ev.session?.status;
+                      currentTrace.status = sessionStatus === 'failed' || sessionStatus === 'completed_with_errors'
+                        ? 'error'
+                        : sessionStatus === 'cancelled' || sessionStatus === 'timed_out'
+                          ? 'aborted'
+                          : 'completed';
                       if (ev.session) {
                         currentTrace.totalDurationMs = ev.session.totalDurationMs;
                       }
