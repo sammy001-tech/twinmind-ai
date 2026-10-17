@@ -31,6 +31,14 @@ export interface GeneratedArtifact {
   validationStatus?: 'validated';
 }
 
+export interface LiveResearchActivity {
+  toolId: string;
+  toolName: 'searchWeb' | 'extractWebPages';
+  status: 'running' | 'completed' | 'error';
+  input?: Record<string, unknown>;
+  result?: unknown;
+}
+
 export interface ChatMessage {
   id: string;
   dbId?: number;
@@ -50,6 +58,7 @@ export interface ChatMessage {
   };
   reactions?: string[];
   swarmTrace?: SwarmSessionState;
+  researchActivity?: LiveResearchActivity[];
   artifacts?: GeneratedArtifact[];
 }
 
