@@ -1090,7 +1090,55 @@ Respond in valid JSON:
       if (name === 'searchWeb') {
         result = await this.executeSearchWeb(String(args.query || ''), customTavilyKey, options.signal);
       } else if (name === 'extractWebPages') {
-        result = await this.executeExtractWebPages(args.urls, customTavilyKey, options.signal);
+        const extractionLimit = resolveBoundedIntegerSetting(
+          process.env,
+          'TWINMIND_RESEARCH_EXTRACT_LIMIT',
+          5,
+          1,
+          10,
+        );
+        const rawRequestedUrls = Array.isArray(args.urls) ? args.urls : [];
+        const requestedUrls = normalizeResearchUrls(rawRequestedUrls, 100);
+        const userSuppliedUrls = normalizeResearchUrls(
+          (userPrompt.match(/https?:\/\/[^\s"'<>]+/gi) || []).map((url) => url.replace(/[),.;!?]+$/, '')),
+          100,
+        );
+        const observedSearchUrls = toolsExecuted.flatMap((executed) => {
+          if (executed.toolName !== 'searchWeb' || !executed.result || typeof executed.result !== 'object') return [];
+          const searchResult = executed.result as Record<string, unknown>;
+          if (searchResult.status !== 'success' || !Array.isArray(searchResult.sources)) return [];
+          return searchResult.sources.flatMap((source) => {
+            if (!source || typeof source !== 'object' || Array.isArray(source)) return [];
+            const url = (source as Record<string, unknown>).url;
+            return typeof url === 'string' ? [url] : [];
+          });
+        });
+        const allowedUrls = new Set(normalizeResearchUrls([...userSuppliedUrls, ...observedSearchUrls], 100));
+        const invalidEntries = rawRequestedUrls.some((url) =>
+          typeof url !== 'string' || normalizeResearchUrls([url], 1).length === 0
+        );
+        const unauthorizedUrls = requestedUrls.filter((url) => !allowedUrls.has(url));
+
+        if (invalidEntries || requestedUrls.length === 0 || requestedUrls.length > extractionLimit || unauthorizedUrls.length > 0) {
+          result = {
+            status: 'error',
+            code: invalidEntries
+              ? 'RESEARCH_SOURCE_URL_INVALID'
+              : requestedUrls.length > extractionLimit
+                ? 'RESEARCH_EXTRACTION_LIMIT_EXCEEDED'
+                : 'RESEARCH_SOURCE_URL_NOT_VERIFIED',
+            error: invalidEntries
+              ? 'Page extraction requires valid public HTTP(S) URLs.'
+              : requestedUrls.length > extractionLimit
+                ? `Page extraction requested ${requestedUrls.length} unique URLs, exceeding the configured limit of ${extractionLimit}.`
+                : unauthorizedUrls.length > 0
+                  ? 'Page extraction accepts only URLs present in the user request or returned by an earlier live search.'
+                  : 'Page extraction requires at least one valid URL.',
+            sources: [],
+          };
+        } else {
+          result = await this.executeExtractWebPages(requestedUrls, customTavilyKey, options.signal);
+        }
       } else if (name === 'runMultiAgentDebate') {
         result = await this.executeMultiAgentDebate(String(args.dilemma || ''), channel, provider, model);
       } else if (name === 'deconstructDecision') {
