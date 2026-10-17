@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type { AppSettings } from '../../src/types/index.ts';
 import { neonDb } from './neonService.ts';
+import { maskProviderCredential, normalizeProviderCredential, resolveCredentialSourceForDisplay } from '../services/providerCredentialService.ts';
 
 const SETTINGS_FILE_PATH = path.join(process.cwd(), 'twin-settings.json');
 
@@ -246,19 +247,9 @@ class SettingsManager {
       telegramOwnerId?: string;
     };
 
-    const normalizeCredential = (value?: string): string => {
-      if (typeof value !== 'string') return '';
-      const key = value.trim().replace(/^["']|["']$/g, '');
-      return !key || key.includes('...') || key === '********' ? '' : key;
-    };
-    const mask = (value?: string) => {
-      const key = normalizeCredential(value);
-      if (!key) return '';
-      if (key.length < 8) return '********';
-      return `${key.slice(0, 4)}...${key.slice(-4)}`;
-    };
-    const credentialSource = (environmentValue?: string, savedValue?: string) =>
-      normalizeCredential(environmentValue) ? 'environment' : normalizeCredential(savedValue) ? 'settings' : 'none';
+    const mask = maskProviderCredential;
+    const normalizeCredential = normalizeProviderCredential;
+    const credentialSource = resolveCredentialSourceForDisplay;
 
     // Explicit client DTO: unknown persisted properties and raw secrets are never spread into responses.
     return {
