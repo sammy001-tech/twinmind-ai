@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+dist
+coverage
+tests
+*.log
+npm-debug.log*
+.env
+.env.*
+!.env.example
+twin-settings.json
+*.settings.json
