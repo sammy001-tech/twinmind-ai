@@ -146,6 +146,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 }) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -199,10 +200,20 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     };
   }, [message.content, message.id, isStreaming]);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(message.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard access is unavailable.');
+      }
+      await navigator.clipboard.writeText(message.content);
+      setCopyError(false);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+      setCopyError(true);
+      setTimeout(() => setCopyError(false), 2500);
+    }
   };
 
   const handleSaveEdit = () => {
@@ -582,7 +593,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
             type="button"
             onClick={handleCopy}
             className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
-            aria-label={copied ? 'Copied' : 'Copy response'} title={copied ? 'Copied' : 'Copy response'}
+            aria-label={copied ? 'Copied' : copyError ? 'Copy failed' : 'Copy response'} title={copied ? 'Copied' : copyError ? 'Clipboard access failed' : 'Copy response'}
           >
             {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
           </button>
@@ -617,6 +628,18 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           >
             <Share2 className="w-4 h-4" />
           </button>
+
+          {onRetryMessage && (
+            <button
+              type="button"
+              onClick={() => onRetryMessage(message.id)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
+              aria-label="Regenerate response"
+              title="Regenerate response"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          )}
 
           {/* More Options Overflow Vertical Dots Icon */}
           <div className="relative">
