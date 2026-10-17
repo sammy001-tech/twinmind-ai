@@ -146,6 +146,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 }) => {
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(message.content);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -199,10 +200,20 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     };
   }, [message.content, message.id, isStreaming]);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(message.content);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard access is unavailable.');
+      }
+      await navigator.clipboard.writeText(message.content);
+      setCopyError(false);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+      setCopyError(true);
+      setTimeout(() => setCopyError(false), 2500);
+    }
   };
 
   const handleSaveEdit = () => {
@@ -314,40 +325,40 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     if (isUser) {
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-[#eeffde] text-slate-900 border border-[#b2e59e] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]'
-          : 'bg-[#2b5278] text-white border border-[#3b6794]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-sm max-w-[95%] sm:max-w-[85%]';
+          ? 'bg-[#eeffde] text-[#172b20] border border-[#b2e59e] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]'
+          : 'bg-[#223b53] text-slate-100 border border-[#385873] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]'
-          : 'bg-[#005c4b] text-[#e9edef] border border-[#007a64]/80 rounded-2xl rounded-tr-xs px-3.5 py-2 text-sm shadow-xs max-w-[95%] sm:max-w-[85%]';
+          ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]'
+          : 'bg-[#075e54] text-[#f0f2f5] border border-[#168c7b]/70 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]';
       }
       // Web chat: a restrained primary-accent tint distinguishes user content
       // while keeping the assistant's response on an uncluttered canvas.
       return !isDark
-        ? 'bg-amber-50/90 text-slate-900 border border-amber-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-sm md:text-[15px] leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]'
-        : 'bg-amber-400/10 text-slate-100 border border-amber-300/15 rounded-[24px] rounded-br-md px-4 py-3 text-sm md:text-[15px] leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]';
+        ? 'bg-amber-50/90 text-slate-900 border border-amber-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]'
+        : 'bg-amber-400/10 text-slate-100 border border-amber-300/15 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]';
     } else {
       // Assistant
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[98%] sm:max-w-[90%]'
-          : 'bg-[#182533] text-slate-100 border border-slate-700/60 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[98%] sm:max-w-[90%]';
+          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]'
+          : 'bg-[#17232f] text-slate-100 border border-slate-700/70 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-white text-[#111b21] border border-slate-200/80 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-xs max-w-[98%] sm:max-w-[90%]'
-          : 'bg-[#202c33] text-[#d1d7db] border border-slate-700/50 rounded-2xl rounded-tl-xs px-3.5 py-2.5 shadow-sm max-w-[98%] sm:max-w-[90%]';
+          ? 'bg-[#f7f9fa] text-[#202c33] border border-slate-200/80 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]'
+          : 'bg-[#1f2c34] text-[#e9edef] border border-slate-700/60 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
       // ChatGPT-inspired assistant canvas: readable typography without a heavy card.
-      return 'bg-transparent border-0 shadow-none px-0 py-0.5 text-slate-900 dark:text-slate-100 text-sm md:text-[15px] leading-7 w-full';
+      return 'bg-transparent border-0 shadow-none px-0 py-1 text-slate-900 dark:text-slate-100 text-[15px] sm:text-base leading-7 w-full';
     }
   };
 
   return (
     <div
       id={`message-${message.id}`}
-      className={`w-full flex flex-col relative break-words overflow-hidden ${isUser ? 'items-end' : 'items-start'} ${isLastInGroup ? 'mb-3' : 'mb-1'}`}
+      className={`group w-full flex flex-col relative break-words overflow-hidden ${isUser ? 'items-end' : 'items-start'} ${isLastInGroup ? 'mb-3' : 'mb-1'}`}
     >
       {/* Message Bubble Container */}
       <div
@@ -361,7 +372,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
       >
         {/* Telegram Header Badge */}
         {!isUser && channel === 'telegram' && isFirstInGroup && (
-          <div className="flex items-center gap-1.5 mb-1 pb-1 border-b border-white/10 text-xs font-semibold text-sky-400">
+          <div className={`mb-1 flex items-center gap-1.5 border-b border-slate-200/70 pb-1 text-xs font-semibold dark:border-white/10 ${isDark ? 'text-sky-400' : 'text-sky-700'}`}>
             <span>Your Digital Twin</span>
             <span className="text-[10px] font-normal px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
               TWINMIND
@@ -371,7 +382,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
         {/* WhatsApp Header Badge */}
         {!isUser && channel === 'whatsapp' && isFirstInGroup && (
-          <div className="flex items-center gap-1.5 mb-1 text-xs font-semibold text-[#00a884]">
+          <div className={`mb-1 flex items-center gap-1.5 text-xs font-semibold ${isDark ? 'text-[#00a884]' : 'text-[#007a64]'}`}>
             <span>Your Digital Twin</span>
           </div>
         )}
@@ -400,7 +411,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         {isEditing ? (
           editBox
         ) : (
-          <div className="space-y-1">
+          <div className={`space-y-1 ${channel === 'web' ? 'text-[15px] sm:text-base leading-7 tracking-[0.005em]' : 'text-[14px] sm:text-[15px] leading-6'}`}>
             {!message.content && !isUser ? (
               <div className="flex items-center gap-1.5 py-1 text-amber-500 dark:text-amber-400">
                 <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
@@ -450,17 +461,17 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
         {/* WhatsApp Checkmark Indicator */}
         {channel === 'whatsapp' && isUser && isLastInGroup && !isEditing && (
-          <div className="flex items-center justify-end gap-1 mt-1 text-[10.5px] text-[#8696a0]">
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-[#aebac1]' : 'text-[#52656f]'}`}>
             <span>{message.timestamp}</span>
-            <CheckCheck className="w-3.5 h-3.5 text-[#53bdeb] inline" />
+            <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-[#53bdeb]' : 'text-[#128c7e]'}`} />
           </div>
         )}
 
         {/* Telegram Checkmark Indicator */}
         {channel === 'telegram' && isUser && isLastInGroup && !isEditing && (
-          <div className="flex items-center justify-end gap-1 mt-1 text-[11px] text-sky-300/80">
+          <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-sky-300/80' : 'text-slate-500'}`}>
             <span>{message.timestamp}</span>
-            <CheckCheck className="w-3.5 h-3.5 text-sky-400 inline" />
+            <CheckCheck className={`inline h-3.5 w-3.5 ${isDark ? 'text-sky-400' : 'text-sky-700'}`} />
           </div>
         )}
 
@@ -576,13 +587,13 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
       {/* Assistant Action Toolbar - Unified Minimal Icons across all Channels */}
       {!isUser && !isEditing && message.content && (
-        <div className="flex items-center gap-3.5 mt-1.5 text-slate-500 dark:text-slate-400 relative pl-0.5">
+        <div className="mt-2 flex items-center gap-1 text-slate-500 dark:text-slate-400 relative pl-0.5 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
           {/* Copy Icon */}
           <button
             type="button"
             onClick={handleCopy}
-            className="hover:text-slate-900 dark:hover:text-slate-200 transition p-0.5 rounded"
-            title={copied ? 'Copied' : 'Copy'}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
+            aria-label={copied ? 'Copied' : copyError ? 'Copy failed' : 'Copy response'} title={copied ? 'Copied' : copyError ? 'Clipboard access failed' : 'Copy response'}
           >
             {copied ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
           </button>
@@ -592,8 +603,8 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
             type="button"
             onClick={() => onGenerateAudio(message.id, message.content)}
             disabled={message.isGeneratingAudio}
-            className="hover:text-slate-900 dark:hover:text-slate-200 transition p-0.5 rounded disabled:opacity-50"
-            title={message.audioUrl ? 'Voice attached' : 'Read Aloud'}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 disabled:opacity-50 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
+            aria-label={message.audioUrl ? 'Voice attached' : 'Read aloud'} title={message.audioUrl ? 'Voice attached' : 'Read aloud'}
           >
             {message.isGeneratingAudio ? (
               <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
@@ -612,19 +623,31 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
                 handleCopy();
               }
             }}
-            className="hover:text-slate-900 dark:hover:text-slate-200 transition p-0.5 rounded"
-            title="Share response"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
+            aria-label="Share response" title="Share response"
           >
             <Share2 className="w-4 h-4" />
           </button>
+
+          {onRetryMessage && (
+            <button
+              type="button"
+              onClick={() => onRetryMessage(message.id)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
+              aria-label="Regenerate response"
+              title="Regenerate response"
+            >
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          )}
 
           {/* More Options Overflow Vertical Dots Icon */}
           <div className="relative">
             <button
               type="button"
               onClick={() => setShowMoreMenu(!showMoreMenu)}
-              className="hover:text-slate-900 dark:hover:text-slate-200 transition p-0.5 rounded"
-              title="More options"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
+              aria-label="More response options" title="More options"
             >
               <MoreVertical className="w-4 h-4" />
             </button>
