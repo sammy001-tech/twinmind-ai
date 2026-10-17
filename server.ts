@@ -572,7 +572,6 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
       message: `Gemini credential verified; ${diagnostic.models.length} chat-capable models are available. Credential source: ${resolution.source}.`,
       credentialSource: resolution.source,
       liveModelCount: diagnostic.models.length,
-      latencyMs: undefined,
     });
     return;
   }
@@ -580,7 +579,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   if (provider === 'groq') {
     const sKey = settingsManager.getSettings().customGroqKey;
     const eKey = process.env.GROQ_API_KEY;
-    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
+    const resolution = resolveCredentialForVerification(userProvidedKey, eKey, sKey);
+    const effectiveKey = resolution.key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Groq API key to test (starting with gsk_).' });
@@ -598,7 +598,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
         const modelCount = Array.isArray(data.data) ? data.data.length : 0;
         res.json({
           success: true,
-          message: `Groq API key verified in ${latencyMs}ms! Connected to Groq LPUs (${modelCount} models available).`,
+          message: `Groq API key verified in ${latencyMs}ms! ${modelCount} models available. Credential source: ${resolution.source}.`,
+          credentialSource: resolution.source,
           latencyMs,
         });
       } else {
@@ -617,7 +618,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
   if (provider === 'mistral') {
     const sKey = settingsManager.getSettings().customMistralKey;
     const eKey = process.env.MISTRAL_API_KEY;
-    const effectiveKey = resolveCredentialForVerification(userProvidedKey, eKey, sKey).key;
+    const resolution = resolveCredentialForVerification(userProvidedKey, eKey, sKey);
+    const effectiveKey = resolution.key;
 
     if (!effectiveKey) {
       res.status(400).json({ success: false, error: 'Please enter a Mistral API key to test.' });
@@ -635,7 +637,8 @@ app.post('/api/keys/test', async (req: Request, res: Response): Promise<void> =>
         const modelCount = Array.isArray(data.data) ? data.data.length : 0;
         res.json({
           success: true,
-          message: `Mistral API key verified in ${latencyMs}ms! Connected to Mistral AI (${modelCount} models available).`,
+          message: `Mistral API key verified in ${latencyMs}ms! ${modelCount} models available. Credential source: ${resolution.source}.`,
+          credentialSource: resolution.source,
           latencyMs,
         });
       } else {
@@ -2379,22 +2382,26 @@ Do not invent facts about the user or assume details absent from these records. 
 });
 
 // Tavily AI Key Status & Verification Endpoints (Strict Zero-Fallback Policy)
-app.get('/api/tavily/status', (req: Request, res: Response): void => {
-  const configured = !!(process.env.TAVILY_API_KEY || settingsManager.getSettings().customTavilyKey);
-  const source = process.env.TAVILY_API_KEY ? 'environment' : settingsManager.getSettings().customTavilyKey ? 'settings' : 'none';
+app.get('/api/tavily/status', (_req: Request, res: Response): void => {
+  const savedKey = settingsManager.getSettings().customTavilyKey;
+  const credential = resolveProviderCredential(process.env.TAVILY_API_KEY, savedKey);
+  const mask = (key: string): string => key.length < 8 ? '********' : `${key.slice(0, 4)}...${key.slice(-4)}`;
   res.json({
-    configured,
-    source,
-    maskedKey: configured ? 'tvly-••••••••••••' : null,
+    configured: Boolean(credential.key),
+    source: credential.source,
+    maskedKey: credential.key ? mask(credential.key) : null,
   });
 });
 
 app.post('/api/tavily/test', async (req: Request, res: Response): Promise<void> => {
-  const apiKey = resolveProviderCredential(process.env.TAVILY_API_KEY, settingsManager.getSettings().customTavilyKey, req.body.apiKey).key;
-  if (!apiKey) {
+  const savedKey = settingsManager.getSettings().customTavilyKey;
+  const resolution = resolveCredentialForVerification(req.body?.apiKey, process.env.TAVILY_API_KEY, savedKey);
+  if (!resolution.key) {
     res.status(400).json({
       success: false,
-      error: 'Tavily API Key is not configured. Please enter your Tavily key (starting with tvly-) in Settings or set TAVILY_API_KEY.',
+      code: 'PROVIDER_CREDENTIALS_MISSING',
+      error: 'Tavily API key is not configured. Enter a key or configure TAVILY_API_KEY in Render.',
+      credentialSource: 'none',
     });
     return;
   }
@@ -2405,30 +2412,36 @@ app.post('/api/tavily/test', async (req: Request, res: Response): Promise<void> 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        api_key: apiKey,
+        api_key: resolution.key,
         query: 'ping test',
         max_results: 1,
       }),
     });
     const latencyMs = Date.now() - startTime;
     if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      res.status(400).json({
+      res.status(502).json({
         success: false,
-        error: `Tavily API error (${response.status}): ${errText || 'Invalid API key or quota exceeded'}`,
+        code: 'TAVILY_PROVIDER_REJECTED',
+        error: `Tavily API rejected the request (HTTP ${response.status}). Check the credential, API access, and quota.`,
+        credentialSource: resolution.source,
+        providerHttpStatus: response.status,
       });
       return;
     }
-    const data = await response.json();
+    await response.json();
     res.json({
       success: true,
-      message: `Tavily API connection verified in ${latencyMs}ms. Real-time search is active.`,
+      code: 'TAVILY_CREDENTIAL_VERIFIED',
+      message: `Tavily credential verified in ${latencyMs}ms. Credential source: ${resolution.source}.`,
+      credentialSource: resolution.source,
       latencyMs,
     });
-  } catch (err: unknown) {
-    res.status(500).json({
+  } catch {
+    res.status(502).json({
       success: false,
-      error: err instanceof Error ? err.message : 'Failed to reach Tavily API endpoint.',
+      code: 'TAVILY_NETWORK_REQUEST_FAILED',
+      error: 'The server could not complete a request to the Tavily API.',
+      credentialSource: resolution.source,
     });
   }
 });
