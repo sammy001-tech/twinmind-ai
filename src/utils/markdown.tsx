@@ -85,7 +85,7 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
           className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
         >
           {copyState === 'copied' ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-          <span>{copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy code'}</span>
+          <span aria-live="polite">{copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy code'}</span>
         </button>
       </div>
       <pre className="max-h-[32rem] overflow-auto overscroll-x-contain p-3.5 text-[13px] leading-6 text-slate-800 sm:p-4 dark:text-slate-100">
