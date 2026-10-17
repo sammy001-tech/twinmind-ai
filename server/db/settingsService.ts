@@ -182,25 +182,31 @@ class SettingsManager {
       activeModel,
       providerModels: updatedProviderModels,
     };
-    const credentialFields = [
+    const durableFields = [
       'customGeminiKey',
       'customGroqKey',
       'customMistralKey',
       'customTavilyKey',
+      'twilioAccountSid',
       'twilioAuthToken',
+      'twilioWhatsAppNumber',
+      'userPhoneNumber',
       'telegramToken',
+      'telegramMode',
+      'telegramWebhookUrl',
+      'telegramOwnerId',
     ] as const;
-    const isCredentialUpdate = credentialFields.some((field) =>
+    const requiresDurableWrite = durableFields.some((field) =>
       Object.prototype.hasOwnProperty.call(filteredPatch, field)
     );
 
-    // Credentials are intentionally excluded from the local settings file. Do not acknowledge a
-    // credential update unless Neon confirms the durable write, and do not commit it to memory first.
-    if (isCredentialUpdate) {
+    // Credentials and integration configuration must survive restarts. Never acknowledge a
+    // durable setting unless Neon confirms the write; do not commit it to memory first.
+    if (requiresDurableWrite) {
       const persisted = await neonDb.saveSettings(nextSettings as unknown as Record<string, unknown>);
       if (!persisted) {
         throw new Error(
-          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Provider API keys require a healthy Neon PostgreSQL connection; no credential change was applied.',
+          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
         );
       }
       this.currentSettings = nextSettings;
