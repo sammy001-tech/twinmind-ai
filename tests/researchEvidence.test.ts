@@ -7,7 +7,7 @@ import {
   normalizeResearchUrls,
   parseAdaptiveResearchPlan,
   resolveBoundedIntegerSetting,
-} from '../server/services/researchEvidence.ts';
+} from '../server/utils/researchEvidence.ts';
 
 // These are pure normalization/validation tests. They do not simulate an external search
 // provider, a provider success response, or a successful live research session.
