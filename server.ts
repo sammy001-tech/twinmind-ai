@@ -1761,9 +1761,20 @@ app.post('/api/telegram/config', async (req: Request, res: Response) => {
 });
 
 // Reset owner pairing and generate new code
-app.post('/api/telegram/reset-pairing', (req: Request, res: Response) => {
-  const newCode = telegramBotManager.resetPairing();
-  res.json({ success: true, pairingCode: newCode, status: telegramBotManager.getStatus() });
+app.post('/api/telegram/reset-pairing', async (_req: Request, res: Response) => {
+  try {
+    const newCode = await telegramBotManager.resetPairing();
+    res.json({ success: true, pairingCode: newCode, status: telegramBotManager.getStatus() });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Telegram pairing could not be saved.';
+    res.status(503).json({
+      success: false,
+      code: 'CREDENTIAL_PERSISTENCE_UNAVAILABLE',
+      error: message.startsWith('CREDENTIAL_PERSISTENCE_UNAVAILABLE')
+        ? 'Telegram pairing changes require a healthy Neon database connection.'
+        : 'Telegram pairing changes could not be saved.',
+    });
+  }
 });
 
 // Test bot token with Telegram getMe API
