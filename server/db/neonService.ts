@@ -1040,8 +1040,12 @@ class NeonDatabaseService {
          VALUES ($1, 'whatsapp', $2, $3, CURRENT_TIMESTAMP)
          ON CONFLICT (provider_sid) DO UPDATE SET
            status = CASE
-             WHEN channel_delivery_receipts.status IN ('delivered', 'read', 'failed', 'undelivered')
+             WHEN channel_delivery_receipts.status = 'read' THEN 'read'
+             WHEN channel_delivery_receipts.status IN ('failed', 'undelivered', 'canceled')
                THEN channel_delivery_receipts.status
+             WHEN EXCLUDED.status = 'read' THEN 'read'
+             WHEN EXCLUDED.status = 'delivered' THEN 'delivered'
+             WHEN channel_delivery_receipts.status = 'delivered' THEN 'delivered'
              ELSE EXCLUDED.status
            END,
            error_code = COALESCE(EXCLUDED.error_code, channel_delivery_receipts.error_code),
