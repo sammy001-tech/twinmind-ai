@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { evaluateSameOriginRequest, resolveProviderCredential, resolveCredentialForVerification } from '../server/services/providerCredentialService.ts';
+import { evaluateSameOriginRequest, maskProviderCredential, normalizeProviderCredential, resolveCredentialForVerification, resolveCredentialSourceForDisplay, resolveProviderCredential } from '../server/services/providerCredentialService.ts';
 
 test('environment credential takes precedence over saved Settings and request values at runtime', () => {
   assert.deepEqual(resolveProviderCredential('env-key', 'saved-key', 'request-key'), { key: 'env-key', source: 'environment' });
@@ -36,4 +36,22 @@ test('origin guard rejects missing and malformed origin data', () => {
 test('origin guard uses trusted request protocol and host when no canonical origin is set', () => {
   assert.deepEqual(evaluateSameOriginRequest({ origin:'https://app.example', host:'app.example', protocol:'https' }), { allowed:true });
   assert.deepEqual(evaluateSameOriginRequest({ origin:'https://app.example', host:'app.example', protocol:'http' }), { allowed:false, code:'INVALID_ORIGIN' });
+});
+
+test('saved-credential display masks only the saved value while source resolution honors environment precedence', () => {
+  const environmentKey = 'environment-secret-value';
+  const savedKey = 'settings-secret-value';
+
+  assert.equal(maskProviderCredential(savedKey), 'sett...alue');
+  assert.equal(maskProviderCredential(environmentKey).includes(environmentKey), false);
+  assert.equal(resolveCredentialSourceForDisplay(environmentKey, savedKey), 'environment');
+  assert.equal(resolveCredentialSourceForDisplay('', savedKey), 'settings');
+  assert.equal(resolveCredentialSourceForDisplay('', ''), 'none');
+  assert.equal(maskProviderCredential(''), '');
+});
+
+test('credential masking treats blank and already masked values as unavailable', () => {
+  assert.equal(normalizeProviderCredential(' "env-key" '), 'env-key');
+  assert.equal(maskProviderCredential('********'), '');
+  assert.equal(maskProviderCredential('part...last'), '');
 });
