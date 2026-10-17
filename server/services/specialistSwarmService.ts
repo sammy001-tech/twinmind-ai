@@ -31,7 +31,7 @@ import { artifactAccessService } from './artifactAccessService.ts';
 import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
 import path from 'path';
 import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
-import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from './researchEvidence.ts';
+import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from '../utils/researchEvidence.ts';
 
 export interface SwarmToolTrace {
   toolName: string;
