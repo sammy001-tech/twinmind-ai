@@ -187,6 +187,54 @@ export function normalizeResearchExtractions(
   return normalizeSourceArray(results, maxContentChars, allowedSources);
 }
 
+export interface InitialResearchPlan {
+  researchQuestions: string[];
+  searchQueries: string[];
+}
+
+/** Validate the initial decomposition produced by the configured live model. */
+export function parseInitialResearchPlan(
+  raw: string,
+  options: { maxQueries: number; excludeQueries?: string[] },
+): InitialResearchPlan {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('RESEARCH_INITIAL_PLAN_INVALID_JSON: the selected model did not return valid JSON');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('RESEARCH_INITIAL_PLAN_SCHEMA_INVALID: expected a JSON object');
+  }
+
+  const candidate = parsed as Record<string, unknown>;
+  if (
+    !Array.isArray(candidate.searchQueries) ||
+    !candidate.searchQueries.every((value) => typeof value === 'string') ||
+    !Array.isArray(candidate.researchQuestions) ||
+    !candidate.researchQuestions.every((value) => typeof value === 'string')
+  ) {
+    throw new Error('RESEARCH_INITIAL_PLAN_SCHEMA_INVALID: searchQueries and researchQuestions must be string arrays');
+  }
+
+  const excluded = new Set((options.excludeQueries || []).map((query) => query.trim().toLocaleLowerCase()).filter(Boolean));
+  const seen = new Set<string>();
+  const searchQueries: string[] = [];
+  for (const value of candidate.searchQueries) {
+    const query = value.trim();
+    const key = query.toLocaleLowerCase();
+    if (!query || excluded.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    searchQueries.push(query);
+    if (searchQueries.length >= options.maxQueries) break;
+  }
+
+  const researchQuestions = [...new Set(candidate.researchQuestions.map((value) => value.trim()).filter(Boolean))];
+  if (options.maxQueries <= 0) searchQueries.length = 0;
+  return { researchQuestions, searchQueries };
+}
+
 /** Select only search modes supported by the live retrieval provider. */
 export function resolveResearchSearchDepth(env: Record<string, string | undefined>): 'basic' | 'advanced' {
   const configured = env.TWINMIND_RESEARCH_SEARCH_DEPTH;
