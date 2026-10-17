@@ -1065,7 +1065,6 @@ class TelegramBotManager {
           }
 
           await this.replyLongText(ctx, turnResult.reply, { reply_markup: dynamicKeyboard });
-          await this.recordSyncedMessage('assistant', turnResult.reply, false, 'accepted');
         }
       } else if (data.startsWith('save_decision_')) {
         await ctx.reply('💾 Decision record confirmed in Neon database.');
@@ -1154,7 +1153,6 @@ class TelegramBotManager {
         }
 
         await this.replyLongText(ctx, responseText, { reply_markup: keyboard });
-        await this.recordSyncedMessage('assistant', responseText, false, 'accepted');
 
         // Deliver generated files (PDFs, Excel .xlsx, CSV, Markdown) directly to Telegram chat
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
@@ -1317,7 +1315,6 @@ class TelegramBotManager {
         this.conversationHistory.push({ role: 'user', content: '[Voice Note Audio Sent]' });
         this.conversationHistory.push({ role: 'assistant', content: reply });
         await this.replyLongText(ctx, reply);
-        await this.recordSyncedMessage('assistant', reply, true, 'accepted');
 
         await this.sendGeneratedArtifactsToTelegram(ctx, turnResult.toolsExecuted);
 
@@ -1420,20 +1417,58 @@ class TelegramBotManager {
   private async replyLongText(ctx: any, text: string, options: Record<string, unknown> = {}): Promise<void> {
     const chunks = splitChannelMessage(text, 'telegram');
     if (chunks.length === 0) throw new Error('TELEGRAM_OUTPUT_EMPTY: no usable reply text was generated');
+    if (this.config.ownerId === null) throw new Error('TELEGRAM_OWNER_ID_REQUIRED: cannot persist an unpaired Telegram reply');
 
-    // Never pass model-controlled Markdown through Telegram parse_mode; URLs and
-    // formatting have already been made plain-text readable by the channel policy.
+    // Persist before the provider side effect so failed/partial Telegram sends
+    // have a durable record. Bot API acceptance is not evidence that the user read it.
+    const pending = await persistChannelMessage({
+      channel: 'telegram',
+      externalIdentity: this.config.ownerId,
+      role: 'assistant',
+      content: text,
+      ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
+      ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
+      deliveryStatus: 'pending',
+      metadata: { isVoice: false, source: 'telegram' },
+    });
+
     const safeOptions: Record<string, unknown> = { ...options };
     delete safeOptions.parse_mode;
     const replyMarkup = safeOptions.reply_markup;
     delete safeOptions.reply_markup;
 
-    for (let index = 0; index < chunks.length; index++) {
-      const isLastChunk = index === chunks.length - 1;
-      await ctx.reply(chunks[index], {
-        ...(isLastChunk ? safeOptions : {}),
-        ...(isLastChunk && replyMarkup ? { reply_markup: replyMarkup } : {}),
+    try {
+      for (let index = 0; index < chunks.length; index++) {
+        const isLastChunk = index === chunks.length - 1;
+        await ctx.reply(chunks[index], {
+          ...(isLastChunk ? safeOptions : {}),
+          ...(isLastChunk && replyMarkup ? { reply_markup: replyMarkup } : {}),
+        });
+      }
+
+      const statusPersisted = await neonDb.updateMessageMetadata(pending.messageId, {
+        deliveryStatus: 'accepted',
+        providerStatus: 'accepted',
       });
+      if (!statusPersisted) {
+        this.log('error', 'Telegram accepted a reply but its final provider status could not be durably saved.');
+      }
+
+      this.syncedMessages.unshift({
+        id: `tg-${randomUUID()}`,
+        sender: 'assistant',
+        text,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+      if (this.syncedMessages.length > 50) this.syncedMessages.pop();
+    } catch (error: unknown) {
+      const rawCode = error instanceof Error ? error.message : 'TELEGRAM_DELIVERY_FAILED';
+      const errorCode = rawCode.slice(0, 120).replace(/[^a-zA-Z0-9_-]/g, '_') || 'TELEGRAM_DELIVERY_FAILED';
+      await neonDb.updateMessageMetadata(pending.messageId, {
+        deliveryStatus: 'error',
+        deliveryErrorCode: errorCode,
+      });
+      throw error;
     }
   }
 
