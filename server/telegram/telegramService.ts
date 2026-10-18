@@ -24,6 +24,7 @@ import {
   type TelegramMode,
 } from '../services/telegramConfigService.ts';
 import type { AppSettings } from '../../src/types/index.ts';
+import { pcmToWav } from '../services/audioGenerationService.ts';
 
 export interface TelegramConfig {
   token: string;
@@ -1540,13 +1541,20 @@ class TelegramBotManager {
         },
       });
 
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      const inlinePart = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      const base64Audio = inlinePart?.data;
       if (!base64Audio) {
         console.warn('[TelegramBot] Voice synthesis provider returned no audio data.');
         return null;
       }
 
-      return Buffer.from(base64Audio, 'base64');
+      let sampleRate = 24000;
+      if (inlinePart?.mimeType) {
+        const match = inlinePart.mimeType.match(/rate=(\d+)/);
+        if (match) sampleRate = parseInt(match[1], 10);
+      }
+      const rawPcm = Buffer.from(base64Audio, 'base64');
+      return pcmToWav(rawPcm, sampleRate, 1, { cleanup: true });
     } catch (err) {
       console.warn('[TelegramBot] Voice synthesis unavailable:', err instanceof Error ? err.message : 'provider request failed');
       return null;

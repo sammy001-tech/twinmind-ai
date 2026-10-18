@@ -26,6 +26,7 @@ import { artifactAccessService } from './server/services/artifactAccessService.t
 import { getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
 import { evaluateSameOriginRequest, resolveProviderCredential, resolveCredentialForVerification } from './server/services/providerCredentialService.ts';
+import { pcmToWav } from './server/services/audioGenerationService.ts';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1649,27 +1650,7 @@ Return JSON with "agreementLevel" (one of "High Agreement", "Partial Disagreemen
   }
 });
 
-// Convert raw PCM audio returned by speech synthesis models into standard browser-playable WAV
-function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1): Buffer {
-  const header = Buffer.alloc(44);
-  const dataLength = pcmBuffer.length;
-  header.write('RIFF', 0);
-  header.writeUInt32LE(36 + dataLength, 4);
-  header.write('WAVE', 8);
-  header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
-  header.writeUInt16LE(1, 20);  // AudioFormat (1 for PCM)
-  header.writeUInt16LE(numChannels, 22); // NumChannels
-  header.writeUInt32LE(sampleRate, 24);  // SampleRate
-  header.writeUInt32LE(sampleRate * numChannels * 2, 28); // ByteRate
-  header.writeUInt16LE(numChannels * 2, 32); // BlockAlign
-  header.writeUInt16LE(16, 34); // BitsPerSample
-  header.write('data', 36);
-  header.writeUInt32LE(dataLength, 40);
-  return Buffer.concat([header, pcmBuffer]);
-}
-
-// Text-to-Speech (Voice Note generation) using dynamic model resolution
+// Text-to-Speech (Voice Note generation) using dynamic model resolution and audio artifact cleanup
 app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
   try {
     const { text, voice: requestedVoice } = req.body;
@@ -1735,7 +1716,7 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
       if (match) sampleRate = parseInt(match[1], 10);
     }
     const pcmBuffer = Buffer.from(base64Audio, 'base64');
-    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, 1);
+    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, 1, { cleanup: true });
 
     res.json({ success: true, audioDataUrl: `data:audio/wav;base64,${wavBuffer.toString('base64')}` });
   } catch (err: unknown) {
