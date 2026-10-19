@@ -303,11 +303,13 @@ async function callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, initialDel
     } catch (err: unknown) {
       attempt++;
       const errStr = String(err);
+      const isHardQuota = errStr.includes('RESOURCE_EXHAUSTED') || errStr.includes('Quota exceeded');
       const isTransient =
-        errStr.includes('503') ||
+        !isHardQuota &&
+        (errStr.includes('503') ||
         errStr.includes('429') ||
         errStr.includes('UNAVAILABLE') ||
-        errStr.includes('high demand');
+        errStr.includes('high demand'));
       if (attempt < maxRetries && isTransient) {
         console.warn(`Gemini call encountered transient issue (attempt ${attempt}/${maxRetries}), retrying in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
@@ -1688,8 +1690,10 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
     }
 
     const dynamicOutputTokens = Math.ceil(cleanText.length * 2.5);
+    const requestedTtsModel = (typeof req.body?.ttsModel === 'string' ? req.body.ttsModel.trim() : '') || settings.ttsModel;
+
     const response = await callWithRetry(async () => {
-      const model = await modelCatalogService.resolveSpecializedModel('tts', geminiKey);
+      const model = await modelCatalogService.resolveSpecializedModel('tts', geminiKey, requestedTtsModel);
       return getAiClient(req).models.generateContent({
         model,
         contents: [{ role: 'user', parts: [{ text: cleanText }] }],
@@ -1722,16 +1726,26 @@ app.post('/api/tts', async (req: Request, res: Response): Promise<void> => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Speech synthesis failed.';
     console.error('[TTS] Request failed:', message);
-    res.status(502).json({ success: false, code: message.split(':')[0] || 'TTS_FAILED', error: message });
+    const isRateLimit = message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.toLowerCase().includes('quota');
+    const statusCode = isRateLimit ? 429 : 502;
+    const cleanError = isRateLimit
+      ? 'Rate limit reached on this speech model (requests per minute quota). Please wait a few seconds or switch to Gemini 3.8 Flash TTS.'
+      : message;
+    res.status(statusCode).json({
+      success: false,
+      code: isRateLimit ? 'TTS_RATE_LIMITED' : (message.split(':')[0] || 'TTS_FAILED'),
+      error: cleanError,
+    });
   }
 });
 
-// Query dynamic TTS voices supported by the active AI provider
+// Query dynamic TTS voices and live TTS models supported by the active AI provider
 app.get('/api/tts/voices', async (req: Request, res: Response): Promise<void> => {
   try {
     const settings = settingsManager.getSettings();
     const requestedProvider = typeof req.query.provider === 'string' ? req.query.provider.trim() : '';
     const provider = requestedProvider || settings.activeProvider || 'gemini';
+    const requestedTtsModel = typeof req.query.ttsModel === 'string' ? req.query.ttsModel.trim() : settings.ttsModel;
 
     const geminiKey = resolveProviderCredential(
       process.env.GEMINI_API_KEY,
@@ -1740,11 +1754,13 @@ app.get('/api/tts/voices', async (req: Request, res: Response): Promise<void> =>
     ).key;
 
     let ttsModel = '';
+    let ttsModels: Array<{ id: string; displayName: string; description?: string }> = [];
     let supportsTts = false;
     if (geminiKey) {
       try {
-        ttsModel = await modelCatalogService.resolveSpecializedModel('tts', geminiKey);
-        supportsTts = Boolean(ttsModel);
+        ttsModels = await modelCatalogService.listSpecializedModels('tts', geminiKey);
+        supportsTts = ttsModels.length > 0;
+        ttsModel = await modelCatalogService.resolveSpecializedModel('tts', geminiKey, requestedTtsModel);
       } catch (mErr) {
         console.warn('[TTS Voices] Could not resolve specialized TTS model:', mErr);
       }
@@ -1765,6 +1781,7 @@ app.get('/api/tts/voices', async (req: Request, res: Response): Promise<void> =>
         providerName: 'Google Gemini',
         supportsTts,
         ttsModel: ttsModel || null,
+        ttsModels,
         activeVoice: settings.voice || 'Puck',
         voices: geminiVoices,
       });
@@ -1777,6 +1794,7 @@ app.get('/api/tts/voices', async (req: Request, res: Response): Promise<void> =>
       providerName: provider === 'groq' ? 'Groq LPUs' : 'Mistral AI',
       supportsTts,
       ttsModel: ttsModel || null,
+      ttsModels,
       activeVoice: settings.voice || 'Puck',
       fallbackNotice: `${provider === 'groq' ? 'Groq' : 'Mistral'} focuses on text models. Voice notes will use the Gemini TTS engine.`,
       voices: geminiVoices,

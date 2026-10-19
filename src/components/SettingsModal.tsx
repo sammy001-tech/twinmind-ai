@@ -44,6 +44,8 @@ interface SettingsModalProps {
   onSelectModelAndActivate?: (provider: 'gemini' | 'groq' | 'mistral', model: string) => void;
   voice: string;
   onVoiceChange: (voice: string) => void;
+  ttsModel?: string;
+  onTtsModelChange?: (model: string) => void;
   customGeminiKey: string;
   onSaveGeminiKey: (key: string) => void | Promise<void>;
   customGroqKey: string;
@@ -76,6 +78,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSelectModelAndActivate,
   voice,
   onVoiceChange,
+  ttsModel = '',
+  onTtsModelChange,
   customGeminiKey,
   onSaveGeminiKey,
   customGroqKey,
@@ -190,11 +194,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     providerName: string;
     supportsTts: boolean;
     ttsModel: string | null;
+    ttsModels: Array<{ id: string; displayName: string; description?: string }>;
     fallbackNotice?: string;
   }>({
     providerName: 'Google Gemini',
     supportsTts: false,
     ttsModel: null,
+    ttsModels: [],
   });
   const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
   const [testVoiceError, setTestVoiceError] = useState<string | null>(null);
@@ -205,7 +211,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setTestVoiceError(null);
     try {
       const p = targetProvider || activeProvider || 'gemini';
-      const res = await apiFetch(`/api/tts/voices?provider=${encodeURIComponent(p)}`);
+      const modelParam = ttsModel ? `&ttsModel=${encodeURIComponent(ttsModel)}` : '';
+      const res = await apiFetch(`/api/tts/voices?provider=${encodeURIComponent(p)}${modelParam}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.voices)) {
         setAvailableVoices(data.voices);
@@ -213,6 +220,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           providerName: data.providerName || p,
           supportsTts: Boolean(data.supportsTts),
           ttsModel: data.ttsModel || null,
+          ttsModels: Array.isArray(data.ttsModels) ? data.ttsModels : [],
           fallbackNotice: data.fallbackNotice,
         });
         if (!voice && data.voices.length > 0) {
@@ -244,11 +252,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         body: JSON.stringify({
           text: voiceItem.sampleText,
           voice: voiceItem.id,
+          ttsModel,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.success || !data.audioDataUrl) {
-        throw new Error(data.error || 'Failed to generate voice preview');
+      const contentType = res.headers.get('content-type') || '';
+      let data: { success?: boolean; audioDataUrl?: string; error?: string } | null = null;
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+        } catch {
+          data = null;
+        }
+      }
+
+      if (!res.ok || !data?.success || !data?.audioDataUrl) {
+        let errorMsg = data?.error;
+        if (!errorMsg) {
+          if (res.status === 429) {
+            errorMsg = 'Rate limit reached on this speech model (requests per minute quota). Please wait 30 seconds or switch to Gemini 3.8 Flash TTS.';
+          } else if (res.status === 504 || res.status === 502) {
+            errorMsg = 'Speech synthesis timed out or model was unreachable. Please try again or switch model.';
+          } else {
+            errorMsg = `Speech synthesis failed (${res.status}).`;
+          }
+        }
+        throw new Error(errorMsg);
       }
       const audio = new Audio(data.audioDataUrl);
       audio.playbackRate = voiceSpeed || 1;
@@ -2660,15 +2688,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
                 {voicesProviderInfo.providerName}
               </span>
-              {voicesProviderInfo.ttsModel && (
-                <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-[10px] font-mono text-slate-600 dark:text-slate-400">
-                  {voicesProviderInfo.ttsModel}
-                </span>
-              )}
             </div>
           </div>
 
+          {/* Dynamic TTS Model Selector */}
+          <div>
+            <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+              Active TTS Speech Model (Live Discovered)
+            </label>
+            <select
+              value={ttsModel || voicesProviderInfo.ttsModel || ''}
+              onChange={(e) => onTtsModelChange && onTtsModelChange(e.target.value)}
+              className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono"
+            >
+              {voicesProviderInfo.ttsModels && voicesProviderInfo.ttsModels.length > 0 ? (
+                voicesProviderInfo.ttsModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.displayName} ({m.id})
+                  </option>
+                ))
+              ) : (
+                <option value={voicesProviderInfo.ttsModel || ''}>
+                  {voicesProviderInfo.ttsModel || 'Default Live TTS Model'}
+                </option>
+              )}
+            </select>
+          </div>
+
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
+
             Select an official voice persona supported by the active AI speech model. Test any voice before selecting:
           </p>
 

@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     mistral: process.env.MISTRAL_MODEL || '',
   },
   voice: process.env.TTS_VOICE || '',
+  ttsModel: process.env.GEMINI_TTS_MODEL || '',
   userName: process.env.USER_NAME || '',
   nickname: process.env.USER_NICKNAME || '',
   customGeminiKey: '',
@@ -38,6 +39,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   enforceTwilioSignature: true,
   proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'none',
   themeMode: 'system',
+  soulTuning: { tone: 50, directness: 50, perspective: 50 },
+  webGroundingEnabled: false,
 };
 
 class SettingsManager {
@@ -177,6 +180,18 @@ class SettingsManager {
     if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
     if (isMasked(filteredPatch.telegramToken)) delete filteredPatch.telegramToken;
 
+    if (filteredPatch.soulTuning && typeof filteredPatch.soulTuning === 'object') {
+      const clamp = (val: unknown, fallback: number) => {
+        if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
+        return Math.max(0, Math.min(100, Math.round(val)));
+      };
+      filteredPatch.soulTuning = {
+        tone: clamp(filteredPatch.soulTuning.tone, this.currentSettings.soulTuning?.tone ?? 50),
+        directness: clamp(filteredPatch.soulTuning.directness, this.currentSettings.soulTuning?.directness ?? 50),
+        perspective: clamp(filteredPatch.soulTuning.perspective, this.currentSettings.soulTuning?.perspective ?? 50),
+      };
+    }
+
     const nextSettings: AppSettings = {
       ...this.currentSettings,
       ...filteredPatch,
@@ -196,6 +211,8 @@ class SettingsManager {
       'telegramMode',
       'telegramWebhookUrl',
       'telegramOwnerId',
+      'soulTuning',
+      'webGroundingEnabled',
     ] as const;
     const requiresDurableWrite = durableFields.some((field) =>
       Object.prototype.hasOwnProperty.call(filteredPatch, field)

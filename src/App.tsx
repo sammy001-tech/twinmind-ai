@@ -121,6 +121,7 @@ export default function App() {
   const activeModel = providerModels[activeProvider as keyof typeof providerModels] || '';
 
   const [voice, setVoice] = useState<string>('');
+  const [ttsModel, setTtsModel] = useState<string>('');
   const [customGeminiKey, setCustomGeminiKey] = useState<string>('');
   const [customGroqKey, setCustomGroqKey] = useState<string>('');
   const [customMistralKey, setCustomMistralKey] = useState<string>('');
@@ -227,6 +228,7 @@ export default function App() {
             if (s.activeProvider) setActiveProvider(s.activeProvider);
             if (s.providerModels) setProviderModels(s.providerModels);
             if (s.voice) setVoice(s.voice);
+            if (s.ttsModel) setTtsModel(s.ttsModel);
             if (s.customGeminiKey !== undefined) setCustomGeminiKey(s.customGeminiKey);
             if (s.customGroqKey !== undefined) setCustomGroqKey(s.customGroqKey);
             if (s.customMistralKey !== undefined) setCustomMistralKey(s.customMistralKey);
@@ -520,6 +522,11 @@ export default function App() {
   const handleVoiceChange = (newVoice: string) => {
     setVoice(newVoice);
     syncSettingsToServer({ voice: newVoice });
+  };
+
+  const handleTtsModelChange = (model: string) => {
+    setTtsModel(model);
+    syncSettingsToServer({ ttsModel: model });
   };
 
   const persistCredentialSetting = async (
@@ -1433,6 +1440,8 @@ export default function App() {
             onSelectModelAndActivate={handleSelectModelAndActivate}
             voice={voice}
             onVoiceChange={handleVoiceChange}
+            ttsModel={ttsModel}
+            onTtsModelChange={handleTtsModelChange}
             customGeminiKey={customGeminiKey}
             onSaveGeminiKey={handleSaveGeminiKey}
             customGroqKey={customGroqKey}

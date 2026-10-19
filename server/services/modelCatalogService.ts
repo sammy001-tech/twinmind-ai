@@ -227,22 +227,19 @@ class ModelCatalogService {
    * Resolve specialized model capabilities from a fresh Google catalogue.
    * IDs are discovered from provider metadata; no preferred model identifier is
    * embedded in application code.
+  /**
+   * Discover and list live specialized models (e.g. 'tts' or 'embedding') directly from the provider API.
    */
-  public async resolveSpecializedModel(type: 'embedding' | 'tts', apiKey?: string): Promise<string> {
+  public async listSpecializedModels(type: 'embedding' | 'tts', apiKey?: string): Promise<LiveModelInfo[]> {
     const key = this.normalizeKey(apiKey || process.env.GEMINI_API_KEY);
     if (!key) throw new Error('MODEL_PROVIDER_CONFIGURATION_MISSING:gemini');
-
-    const configuredModel = (type === 'embedding'
-      ? process.env.GEMINI_EMBEDDING_MODEL
-      : process.env.GEMINI_TTS_MODEL)?.trim();
 
     try {
       const client = new GoogleGenAI({ apiKey: key });
       const pager = await client.models.list();
-      const eligible: string[] = [];
+      const models: LiveModelInfo[] = [];
 
       for await (const model of pager) {
-        // Validate provider-returned capabilities because the SDK Model type omits this API metadata.
         const rawModel = model as unknown as {
           name?: unknown;
           displayName?: unknown;
@@ -261,34 +258,47 @@ class ModelCatalogService {
           ? id.toLowerCase().includes('embedding') && (actions.includes('embedContent') || actions.includes('asyncBatchEmbedContent'))
           : id.toLowerCase().includes('tts') && (actions.includes('generateContent') || actions.includes('predict'));
 
-        if (matches) eligible.push(id);
-      }
-
-      if (configuredModel) {
-        if (!eligible.includes(configuredModel)) {
-          throw new Error(`MODEL_NOT_CURRENTLY_AVAILABLE:gemini:${configuredModel}`);
+        if (matches) {
+          models.push({
+            id,
+            displayName: typeof rawModel.displayName === 'string' && rawModel.displayName ? rawModel.displayName : id,
+            description: typeof rawModel.description === 'string' ? rawModel.description : undefined,
+            supportedGenerationMethods: actions,
+          });
         }
-        return configuredModel;
       }
 
-      if (!eligible.length) throw new Error(`MODEL_CAPABILITY_UNAVAILABLE:gemini:${type}`);
-      if (type === 'tts') {
-        const preferredTts = eligible.find((m) => m === 'gemini-3.8-flash-tts')
-          || eligible.find((m) => m === 'gemini-3.1-flash-tts-preview')
-          || eligible.find((m) => m === 'gemini-2.5-flash-preview-tts')
-          || eligible.find((m) => m.includes('flash') && m.includes('tts'))
-          || eligible[0];
-        return preferredTts;
-      }
-      const preferredEmb = eligible.find((m) => m === 'gemini-embedding-2')
-        || eligible.find((m) => m === 'gemini-embedding-001')
-        || eligible[0];
-      return preferredEmb;
+      return models;
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('MODEL_')) throw err;
-      console.warn(`[ModelCatalogService] Live Gemini ${type} capability discovery failed:`, err);
+      console.warn(`[ModelCatalogService] Live Gemini ${type} model discovery failed:`, err);
       throw new Error(`MODEL_CAPABILITY_UNAVAILABLE:gemini:${type}`);
     }
+  }
+
+  /**
+   * Resolve a specialized model (e.g., 'embedding' or 'tts') dynamically from live Gemini capabilities.
+   * Allows selecting an explicit user-configured model from settings/request if verified in the live catalogue.
+   */
+  public async resolveSpecializedModel(type: 'embedding' | 'tts', apiKey?: string, overrideModel?: string): Promise<string> {
+    const liveModels = await this.listSpecializedModels(type, apiKey);
+    if (!liveModels.length) {
+      throw new Error(`MODEL_CAPABILITY_UNAVAILABLE:gemini:${type}`);
+    }
+
+    const liveIds = liveModels.map((m) => m.id);
+
+    // If an explicit override model was requested by user settings or request
+    const requested = (overrideModel || (type === 'embedding' ? process.env.GEMINI_EMBEDDING_MODEL : process.env.GEMINI_TTS_MODEL))?.trim();
+    if (requested) {
+      if (!liveIds.includes(requested)) {
+        throw new Error(`MODEL_NOT_CURRENTLY_AVAILABLE:gemini:${requested}`);
+      }
+      return requested;
+    }
+
+    // Default to the first available live model verified in the provider catalogue
+    return liveIds[0];
   }
 
   public async resolveAllProviderModels(

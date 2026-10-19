@@ -58,3 +58,38 @@ test('does not return raw provider error content or secret-like text in diagnost
   assert.equal(result.errorCode, 'GEMINI_CATALOG_REQUEST_FAILED');
   assert.equal(JSON.stringify(result).includes('MUST_NOT_LEAK'), false);
 });
+
+test('resolveSpecializedModel rejects empty or missing API keys without inventing a model', async () => {
+  const { modelCatalogService } = await import('../server/services/modelCatalogService.ts');
+  const prevKey = process.env.GEMINI_API_KEY;
+  try {
+    delete process.env.GEMINI_API_KEY;
+    await assert.rejects(
+      async () => {
+        await modelCatalogService.resolveSpecializedModel('tts', '');
+      },
+      /MODEL_PROVIDER_CONFIGURATION_MISSING:gemini/
+    );
+    await assert.rejects(
+      async () => {
+        await modelCatalogService.resolveSpecializedModel('embedding', undefined);
+      },
+      /MODEL_PROVIDER_CONFIGURATION_MISSING:gemini/
+    );
+  } finally {
+    if (prevKey !== undefined) {
+      process.env.GEMINI_API_KEY = prevKey;
+    }
+  }
+});
+
+test('resolveSpecializedModel validates configuredModel against live capability catalogue', async () => {
+  const { modelCatalogService } = await import('../server/services/modelCatalogService.ts');
+  // When an invalid key is supplied, it must fail cleanly with MODEL_CAPABILITY_UNAVAILABLE rather than fake a model
+  await assert.rejects(
+    async () => {
+      await modelCatalogService.resolveSpecializedModel('tts', 'invalid-fake-key-9999');
+    },
+    /MODEL_CAPABILITY_UNAVAILABLE:gemini:tts/
+  );
+});

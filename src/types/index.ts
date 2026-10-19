@@ -159,6 +159,12 @@ export interface KeyTestResult {
 
 export type KeyTestStatusMap = Record<string, KeyTestResult>;
 
+export interface SoulTuningConfig {
+  tone: number; // 0 (analytical/empirical) to 100 (empathetic/warm)
+  directness: number; // 0 (concise/bulleted) to 100 (comprehensive/deep dive)
+  perspective: number; // 0 (skeptical/devil's advocate) to 100 (visionary/optimistic)
+}
+
 export interface AppSettings {
   brandName?: string;
   activeProvider: 'gemini' | 'groq' | 'mistral' | '';
@@ -169,6 +175,7 @@ export interface AppSettings {
     mistral: string;
   };
   voice: string;
+  ttsModel?: string;
   userName: string;
   nickname: string;
   customGeminiKey?: string;
@@ -192,5 +199,8 @@ export interface AppSettings {
   proactiveAlertChannel?: 'whatsapp' | 'telegram' | 'none';
   keyTestStatuses?: KeyTestStatusMap;
   themeMode?: 'dark' | 'light' | 'system';
+  soulTuning?: SoulTuningConfig;
+  webGroundingEnabled?: boolean;
 }
+
 

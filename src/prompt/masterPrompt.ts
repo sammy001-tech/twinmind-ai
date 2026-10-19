@@ -70,6 +70,56 @@ export interface BuildPromptOptions {
   activeThreadTitle?: string;
   learnedContext?: string;
   calibrationContext?: string;
+  soulTuning?: { tone?: number; directness?: number; perspective?: number };
+}
+
+export function compileSoulTuningDirective(soulTuning?: { tone?: number; directness?: number; perspective?: number } | null): string {
+  if (!soulTuning || typeof soulTuning !== 'object') {
+    return '';
+  }
+
+  const clamp = (val: unknown, fallback: number): number => {
+    if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
+    return Math.max(0, Math.min(100, Math.round(val)));
+  };
+
+  const tone = clamp(soulTuning.tone, 50);
+  const directness = clamp(soulTuning.directness, 50);
+  const perspective = clamp(soulTuning.perspective, 50);
+
+  let toneGuidance = '';
+  if (tone <= 25) {
+    toneGuidance = 'Dispassionate, empirical, and strictly analytical. Use precise, objective logic, eliminate pleasantries, and prioritize quantitative mechanisms over affective validation.';
+  } else if (tone <= 70) {
+    toneGuidance = 'Balanced, thoughtful, and collaborative. Blend intellectual rigor with approachable, respectful conversational warmth.';
+  } else {
+    toneGuidance = 'Warm, empathetic, and deeply attuned. Actively acknowledge personal and human context, validate emotional stakes, and offer encouraging, compassionate partnership while preserving intellectual truth.';
+  }
+
+  let directnessGuidance = '';
+  if (directness <= 25) {
+    directnessGuidance = 'Ultra-concise, dense, and telegraphic. Deliver the bottom-line answer immediately with bulleted points and actionable conclusions. Omit conversational filler, long preambles, and meta-commentary.';
+  } else if (directness <= 70) {
+    directnessGuidance = 'Moderately structured and well-proportioned. Provide clear context, trade-offs, and reasoning depth without unnecessary wordiness.';
+  } else {
+    directnessGuidance = 'Exhaustive, comprehensive, and deeply nuanced. Explore second-order consequences, historical and industry analogies, multi-angle implications, and complete explanatory context.';
+  }
+
+  let perspectiveGuidance = '';
+  if (perspective <= 25) {
+    perspectiveGuidance = "Rigorous skeptic and devil's advocate. Proactively stress-test assumptions, probe potential failure modes, surface hidden risks, and challenge unsupported optimism.";
+  } else if (perspective <= 70) {
+    perspectiveGuidance = 'Balanced strategic advisor. Objectively weigh potential risks, costs, and viable upsides with neutral equilibrium.';
+  } else {
+    perspectiveGuidance = 'Visionary and possibility-focused. Emphasize expansive upside, creative leverage, asymmetric opportunities, and ambitious breakthroughs while charting realistic execution steps.';
+  }
+
+  return `\n\nDIGITAL TWIN SOUL TUNING & BEHAVIORAL CALIBRATION
+The user has configured explicit cognitive persona calibration weights:
+- Tone [${tone}/100]: ${toneGuidance}
+- Directness [${directness}/100]: ${directnessGuidance}
+- Perspective [${perspective}/100]: ${perspectiveGuidance}
+Strictly reflect these continuous behavioral calibration weights in your linguistic tone, response depth, and analytical posture.`;
 }
 
 export function buildSystemPrompt(
@@ -87,6 +137,7 @@ export function buildSystemPrompt(
   let activeThreadTitle = '';
   let learnedContext = '';
   let calibrationContext = '';
+  let soulTuningDirective = '';
 
   if (typeof channelOrOptions === 'object' && channelOrOptions !== null) {
     channel = channelOrOptions.channel || 'web';
@@ -99,6 +150,7 @@ export function buildSystemPrompt(
     activeThreadTitle = channelOrOptions.activeThreadTitle || '';
     learnedContext = channelOrOptions.learnedContext || '';
     calibrationContext = channelOrOptions.calibrationContext || '';
+    soulTuningDirective = compileSoulTuningDirective(channelOrOptions.soulTuning);
   } else if (typeof channelOrOptions === 'string') {
     channel = channelOrOptions;
   }
