@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState } from './types/index.ts';
+import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
 import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
@@ -37,6 +37,7 @@ import {
 import { getChatScrollState } from './utils/chatScroll.ts';
 import { normalizeDynamicPromptTemplates } from './utils/dynamicPrompts.ts';
 import { resolveMessageProcessingStatus, resolvePersistedMessageStatus } from './utils/messageStatus.ts';
+import { apiFetch } from './utils/apiFetch.ts';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('home');
@@ -126,6 +127,11 @@ export default function App() {
   const [customGroqKey, setCustomGroqKey] = useState<string>('');
   const [customMistralKey, setCustomMistralKey] = useState<string>('');
   const [customTavilyKey, setCustomTavilyKey] = useState<string>('');
+  const [soulTuning, setSoulTuning] = useState<SoulTuningConfig>({
+    tone: 50,
+    directness: 50,
+    perspective: 50,
+  });
 
   // Theme hook (Dark, Light, System)
   const { themeMode, setThemeMode, isDark } = useTheme();
@@ -238,6 +244,13 @@ export default function App() {
             if (s.customPrompts && Array.isArray(s.customPrompts)) setCustomPrompts(s.customPrompts);
             if (s.activeThreadId) setActiveThreadId(s.activeThreadId);
             if (s.themeMode) setThemeMode(s.themeMode);
+            if (s.soulTuning && typeof s.soulTuning === 'object') {
+              setSoulTuning({
+                tone: typeof s.soulTuning.tone === 'number' ? s.soulTuning.tone : 50,
+                directness: typeof s.soulTuning.directness === 'number' ? s.soulTuning.directness : 50,
+                perspective: typeof s.soulTuning.perspective === 'number' ? s.soulTuning.perspective : 50,
+              });
+            }
           }
         }
       } catch (err) {
@@ -527,6 +540,28 @@ export default function App() {
   const handleTtsModelChange = (model: string) => {
     setTtsModel(model);
     syncSettingsToServer({ ttsModel: model });
+  };
+
+  const handleSoulTuningChange = (newTuning: SoulTuningConfig) => {
+    setSoulTuning(newTuning);
+  };
+
+  const handleSelectThinkingPreset = async (tuning: SoulTuningConfig) => {
+    setSoulTuning(tuning);
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ soulTuning: tuning }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to persist thinking mode to database');
+      }
+    } catch (err: unknown) {
+      console.error('Failed to persist thinking preset:', err);
+      throw err;
+    }
   };
 
   const persistCredentialSetting = async (
@@ -1198,6 +1233,8 @@ export default function App() {
         onThemeModeChange={handleThemeModeChange}
         onProviderChange={handleProviderChange}
         onOpenVoiceModal={() => setIsVoiceModalOpen(true)}
+        soulTuning={soulTuning}
+        onSelectThinkingMode={handleSelectThinkingPreset}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
@@ -1442,6 +1479,8 @@ export default function App() {
             onVoiceChange={handleVoiceChange}
             ttsModel={ttsModel}
             onTtsModelChange={handleTtsModelChange}
+            soulTuning={soulTuning}
+            onSoulTuningChange={handleSoulTuningChange}
             customGeminiKey={customGeminiKey}
             onSaveGeminiKey={handleSaveGeminiKey}
             customGroqKey={customGroqKey}

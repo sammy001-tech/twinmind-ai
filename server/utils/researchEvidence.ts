@@ -64,7 +64,7 @@ function isNonPublicHostname(hostname: string): boolean {
   );
 }
 
-function canonicalHttpUrl(value: unknown): string | null {
+export function canonicalHttpUrl(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
   try {
     const parsed = new URL(value.trim());

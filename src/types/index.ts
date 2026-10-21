@@ -192,6 +192,8 @@ export interface AppSettings {
   telegramMode?: 'polling' | 'webhook';
   telegramWebhookUrl?: string;
   telegramOwnerId?: string;
+  telegramOwnerUsername?: string;
+  telegramPairingCode?: string;
   twilioWhatsAppNumber?: string;
   userPhoneNumber?: string;
   enableWhatsAppAlerts?: boolean;

@@ -21,6 +21,8 @@ import {
   resolveTelegramToken,
   resolveTelegramWebhookUrl,
   shouldAttemptTelegramStart,
+  matchesPairingCode,
+  extractSuppliedPairingCode,
   type TelegramMode,
 } from '../services/telegramConfigService.ts';
 import type { AppSettings } from '../../src/types/index.ts';
@@ -73,11 +75,17 @@ function generatePairingCode(): string {
 // Environment values remain authoritative; persisted Settings are used when environment values are absent.
 function loadConfig(): TelegramConfig {
   const saved = settingsManager.getSettings();
+  const existingPairingCode = saved.telegramPairingCode?.trim();
+  const pairingCode =
+    existingPairingCode && existingPairingCode.startsWith('LKN-')
+      ? existingPairingCode
+      : generatePairingCode();
+
   return {
     token: resolveTelegramToken(process.env.TELEGRAM_BOT_TOKEN, saved.telegramToken),
     ownerId: resolveTelegramOwnerId(process.env.TELEGRAM_OWNER_ID, saved.telegramOwnerId),
-    ownerUsername: null,
-    pairingCode: generatePairingCode(),
+    ownerUsername: saved.telegramOwnerUsername || null,
+    pairingCode,
     mode: resolveTelegramMode(process.env.TELEGRAM_MODE, saved.telegramMode),
     webhookUrl: resolveTelegramWebhookUrl(process.env.TELEGRAM_WEBHOOK_URL, saved.telegramWebhookUrl),
     activeProvider: saved.activeProvider || '',
@@ -91,6 +99,8 @@ async function saveConfig(cfg: TelegramConfig, persistToken = false): Promise<vo
     telegramMode: cfg.mode,
     telegramWebhookUrl: cfg.webhookUrl,
     telegramOwnerId: cfg.ownerId ? String(cfg.ownerId) : '',
+    telegramOwnerUsername: cfg.ownerUsername || '',
+    telegramPairingCode: cfg.pairingCode || '',
   };
   if (persistToken) patch.telegramToken = cfg.token;
   await settingsManager.updateSettings(patch as Partial<AppSettings>);
@@ -113,6 +123,10 @@ class TelegramBotManager {
 
   constructor() {
     this.config = loadConfig();
+    const saved = settingsManager.getSettings();
+    if (!saved.telegramPairingCode && this.config.pairingCode) {
+      void saveConfig(this.config).catch(() => {});
+    }
     this.initCommandRegistry();
     this.log('info', 'Telegram service initialized with Zero Silent Failure policy');
   }
@@ -916,9 +930,10 @@ class TelegramBotManager {
       const text = ctx.message?.text || '';
 
       if (this.config.ownerId === null) {
-        const startParts = text.trim().split(/\\s+/);
-        const suppliedCode = startParts[0]?.startsWith('/start') ? (startParts[1] || '') : '';
-        if (suppliedCode && suppliedCode === this.config.pairingCode) {
+        const trimmed = text.trim();
+        const suppliedRaw = extractSuppliedPairingCode(trimmed);
+
+        if (matchesPairingCode(trimmed, this.config.pairingCode)) {
           const nextConfig = {
             ...this.config,
             ownerId: userId,
@@ -926,13 +941,50 @@ class TelegramBotManager {
           };
           await saveConfig(nextConfig);
           this.config = nextConfig;
-          this.log('auth', `Owner pairing completed for Telegram user ID ${userId}`);
-          await ctx.reply('Pairing successful. This Telegram account is now linked as the owner.', { parse_mode: 'Markdown' });
+          this.log('auth', `Owner pairing completed for Telegram user ID ${userId} (@${from.username || from.first_name || 'unknown'})`);
+          await ctx.reply(
+            `🎉 *Pairing Successful!*\n\n` +
+            `Your Telegram account (@${from.username || from.first_name || 'Owner'}) is now securely linked as the owner of this Digital Twin.\n\n` +
+            `Type /help to see all available commands, or text me directly anytime to start thinking together!`,
+            { parse_mode: 'Markdown' }
+          );
           return;
         }
 
-        this.log('auth', 'Rejected Telegram update while owner pairing is not configured.');
-        await ctx.reply('Owner pairing is not configured. An administrator must provide the current one-time pairing code.');
+        // If the user sent /start without a code:
+        if (trimmed.toLowerCase() === '/start') {
+          await ctx.reply(
+            `👋 *Welcome to TwinMind AI!*\n\n` +
+            `This Digital Twin is in private mode and awaiting owner pairing.\n\n` +
+            `*To pair your Telegram account:*\n` +
+            `1. Open your TwinMind Web App.\n` +
+            `2. Click **Settings → Telegram**.\n` +
+            `3. Copy your pairing code or click **"Open in Telegram"**.\n` +
+            `4. Send your code here (e.g. \`/start ${this.config.pairingCode}\` or simply paste \`${this.config.pairingCode}\`).`,
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        // If a code was supplied but was incorrect or expired:
+        if (suppliedRaw) {
+          this.log('auth', `Rejected invalid or expired pairing code attempt from ID ${userId}`);
+          await ctx.reply(
+            `❌ *Invalid or Expired Pairing Code*\n\n` +
+            `The code you provided does not match the active pairing code for this Digital Twin.\n\n` +
+            `Please check the **Telegram** tab in your TwinMind web app settings for the current active code, or click **"Reset Pairing Code"** in the app.`,
+            { parse_mode: 'Markdown' }
+          );
+          return;
+        }
+
+        this.log('auth', `Rejected Telegram message from unlinked ID ${userId} while owner pairing is awaiting code.`);
+        await ctx.reply(
+          `🔒 *Owner Pairing Required*\n\n` +
+          `This Digital Twin is locked and awaiting owner verification.\n\n` +
+          `Please open your TwinMind web app (**Settings → Telegram**) to copy your one-time pairing code and send it here.`,
+          { parse_mode: 'Markdown' }
+        );
         return;
       }
 

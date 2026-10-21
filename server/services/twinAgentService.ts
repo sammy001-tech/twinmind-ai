@@ -841,9 +841,15 @@ Deliver the synthesized verdict formatted with clear sections:
     }
 
     try {
-      const currentUser = settingsManager.getSettings().userName || '';
-      const currentNick = settingsManager.getSettings().nickname || '';
-      const systemInstruction = `${buildSystemPrompt({ channel: channel as any, userName: currentUser, nickname: currentNick })}
+      const currentSettings = settingsManager.getSettings();
+      const currentUser = currentSettings.userName || '';
+      const currentNick = currentSettings.nickname || '';
+      const systemInstruction = `${buildSystemPrompt({
+        channel: channel as any,
+        userName: currentUser,
+        nickname: currentNick,
+        soulTuning: currentSettings.soulTuning,
+      })}
       
 Task: Analyze this dilemma with the 7-Step Decision Deconstructor.
 CRITICAL: Include Confidence Level ("High", "Medium", "Low") and Evidence Reason.
@@ -1080,7 +1086,8 @@ Respond in valid JSON:
       console.warn('[TwinAgent] Retrieval warning:', kErr);
     }
 
-    // Build Master System Prompt with Recalled Context & Safety Directives
+    // Build Master System Prompt with Recalled Context, Soul Tuning & Safety Directives
+    const currentSettings = settingsManager.getSettings();
     const systemInstruction = buildSystemPrompt({
       channel,
       userName,
@@ -1092,6 +1099,7 @@ Respond in valid JSON:
       activeThreadTitle,
       learnedContext,
       calibrationContext,
+      soulTuning: currentSettings.soulTuning,
     });
 
     const toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
@@ -1322,7 +1330,11 @@ Respond in valid JSON:
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
-          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
+            provider,
+            model,
+            userName: nickname || userName,
+          }).catch(() => {});
           
           return {
             reply: finalReply,
@@ -1394,7 +1406,11 @@ Respond in valid JSON:
       const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
 
       // Background Memory Extraction (Autonomous Learning)
-      memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
+        provider,
+        model,
+        userName: nickname || userName,
+      }).catch(() => {});
 
       return {
         reply: finalReply,
@@ -1463,7 +1479,11 @@ Respond in valid JSON:
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
-          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
+            provider,
+            model,
+            userName: nickname || userName,
+          }).catch(() => {});
           
           return {
             reply: finalReply,
@@ -1518,7 +1538,11 @@ Respond in valid JSON:
       const suggestedActionsGroq = this.extractSuggestedActions(finalReplyGroq, userPrompt, toolsExecuted);
       
       // Background Memory Extraction (Autonomous Learning)
-      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyGroq, model).catch(() => {});
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyGroq, {
+        provider,
+        model,
+        userName: nickname || userName,
+      }).catch(() => {});
 
       return {
         reply: finalReplyGroq,
@@ -1587,7 +1611,11 @@ Respond in valid JSON:
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
           
           // Background Memory Extraction (Autonomous Learning)
-          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, model).catch(() => {});
+          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
+            provider,
+            model,
+            userName: nickname || userName,
+          }).catch(() => {});
           
           return {
             reply: finalReply,
@@ -1642,7 +1670,11 @@ Respond in valid JSON:
       const suggestedActionsMistral = this.extractSuggestedActions(finalReplyMistral, userPrompt, toolsExecuted);
       
       // Background Memory Extraction (Autonomous Learning)
-      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyMistral, model).catch(() => {});
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyMistral, {
+        provider,
+        model,
+        userName: nickname || userName,
+      }).catch(() => {});
 
       return {
         reply: finalReplyMistral,

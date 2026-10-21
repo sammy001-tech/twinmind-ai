@@ -27,6 +27,11 @@ import { getArtifactStorageStatus } from './server/services/artifactStorageServi
 import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
 import { evaluateSameOriginRequest, resolveProviderCredential, resolveCredentialForVerification } from './server/services/providerCredentialService.ts';
 import { pcmToWav } from './server/services/audioGenerationService.ts';
+import {
+  parseDocumentBuffer,
+  ingestDocumentChunks,
+  fetchAndIngestWebPage,
+} from './server/services/documentIngestionService.ts';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -59,8 +64,8 @@ const isProduction = process.env.NODE_ENV === 'production';
 // In development, the dev server must always listen on port 3000; in production, use PORT provided by host (e.g. Render)
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 // Owner-only API boundary. Signed webhooks are validated by their individual handlers.
 const publicApiPaths = new Set([
@@ -2451,6 +2456,66 @@ app.post('/api/knowledge/categories/delete', async (req: Request, res: Response)
     res.json({ success: true, modified });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to delete category' });
+  }
+});
+
+// Document File Ingestion (PDF, Markdown, Text, JSON, CSV) with intelligent chunking & pgvector embedding
+app.post('/api/knowledge/ingest/file', async (req: Request, res: Response) => {
+  try {
+    const { filename, contentBase64, textContent, mimeType, category = 'reference', tags = [] } = req.body || {};
+
+    if (!filename || typeof filename !== 'string') {
+      res.status(400).json({ success: false, error: 'FILENAME_REQUIRED: filename string is required' });
+      return;
+    }
+
+    let buffer: Buffer;
+    if (typeof contentBase64 === 'string' && contentBase64.length > 0) {
+      buffer = Buffer.from(contentBase64, 'base64');
+    } else if (typeof textContent === 'string' && textContent.length > 0) {
+      buffer = Buffer.from(textContent, 'utf-8');
+    } else {
+      res.status(400).json({ success: false, error: 'CONTENT_REQUIRED: Either contentBase64 or textContent must be provided' });
+      return;
+    }
+
+    const parsed = await parseDocumentBuffer(filename, buffer, mimeType);
+    const result = await ingestDocumentChunks({
+      title: parsed.title,
+      content: parsed.content,
+      category: typeof category === 'string' && category.trim() ? category.trim() : 'reference',
+      tags: Array.isArray(tags) ? tags : [],
+      source: 'file',
+      format: parsed.format,
+      sourceReference: filename,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ success: false, error: message });
+  }
+});
+
+// Web URL Ingestion with live HTML fetching, text extraction, intelligent chunking & pgvector embedding
+app.post('/api/knowledge/ingest/url', async (req: Request, res: Response) => {
+  try {
+    const { url, category = 'reference', tags = [] } = req.body || {};
+    if (!url || typeof url !== 'string') {
+      res.status(400).json({ success: false, error: 'URL_REQUIRED: Web URL string is required' });
+      return;
+    }
+
+    const result = await fetchAndIngestWebPage({
+      url,
+      category: typeof category === 'string' && category.trim() ? category.trim() : 'reference',
+      tags: Array.isArray(tags) ? tags : [],
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ success: false, error: message });
   }
 });
 

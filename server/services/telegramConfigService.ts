@@ -70,3 +70,37 @@ export function shouldAttemptTelegramStart(
 ): boolean {
   return hasToken && (runtimeConfigurationChanged || !isRunning);
 }
+
+export function normalizePairingCode(code: unknown): string {
+  if (typeof code !== 'string') return '';
+  return code.trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+}
+
+export function extractSuppliedPairingCode(text: unknown): string {
+  if (typeof text !== 'string') return '';
+  const trimmed = text.trim();
+  const startParts = trimmed.split(/\s+/);
+  if (startParts[0]?.toLowerCase().startsWith('/start')) {
+    if (startParts[1]) {
+      return startParts[1];
+    }
+    if (startParts[0].includes('=')) {
+      return startParts[0].split('=')[1] || '';
+    }
+    return '';
+  }
+  // Allow direct paste of code like "LKN-VEDVL76E" or "LKN4DCYDGBC"
+  if (trimmed.toUpperCase().startsWith('LKN-') || trimmed.toUpperCase().startsWith('LKN')) {
+    return trimmed;
+  }
+  return '';
+}
+
+export function matchesPairingCode(suppliedInput: unknown, expectedCode: unknown): boolean {
+  const extracted = extractSuppliedPairingCode(suppliedInput);
+  const normalizedSupplied = normalizePairingCode(extracted);
+  const normalizedExpected = normalizePairingCode(expectedCode);
+  if (!normalizedSupplied || !normalizedExpected) return false;
+  return normalizedSupplied === normalizedExpected;
+}
+

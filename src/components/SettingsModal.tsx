@@ -25,8 +25,10 @@ import {
   Play,
   Square,
   Loader2,
+  Sliders,
 } from 'lucide-react';
-import { LiveModelInfo } from '../types/index.ts';
+import { LiveModelInfo, SoulTuningConfig } from '../types/index.ts';
+import { THINKING_PRESETS } from '../utils/thinkingModes.ts';
 import { ThemeMode } from '../hooks/useTheme.ts';
 import { apiFetch } from '../utils/apiFetch.ts';
 
@@ -46,6 +48,8 @@ interface SettingsModalProps {
   onVoiceChange: (voice: string) => void;
   ttsModel?: string;
   onTtsModelChange?: (model: string) => void;
+  soulTuning?: SoulTuningConfig;
+  onSoulTuningChange?: (tuning: SoulTuningConfig) => void | Promise<void>;
   customGeminiKey: string;
   onSaveGeminiKey: (key: string) => void | Promise<void>;
   customGroqKey: string;
@@ -80,6 +84,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onVoiceChange,
   ttsModel = '',
   onTtsModelChange,
+  soulTuning,
+  onSoulTuningChange,
   customGeminiKey,
   onSaveGeminiKey,
   customGroqKey,
@@ -205,6 +211,54 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
   const [testVoiceError, setTestVoiceError] = useState<string | null>(null);
   const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null);
+
+  // Digital Twin Soul Tuning (Behavioral Calibration)
+  const [currentSoulTuning, setCurrentSoulTuning] = useState<SoulTuningConfig>(
+    soulTuning || { tone: 50, directness: 50, perspective: 50 }
+  );
+  const [isSavingSoulTuning, setIsSavingSoulTuning] = useState(false);
+  const [soulTuningError, setSoulTuningError] = useState<string | null>(null);
+  const [soulTuningSavedAt, setSoulTuningSavedAt] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (soulTuning) {
+      setCurrentSoulTuning(soulTuning);
+    }
+  }, [soulTuning]);
+
+  const handleUpdateSoulTuning = async (patch: Partial<SoulTuningConfig>) => {
+    const next: SoulTuningConfig = {
+      tone: patch.tone !== undefined ? Math.max(0, Math.min(100, Math.round(patch.tone))) : currentSoulTuning.tone,
+      directness: patch.directness !== undefined ? Math.max(0, Math.min(100, Math.round(patch.directness))) : currentSoulTuning.directness,
+      perspective: patch.perspective !== undefined ? Math.max(0, Math.min(100, Math.round(patch.perspective))) : currentSoulTuning.perspective,
+    };
+    setCurrentSoulTuning(next);
+    setIsSavingSoulTuning(true);
+    setSoulTuningError(null);
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ soulTuning: next }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to save behavioral calibration to database');
+      }
+      setSoulTuningSavedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+      if (onSoulTuningChange) {
+        void onSoulTuningChange(next);
+      }
+    } catch (err: any) {
+      setSoulTuningError(err.message || 'Failed to persist soul tuning');
+    } finally {
+      setIsSavingSoulTuning(false);
+    }
+  };
+
+  const handleResetSoulTuning = () => {
+    void handleUpdateSoulTuning({ tone: 50, directness: 50, perspective: 50 });
+  };
 
   const loadVoices = async (targetProvider?: string) => {
     setIsLoadingVoices(true);
@@ -2671,6 +2725,197 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </button>
             </div>
           </form>
+        </div>
+
+        {/* Digital Twin "Soul" Tuning (Behavioral Calibration) */}
+        <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-2">
+              <Sliders className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+              <h3 className="text-xs font-semibold text-slate-900 dark:text-white">
+                Digital Twin "Soul" Tuning (Behavioral Calibration)
+              </h3>
+            </div>
+            <div className="flex items-center gap-2">
+              {isSavingSoulTuning && (
+                <span className="text-[11px] text-amber-500 flex items-center gap-1 font-medium">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Saving...
+                </span>
+              )}
+              {soulTuningSavedAt && !isSavingSoulTuning && !soulTuningError && (
+                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-mono">
+                  Saved {soulTuningSavedAt}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleResetSoulTuning}
+                disabled={isSavingSoulTuning}
+                className="px-2 py-0.5 rounded text-[10px] font-medium text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-slate-300 transition"
+              >
+                Reset to Neutral
+              </button>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+            Calibrate your twin's reasoning posture, communicative depth, and analytical emphasis. These continuous mathematical weights are dynamically injected across Gemini, Groq, and Mistral turns.
+          </p>
+
+          {soulTuningError && (
+            <div className="p-2.5 rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{soulTuningError}</span>
+            </div>
+          )}
+
+          {/* Quick Thinking Presets */}
+          <div className="space-y-1.5 pt-1">
+            <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block">
+              Quick Thinking Presets:
+            </span>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {THINKING_PRESETS.map((p) => {
+                const isSelected =
+                  currentSoulTuning.tone === p.weights.tone &&
+                  currentSoulTuning.directness === p.weights.directness &&
+                  currentSoulTuning.perspective === p.weights.perspective;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => handleUpdateSoulTuning(p.weights)}
+                    disabled={isSavingSoulTuning}
+                    title={`Effect on twin's posture:\n${p.effect}`}
+                    className={`p-2.5 rounded-xl text-left border text-xs transition flex flex-col justify-between ${
+                      isSelected
+                        ? `${p.colors.bg} ${p.colors.border} text-slate-900 dark:text-white font-bold ring-2 ring-amber-500/25 shadow-xs`
+                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="text-base">{p.icon}</span>
+                      {isSelected && (
+                        <span className="text-[9px] text-amber-500 font-mono font-bold flex items-center gap-0.5">
+                          <Check className="w-2.5 h-2.5" /> ACTIVE
+                        </span>
+                      )}
+                    </div>
+                    <span className="font-semibold text-xs mt-1.5">{p.shortLabel}</span>
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500 leading-tight mt-0.5 line-clamp-2">{p.tagline}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="space-y-4 pt-1">
+            {/* Tone Slider */}
+            <div className="space-y-1.5 p-3 rounded-lg bg-white dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800/80">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
+                  Tone
+                </span>
+                <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  {currentSoulTuning.tone}/100
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium px-0.5">
+                <span>Analytical (0)</span>
+                <span>Balanced (50)</span>
+                <span>Empathetic (100)</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                aria-label="Tone calibration slider"
+                value={currentSoulTuning.tone}
+                onChange={(e) => setCurrentSoulTuning((prev) => ({ ...prev, tone: Number(e.target.value) }))}
+                onMouseUp={(e) => void handleUpdateSoulTuning({ tone: Number((e.target as HTMLInputElement).value) })}
+                onTouchEnd={(e) => void handleUpdateSoulTuning({ tone: Number((e.target as HTMLInputElement).value) })}
+                className="w-full accent-amber-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer"
+              />
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 italic pt-0.5">
+                {currentSoulTuning.tone <= 25 && 'Analytical emphasis: Dispassionate, empirical communication with objective metrics and formal logic.'}
+                {currentSoulTuning.tone > 25 && currentSoulTuning.tone <= 74 && 'Balanced tone: Analytical rigor with thoughtful, respectful conversational warmth.'}
+                {currentSoulTuning.tone >= 75 && 'Empathetic emphasis: Warm, attuned communication validating human context and emotional stakes.'}
+              </p>
+            </div>
+
+            {/* Directness Slider */}
+            <div className="space-y-1.5 p-3 rounded-lg bg-white dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800/80">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
+                  Directness
+                </span>
+                <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  {currentSoulTuning.directness}/100
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium px-0.5">
+                <span>Concise (0)</span>
+                <span>Proportionate (50)</span>
+                <span>Elaborate (100)</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                aria-label="Directness calibration slider"
+                value={currentSoulTuning.directness}
+                onChange={(e) => setCurrentSoulTuning((prev) => ({ ...prev, directness: Number(e.target.value) }))}
+                onMouseUp={(e) => void handleUpdateSoulTuning({ directness: Number((e.target as HTMLInputElement).value) })}
+                onTouchEnd={(e) => void handleUpdateSoulTuning({ directness: Number((e.target as HTMLInputElement).value) })}
+                className="w-full accent-amber-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer"
+              />
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 italic pt-0.5">
+                {currentSoulTuning.directness <= 25 && 'Concise depth: Ultra-concise, dense, and telegraphic bottom-line takeaways immediately.'}
+                {currentSoulTuning.directness > 25 && currentSoulTuning.directness <= 74 && 'Proportionate depth: Clear structure with proportionate context, trade-offs, and reasoning.'}
+                {currentSoulTuning.directness >= 75 && 'Elaborate depth: Comprehensive analysis exploring second-order consequences, background, and nuances.'}
+              </p>
+            </div>
+
+            {/* Perspective Slider */}
+            <div className="space-y-1.5 p-3 rounded-lg bg-white dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800/80">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-900 dark:text-white flex items-center gap-1.5">
+                  Perspective
+                </span>
+                <span className="font-mono text-[11px] font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                  {currentSoulTuning.perspective}/100
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-slate-400 font-medium px-0.5">
+                <span>Skeptical (0)</span>
+                <span>Balanced (50)</span>
+                <span>Visionary (100)</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                aria-label="Perspective calibration slider"
+                value={currentSoulTuning.perspective}
+                onChange={(e) => setCurrentSoulTuning((prev) => ({ ...prev, perspective: Number(e.target.value) }))}
+                onMouseUp={(e) => void handleUpdateSoulTuning({ perspective: Number((e.target as HTMLInputElement).value) })}
+                onTouchEnd={(e) => void handleUpdateSoulTuning({ perspective: Number((e.target as HTMLInputElement).value) })}
+                className="w-full accent-amber-500 h-1.5 bg-slate-200 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer"
+              />
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 italic pt-0.5">
+                {currentSoulTuning.perspective <= 25 && "Skeptical emphasis: Rigorous devil's advocate stress-testing assumptions and surfacing hidden risks."}
+                {currentSoulTuning.perspective > 25 && currentSoulTuning.perspective <= 74 && 'Balanced perspective: Objective equilibrium balancing upside potential, constraints, and alternatives.'}
+                {currentSoulTuning.perspective >= 75 && 'Visionary emphasis: Possibility-focused, emphasizing expansive upside and creative breakthroughs.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="p-2.5 rounded-lg bg-slate-100/70 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800/60 text-[10px] text-slate-500 dark:text-slate-400 leading-normal">
+            <strong>Operating Boundaries:</strong> Behavioral calibration controls conversational style and analytical emphasis. It does not replace factual truth, safety constraints, or specific task instructions.
+          </div>
         </div>
 
         {/* Dynamic Voice Selection (Provider Driven) */}

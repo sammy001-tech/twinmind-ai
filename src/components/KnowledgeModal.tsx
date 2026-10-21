@@ -16,6 +16,13 @@ import {
   SlidersHorizontal,
   FolderPlus,
   Compass,
+  FileText,
+  Globe,
+  UploadCloud,
+  FileUp,
+  Link2,
+  Check,
+  ExternalLink,
 } from 'lucide-react';
 
 interface KnowledgeModalProps {
@@ -63,7 +70,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   onOpenPromptCreator,
   isEmbedded = false,
 }) => {
-  const [activeTab, setActiveTab] = useState<'browse' | 'add' | 'telemetry'>('browse');
+  const [activeTab, setActiveTab] = useState<'browse' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
   const [documents, setDocuments] = useState<KnowledgeItem[]>([]);
   const [categories, setCategories] = useState<Array<{ category: string; count: number }>>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -91,6 +98,143 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [tagsInput, setTagsInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // File Ingestion state
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileCategory, setFileCategory] = useState<string>('reference');
+  const [fileTags, setFileTags] = useState<string>('');
+  const [isIngestingFile, setIsIngestingFile] = useState(false);
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const [fileFeedback, setFileFeedback] = useState<{ type: 'success' | 'error'; text: string; count?: number } | null>(null);
+
+  // Web URL Ingestion state
+  const [webUrlInput, setWebUrlInput] = useState<string>('');
+  const [urlCategory, setUrlCategory] = useState<string>('reference');
+  const [urlTags, setUrlTags] = useState<string>('');
+  const [isIngestingUrl, setIsIngestingUrl] = useState(false);
+  const [urlFeedback, setUrlFeedback] = useState<{ type: 'success' | 'error'; text: string; count?: number } | null>(null);
+
+  const handleFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setFileDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      setSelectedFile(e.dataTransfer.files[0]);
+      setFileFeedback(null);
+    }
+  };
+
+  const handleFileIngestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedFile) {
+      setFileFeedback({ type: 'error', text: 'Please select a document file to ingest.' });
+      return;
+    }
+
+    setIsIngestingFile(true);
+    setFileFeedback(null);
+
+    try {
+      const arrayBuffer = await selectedFile.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const base64Content = btoa(binary);
+
+      const splitTags = fileTags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+      const res = await fetch('/api/knowledge/ingest/file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: selectedFile.name,
+          contentBase64: base64Content,
+          mimeType: selectedFile.type,
+          category: fileCategory.trim() || 'reference',
+          tags: splitTags,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to ingest document file into knowledge vault');
+      }
+
+      setFileFeedback({
+        type: 'success',
+        text: `Successfully ingested "${data.primaryTitle}" (${data.totalCharacters.toLocaleString()} characters) into ${data.documentsCreated} vector-embedded document chunk(s).`,
+        count: data.documentsCreated,
+      });
+      setSelectedFile(null);
+      setFileTags('');
+      await fetchDocuments();
+      await fetchCategories();
+      await fetchStatus();
+    } catch (err: unknown) {
+      setFileFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsIngestingFile(false);
+    }
+  };
+
+  const handleUrlIngestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetUrl = webUrlInput.trim();
+    if (!targetUrl) {
+      setUrlFeedback({ type: 'error', text: 'Please enter a valid website URL.' });
+      return;
+    }
+
+    setIsIngestingUrl(true);
+    setUrlFeedback(null);
+
+    try {
+      const splitTags = urlTags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+      const res = await fetch('/api/knowledge/ingest/url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: targetUrl,
+          category: urlCategory.trim() || 'reference',
+          tags: splitTags,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to ingest web page into knowledge vault');
+      }
+
+      setUrlFeedback({
+        type: 'success',
+        text: `Successfully fetched and ingested "${data.primaryTitle}" (${data.totalCharacters.toLocaleString()} characters) into ${data.documentsCreated} vector-embedded document chunk(s).`,
+        count: data.documentsCreated,
+      });
+      setWebUrlInput('');
+      setUrlTags('');
+      await fetchDocuments();
+      await fetchCategories();
+      await fetchStatus();
+    } catch (err: unknown) {
+      setUrlFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsIngestingUrl(false);
+    }
+  };
 
   const fetchCategories = async () => {
     try {
@@ -306,37 +450,65 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
             </span>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex flex-wrap items-center gap-1">
             <button
               onClick={() => setActiveTab('browse')}
-              className={`px-2.5 py-1 rounded-md transition font-medium ${
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs ${
                 activeTab === 'browse'
-                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                  ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs font-bold'
                   : 'hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              Recall &amp; Search
+              Vault ({documents.length})
             </button>
             <button
               onClick={() => setActiveTab('add')}
-              className={`px-2.5 py-1 rounded-md transition font-medium flex items-center gap-1 ${
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1 ${
                 activeTab === 'add'
                   ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
-                  : 'text-amber-600 dark:text-amber-400 hover:underline'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
               <Plus className="w-3 h-3" />
-              <span>Store Note</span>
+              <span>Note</span>
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('import_file');
+                setFileFeedback(null);
+              }}
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1 ${
+                activeTab === 'import_file'
+                  ? 'bg-blue-600 text-white font-bold shadow-xs'
+                  : 'text-blue-600 dark:text-blue-400 hover:bg-blue-500/10'
+              }`}
+            >
+              <FileUp className="w-3 h-3" />
+              <span>Import File</span>
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('import_url');
+                setUrlFeedback(null);
+              }}
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1 ${
+                activeTab === 'import_url'
+                  ? 'bg-indigo-600 text-white font-bold shadow-xs'
+                  : 'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10'
+              }`}
+            >
+              <Globe className="w-3 h-3" />
+              <span>Ingest URL</span>
             </button>
             <button
               onClick={() => setActiveTab('telemetry')}
-              className={`px-2.5 py-1 rounded-md transition font-medium ${
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs ${
                 activeTab === 'telemetry'
                   ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
                   : 'hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              Architecture
+              Telemetry
             </button>
             {onOpenPromptCreator && (
               <button
@@ -725,6 +897,317 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                       <>
                         <Database className="w-3.5 h-3.5" />
                         <span>Index Note into Vault</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {activeTab === 'import_file' && (
+            <div className="space-y-4 max-w-2xl mx-auto">
+              <div className="p-3.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-blue-900 dark:text-blue-200 flex items-start gap-3">
+                <FileUp className="w-5 h-5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                    Automated Document &amp; Knowledge Ingestion
+                  </h4>
+                  <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">
+                    Upload your documents, notes, or data files. TwinMind extracts the text, applies semantic paragraph chunking, computes real 768-dimensional vector embeddings, and durably stores them in Neon PostgreSQL.
+                  </p>
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {['PDF (.pdf)', 'Markdown (.md)', 'Plain Text (.txt)', 'JSON (.json)', 'CSV (.csv)'].map((fmt) => (
+                      <span key={fmt} className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-700 dark:text-blue-300 font-mono text-[10px] font-semibold">
+                        {fmt}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {fileFeedback && (
+                <div
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between border ${
+                    fileFeedback.type === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                      : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-red-800 dark:text-red-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {fileFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" />
+                    )}
+                    <span>{fileFeedback.text}</span>
+                  </div>
+                  {fileFeedback.type === 'success' && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('browse')}
+                      className="px-2.5 py-1 rounded bg-emerald-600 text-white font-semibold text-[11px] hover:bg-emerald-500 transition shrink-0 ml-2"
+                    >
+                      View in Vault
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <form onSubmit={handleFileIngestSubmit} className="space-y-4">
+                {/* Drag and Drop Zone */}
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setFileDragOver(true);
+                  }}
+                  onDragLeave={() => setFileDragOver(false)}
+                  onDrop={handleFileDrop}
+                  className={`border-2 border-dashed rounded-xl p-6 text-center transition cursor-pointer ${
+                    fileDragOver
+                      ? 'border-blue-500 bg-blue-500/10'
+                      : selectedFile
+                      ? 'border-emerald-500/50 bg-emerald-500/5'
+                      : 'border-slate-300 dark:border-slate-700 hover:border-blue-500/50 bg-slate-50 dark:bg-slate-950'
+                  }`}
+                  onClick={() => {
+                    const input = document.getElementById('twinmind-file-input');
+                    if (input) (input as HTMLInputElement).click();
+                  }}
+                >
+                  <input
+                    id="twinmind-file-input"
+                    type="file"
+                    accept=".pdf,.md,.markdown,.txt,.json,.csv"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files.length > 0) {
+                        setSelectedFile(e.target.files[0]);
+                        setFileFeedback(null);
+                      }
+                    }}
+                  />
+                  {selectedFile ? (
+                    <div className="space-y-2">
+                      <div className="w-12 h-12 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto">
+                        <FileText className="w-6 h-6" />
+                      </div>
+                      <div className="font-semibold text-slate-900 dark:text-white text-xs sm:text-sm">
+                        {selectedFile.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {(selectedFile.size / 1024).toFixed(1)} KB • {selectedFile.type || 'Document'}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedFile(null);
+                        }}
+                        className="text-xs text-rose-500 hover:text-rose-600 dark:hover:text-rose-400 underline font-medium pt-1"
+                      >
+                        Change file
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="w-12 h-12 rounded-xl bg-blue-500/15 text-blue-600 dark:text-blue-400 flex items-center justify-center mx-auto">
+                        <UploadCloud className="w-6 h-6" />
+                      </div>
+                      <div className="font-semibold text-slate-900 dark:text-white text-xs sm:text-sm">
+                        Click or drag &amp; drop document here
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Supports PDF, Markdown, Text, JSON, and CSV up to 25MB
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Ingestion Parameters */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Target Category
+                    </label>
+                    <select
+                      value={fileCategory}
+                      onChange={(e) => setFileCategory(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      {categories.map((c) => (
+                        <option key={c.category} value={c.category}>
+                          {c.category.replace(/_/g, ' ')}
+                        </option>
+                      ))}
+                      {!categories.some((c) => c.category === 'reference') && (
+                        <option value="reference">reference</option>
+                      )}
+                      {!categories.some((c) => c.category === 'project_brief') && (
+                        <option value="project_brief">project_brief</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Tags (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      value={fileTags}
+                      onChange={(e) => setFileTags(e.target.value)}
+                      placeholder="e.g., handbook, deep-learning, 2026"
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  {selectedFile && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedFile(null);
+                        setFileTags('');
+                        setFileFeedback(null);
+                      }}
+                      className="px-3 py-2 rounded-lg text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={isIngestingFile || !selectedFile}
+                    className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition flex items-center gap-1.5 shadow-md shadow-blue-600/20 disabled:opacity-50"
+                  >
+                    {isIngestingFile ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Parsing, Chunking &amp; Embedding...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Database className="w-3.5 h-3.5" />
+                        <span>Ingest Document into Vault</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {activeTab === 'import_url' && (
+            <div className="space-y-4 max-w-2xl mx-auto">
+              <div className="p-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-xs text-indigo-900 dark:text-indigo-200 flex items-start gap-3">
+                <Globe className="w-5 h-5 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                    Live Web URL Ingestion
+                  </h4>
+                  <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">
+                    Provide any public article, documentation page, or blog URL. TwinMind fetches the live page, strips boilerplate scripts and styling, chunks the readable content, and creates vector embeddings stored directly in Neon.
+                  </p>
+                </div>
+              </div>
+
+              {urlFeedback && (
+                <div
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between border ${
+                    urlFeedback.type === 'success'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200'
+                      : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800 text-red-800 dark:text-red-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    {urlFeedback.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" />
+                    )}
+                    <span>{urlFeedback.text}</span>
+                  </div>
+                  {urlFeedback.type === 'success' && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('browse')}
+                      className="px-2.5 py-1 rounded bg-emerald-600 text-white font-semibold text-[11px] hover:bg-emerald-500 transition shrink-0 ml-2"
+                    >
+                      View in Vault
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <form onSubmit={handleUrlIngestSubmit} className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                    Web Page URL
+                  </label>
+                  <div className="relative">
+                    <Link2 className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="url"
+                      value={webUrlInput}
+                      onChange={(e) => setWebUrlInput(e.target.value)}
+                      placeholder="https://example.com/documentation/api-guide"
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg pl-9 pr-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Target Category
+                    </label>
+                    <select
+                      value={urlCategory}
+                      onChange={(e) => setUrlCategory(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    >
+                      {categories.map((c) => (
+                        <option key={c.category} value={c.category}>
+                          {c.category.replace(/_/g, ' ')}
+                        </option>
+                      ))}
+                      {!categories.some((c) => c.category === 'reference') && (
+                        <option value="reference">reference</option>
+                      )}
+                    </select>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Tags (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      value={urlTags}
+                      onChange={(e) => setUrlTags(e.target.value)}
+                      placeholder="e.g., web, research, official-docs"
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-2">
+                  <button
+                    type="submit"
+                    disabled={isIngestingUrl || !webUrlInput.trim()}
+                    className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition flex items-center gap-1.5 shadow-md shadow-indigo-600/20 disabled:opacity-50"
+                  >
+                    {isIngestingUrl ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Fetching &amp; Ingesting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Globe className="w-3.5 h-3.5" />
+                        <span>Fetch &amp; Ingest URL</span>
                       </>
                     )}
                   </button>

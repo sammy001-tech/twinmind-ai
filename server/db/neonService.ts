@@ -274,6 +274,19 @@ class NeonDatabaseService {
   }
 
   /**
+   * Gracefully close database pool and background reconnect timers
+   */
+  public async close(): Promise<void> {
+    if (this.reconnectTimer) clearInterval(this.reconnectTimer);
+    if (this.pool) {
+      const p = this.pool;
+      this.pool = null;
+      this.isConnected = false;
+      await p.end().catch(() => {});
+    }
+  }
+
+  /**
    * Initialize tables for conversations, decisions, and system logs
    */
   public async initSchema(): Promise<void> {

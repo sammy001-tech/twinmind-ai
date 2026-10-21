@@ -9,6 +9,9 @@ import {
   resolveTelegramToken,
   resolveTelegramWebhookUrl,
   shouldAttemptTelegramStart,
+  normalizePairingCode,
+  extractSuppliedPairingCode,
+  matchesPairingCode,
 } from '../server/services/telegramConfigService.ts';
 
 test('environment Telegram token takes precedence over saved Settings token', () => {
@@ -54,3 +57,32 @@ test('saving an unchanged Telegram token retries startup only when the bot is st
   assert.equal(shouldAttemptTelegramStart(true, false, true), false);
   assert.equal(shouldAttemptTelegramStart(false, true, false), false);
 });
+
+test('pairing code extraction and matching handles deep links, direct paste, and case variations', () => {
+  const expected = 'LKN-4DCYDGBC';
+
+  // Exact command match
+  assert.equal(matchesPairingCode('/start LKN-4DCYDGBC', expected), true);
+
+  // Deep-link format without hyphen
+  assert.equal(matchesPairingCode('/start LKN4DCYDGBC', expected), true);
+
+  // Lowercase command and code
+  assert.equal(matchesPairingCode('/start lkn-4dcydgbc', expected), true);
+
+  // Direct paste without /start command
+  assert.equal(matchesPairingCode('LKN-4DCYDGBC', expected), true);
+  assert.equal(matchesPairingCode('LKN4DCYDGBC', expected), true);
+  assert.equal(matchesPairingCode('lkn-4dcydgbc', expected), true);
+
+  // Query parameter syntax
+  assert.equal(matchesPairingCode('/start=LKN-4DCYDGBC', expected), true);
+
+  // Negative cases
+  assert.equal(matchesPairingCode('/start', expected), false);
+  assert.equal(matchesPairingCode('Hi', expected), false);
+  assert.equal(matchesPairingCode('LKN-WRONGCODE', expected), false);
+  assert.equal(matchesPairingCode('', expected), false);
+  assert.equal(matchesPairingCode(null, expected), false);
+});
+

@@ -73,53 +73,117 @@ export interface BuildPromptOptions {
   soulTuning?: { tone?: number; directness?: number; perspective?: number };
 }
 
-export function compileSoulTuningDirective(soulTuning?: { tone?: number; directness?: number; perspective?: number } | null): string {
+export interface ValidatedSoulTuning {
+  tone: number;
+  directness: number;
+  perspective: number;
+}
+
+/**
+ * Validates soul tuning inputs with strict mathematical rules:
+ * - Missing values default to neutral 50.
+ * - Out-of-bounds integers clamp to [0, 100].
+ * - Decimals, NaN, infinity, strings, or invalid types are rejected explicitly.
+ */
+export function validateSoulTuningInput(
+  input: unknown,
+  existingConfig?: Partial<ValidatedSoulTuning> | null
+): { valid: true; config: ValidatedSoulTuning } | { valid: false; error: string } {
+  if (input === null || input === undefined) {
+    return {
+      valid: true,
+      config: {
+        tone: 50,
+        directness: 50,
+        perspective: 50,
+      },
+    };
+  }
+
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { valid: false, error: 'SOUL_TUNING_INVALID_OBJECT: configuration must be an object' };
+  }
+
+  const raw = input as Record<string, unknown>;
+  const axes = ['tone', 'directness', 'perspective'] as const;
+  const result: ValidatedSoulTuning = {
+    tone: existingConfig?.tone ?? 50,
+    directness: existingConfig?.directness ?? 50,
+    perspective: existingConfig?.perspective ?? 50,
+  };
+
+  for (const axis of axes) {
+    if (axis in raw) {
+      const val = raw[axis];
+      if (val === undefined || val === null) {
+        result[axis] = 50;
+        continue;
+      }
+      // Must be a finite integer (reject decimals like 42.5, NaN, Infinity, strings, etc.)
+      if (typeof val !== 'number' || !Number.isFinite(val) || !Number.isInteger(val)) {
+        return {
+          valid: false,
+          error: `SOUL_TUNING_INVALID_VALUE: Axis "${axis}" must be a finite integer between 0 and 100, received ${JSON.stringify(val)}`,
+        };
+      }
+      // Out-of-bounds integers clamp deterministically
+      result[axis] = Math.max(0, Math.min(100, val));
+    }
+  }
+
+  return { valid: true, config: result };
+}
+
+export function compileSoulTuningDirective(
+  soulTuning?: { tone?: number; directness?: number; perspective?: number } | null
+): string {
   if (!soulTuning || typeof soulTuning !== 'object') {
     return '';
   }
 
-  const clamp = (val: unknown, fallback: number): number => {
-    if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
-    return Math.max(0, Math.min(100, Math.round(val)));
-  };
-
-  const tone = clamp(soulTuning.tone, 50);
-  const directness = clamp(soulTuning.directness, 50);
-  const perspective = clamp(soulTuning.perspective, 50);
+  const validation = validateSoulTuningInput(soulTuning);
+  const config = validation.valid ? validation.config : { tone: 50, directness: 50, perspective: 50 };
+  const { tone, directness, perspective } = config;
 
   let toneGuidance = '';
   if (tone <= 25) {
-    toneGuidance = 'Dispassionate, empirical, and strictly analytical. Use precise, objective logic, eliminate pleasantries, and prioritize quantitative mechanisms over affective validation.';
-  } else if (tone <= 70) {
-    toneGuidance = 'Balanced, thoughtful, and collaborative. Blend intellectual rigor with approachable, respectful conversational warmth.';
+    toneGuidance = `Analytical emphasis (${tone}/100): Prioritize objective facts, formal logic, and quantitative mechanisms. Keep communication dispassionate and direct while remaining respectful.`;
+  } else if (tone <= 74) {
+    toneGuidance = `Balanced tone (${tone}/100): Balance rigorous analytical clarity with thoughtful, respectful conversational warmth.`;
   } else {
-    toneGuidance = 'Warm, empathetic, and deeply attuned. Actively acknowledge personal and human context, validate emotional stakes, and offer encouraging, compassionate partnership while preserving intellectual truth.';
+    toneGuidance = `Empathetic emphasis (${tone}/100): Attune to personal and emotional context, validating user stakes and providing supportive framing without compromising factual accuracy.`;
   }
 
   let directnessGuidance = '';
   if (directness <= 25) {
-    directnessGuidance = 'Ultra-concise, dense, and telegraphic. Deliver the bottom-line answer immediately with bulleted points and actionable conclusions. Omit conversational filler, long preambles, and meta-commentary.';
-  } else if (directness <= 70) {
-    directnessGuidance = 'Moderately structured and well-proportioned. Provide clear context, trade-offs, and reasoning depth without unnecessary wordiness.';
+    directnessGuidance = `Concise emphasis (${directness}/100): Deliver bottom-line conclusions, bulleted points, and actionable takeaways immediately. Minimize conversational filler and long preambles.`;
+  } else if (directness <= 74) {
+    directnessGuidance = `Proportionate depth (${directness}/100): Provide clear structure with proportionate context, trade-offs, and reasoning matched to task complexity.`;
   } else {
-    directnessGuidance = 'Exhaustive, comprehensive, and deeply nuanced. Explore second-order consequences, historical and industry analogies, multi-angle implications, and complete explanatory context.';
+    directnessGuidance = `Elaborate depth (${directness}/100): Provide comprehensive analysis exploring second-order consequences, background context, analogies, and detailed nuances.`;
   }
 
   let perspectiveGuidance = '';
   if (perspective <= 25) {
-    perspectiveGuidance = "Rigorous skeptic and devil's advocate. Proactively stress-test assumptions, probe potential failure modes, surface hidden risks, and challenge unsupported optimism.";
-  } else if (perspective <= 70) {
-    perspectiveGuidance = 'Balanced strategic advisor. Objectively weigh potential risks, costs, and viable upsides with neutral equilibrium.';
+    perspectiveGuidance = `Skeptical emphasis (${perspective}/100): Actively probe underlying assumptions, highlight potential failure modes, surface unaddressed risks, and stress-test ideas before endorsement.`;
+  } else if (perspective <= 74) {
+    perspectiveGuidance = `Balanced perspective (${perspective}/100): Maintain an objective equilibrium between upside potential, practical constraints, and evidence-based alternatives.`;
   } else {
-    perspectiveGuidance = 'Visionary and possibility-focused. Emphasize expansive upside, creative leverage, asymmetric opportunities, and ambitious breakthroughs while charting realistic execution steps.';
+    perspectiveGuidance = `Visionary emphasis (${perspective}/100): Focus on expansive opportunities, innovative breakthroughs, creative leverage, and ambitious upside while maintaining realistic execution steps.`;
   }
 
-  return `\n\nDIGITAL TWIN SOUL TUNING & BEHAVIORAL CALIBRATION
-The user has configured explicit cognitive persona calibration weights:
+  return `\n\n======================================================
+DIGITAL TWIN BEHAVIORAL CALIBRATION DIRECTIVE
+======================================================
+The user has configured explicit behavioral calibration weights for this session:
 - Tone [${tone}/100]: ${toneGuidance}
 - Directness [${directness}/100]: ${directnessGuidance}
 - Perspective [${perspective}/100]: ${perspectiveGuidance}
-Strictly reflect these continuous behavioral calibration weights in your linguistic tone, response depth, and analytical posture.`;
+
+OPERATING BOUNDARIES (NON-NEGOTIABLE):
+1. These calibration weights control communicative style and analytical emphasis; they do not prohibit analytical rigor when empathy is emphasized, nor do they prevent creative thinking when skepticism is emphasized.
+2. Under no circumstance do these weights override safety policies, factual truth, verified evidence, or explicit user task constraints.
+3. Explicit user instructions in the current turn take precedence over general persona calibration.`;
 }
 
 export function buildSystemPrompt(
@@ -215,6 +279,7 @@ Use a clear structure appropriate to the complexity of the request. Include reas
     knowledgeDirective,
     identityDirective,
     channelDirective,
+    soulTuningDirective,
     learnedContext,
     calibrationContext,
   ].filter(Boolean).join('');

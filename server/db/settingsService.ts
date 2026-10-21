@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { AppSettings } from '../../src/types/index.ts';
+import { validateSoulTuningInput } from '../../src/prompt/masterPrompt.ts';
 import { neonDb } from './neonService.ts';
 import { maskProviderCredential, normalizeProviderCredential, resolveCredentialSourceForDisplay } from '../services/providerCredentialService.ts';
 
@@ -180,16 +181,12 @@ class SettingsManager {
     if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
     if (isMasked(filteredPatch.telegramToken)) delete filteredPatch.telegramToken;
 
-    if (filteredPatch.soulTuning && typeof filteredPatch.soulTuning === 'object') {
-      const clamp = (val: unknown, fallback: number) => {
-        if (typeof val !== 'number' || !Number.isFinite(val)) return fallback;
-        return Math.max(0, Math.min(100, Math.round(val)));
-      };
-      filteredPatch.soulTuning = {
-        tone: clamp(filteredPatch.soulTuning.tone, this.currentSettings.soulTuning?.tone ?? 50),
-        directness: clamp(filteredPatch.soulTuning.directness, this.currentSettings.soulTuning?.directness ?? 50),
-        perspective: clamp(filteredPatch.soulTuning.perspective, this.currentSettings.soulTuning?.perspective ?? 50),
-      };
+    if ('soulTuning' in filteredPatch) {
+      const validation = validateSoulTuningInput(filteredPatch.soulTuning, this.currentSettings.soulTuning);
+      if (!validation.valid) {
+        throw new Error((validation as { valid: false; error: string }).error);
+      }
+      filteredPatch.soulTuning = validation.config;
     }
 
     const nextSettings: AppSettings = {
@@ -211,6 +208,8 @@ class SettingsManager {
       'telegramMode',
       'telegramWebhookUrl',
       'telegramOwnerId',
+      'telegramOwnerUsername',
+      'telegramPairingCode',
       'soulTuning',
       'webGroundingEnabled',
     ] as const;
@@ -283,6 +282,9 @@ class SettingsManager {
       customTavilyKey: mask(s.customTavilyKey),
       autoPlayVoice: s.autoPlayVoice,
       voiceSpeed: s.voiceSpeed,
+      ttsModel: s.ttsModel || '',
+      soulTuning: s.soulTuning || { tone: 50, directness: 50, perspective: 50 },
+      webGroundingEnabled: Boolean(s.webGroundingEnabled),
       customPrompts: s.customPrompts || [],
       activeThreadId: s.activeThreadId ?? null,
       twilioAccountSid: s.twilioAccountSid || process.env.TWILIO_ACCOUNT_SID || '',

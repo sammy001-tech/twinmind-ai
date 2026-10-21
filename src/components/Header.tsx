@@ -25,6 +25,8 @@ import {
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
 import { useAuthSession } from '../contexts/AuthSessionContext.tsx';
+import { SoulTuningConfig } from '../types/index.ts';
+import { ThinkingModeSelector } from './ThinkingModeSelector.tsx';
 
 interface HeaderProps {
   brandName?: string;
@@ -49,6 +51,8 @@ interface HeaderProps {
   onThemeModeChange: (mode: ThemeMode) => void;
   onProviderChange?: (provider: string) => void;
   onOpenVoiceModal?: () => void;
+  soulTuning?: SoulTuningConfig;
+  onSelectThinkingMode?: (tuning: SoulTuningConfig) => Promise<void> | void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -74,6 +78,8 @@ export const Header: React.FC<HeaderProps> = ({
   onThemeModeChange,
   onProviderChange,
   onOpenVoiceModal,
+  soulTuning,
+  onSelectThinkingMode,
 }) => {
   const displayName = nickname.trim() || userName.trim();
   const authSession = useAuthSession();
@@ -223,8 +229,16 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Right Side: ChatGPT-style Rounded Pill Badge [ Compose (📝) | Options (⋮) ] */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Right Side: Thinking Mode Selector & Action Buttons */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {soulTuning && onSelectThinkingMode && (
+            <ThinkingModeSelector
+              soulTuning={soulTuning}
+              onSelectPreset={onSelectThinkingMode}
+              onOpenSettings={onOpenSettingsModal}
+            />
+          )}
+
           <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800/80 rounded-full px-2 py-1 shadow-xs">
             
             {/* New Chat Button */}
