@@ -24,6 +24,7 @@ import {
   Check,
   ExternalLink,
 } from 'lucide-react';
+import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 
 interface KnowledgeModalProps {
   isOpen: boolean;
@@ -730,9 +731,9 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                           </div>
                         </div>
 
-                        <p className="text-xs text-slate-600 dark:text-slate-300 whitespace-pre-wrap leading-relaxed line-clamp-4">
-                          {doc.content}
-                        </p>
+                        <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-h-48 overflow-y-auto font-sans">
+                          {renderFormattedMarkdown(doc.content)}
+                        </div>
 
                         {doc.tags && doc.tags.length > 0 && (
                           <div className="flex flex-wrap gap-1 pt-1">

@@ -79,9 +79,14 @@ export const ThinkingModeSelector: React.FC<ThinkingModeSelectorProps> = ({
         <ChevronDown className={`w-3 h-3 opacity-60 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
       </button>
 
-      {/* Popover Dropdown */}
+      {/* Mobile Backdrop Overlay & Centered Dropdown Card */}
       {isOpen && (
-        <div className="absolute top-9 left-0 sm:left-auto sm:right-0 w-72 sm:w-84 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-3 z-50 animate-in fade-in zoom-in-95 duration-150">
+        <>
+          <div
+            className="fixed inset-0 bg-black/40 backdrop-blur-xs z-40 sm:hidden"
+            onClick={() => setIsOpen(false)}
+          />
+          <div className="fixed left-3 right-3 top-16 sm:absolute sm:inset-auto sm:top-10 sm:right-0 sm:w-84 max-h-[calc(100dvh-5rem)] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-3 z-50 animate-in fade-in zoom-in-95 duration-150">
           <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100 dark:border-slate-800">
             <div>
               <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
@@ -185,7 +190,8 @@ export const ThinkingModeSelector: React.FC<ThinkingModeSelectorProps> = ({
             )}
           </div>
         </div>
-      )}
+      </>
+    )}
     </div>
   );
 };

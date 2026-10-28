@@ -2,6 +2,7 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import AuthGate from './components/AuthGate.tsx';
 import './index.css';
+import 'katex/dist/katex.min.css';
 
 if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
   try {

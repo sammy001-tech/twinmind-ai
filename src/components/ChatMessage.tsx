@@ -21,6 +21,7 @@ import {
   FileText,
   Pencil,
   FileDown,
+  ChevronDown,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { ArtifactCard } from './ArtifactCard.tsx';
@@ -335,11 +336,10 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]'
           : 'bg-[#075e54] text-[#f0f2f5] border border-[#168c7b]/70 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]';
       }
-      // Web chat: a restrained primary-accent tint distinguishes user content
-      // while keeping the assistant's response on an uncluttered canvas.
+      // Web chat: Soft Cool Blue-Gray Tint matching user's reference design
       return !isDark
-        ? 'bg-amber-50/90 text-slate-900 border border-amber-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]'
-        : 'bg-amber-400/10 text-slate-100 border border-amber-300/15 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-sm max-w-[95%] sm:max-w-[85%]';
+        ? 'bg-[#EEF3FB] text-slate-900 border border-slate-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-xs max-w-[95%] sm:max-w-[85%]'
+        : 'bg-slate-800/85 text-slate-100 border border-slate-700/60 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-xs max-w-[95%] sm:max-w-[85%]';
     } else {
       // Assistant
       if (channel === 'telegram') {
@@ -421,7 +421,18 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
               </div>
             ) : (
               <>
-                {renderFormattedMarkdown(contentView.content)}
+                <div className="relative">
+                  {renderFormattedMarkdown(contentView.content)}
+                  {contentView.canExpand && !contentView.isExpanded && (
+                    <div
+                      className={`pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t ${
+                        isUser
+                          ? 'from-[#EEF3FB] dark:from-slate-800'
+                          : 'from-white dark:from-slate-900'
+                      } to-transparent`}
+                    />
+                  )}
+                </div>
                 {contentView.canExpand && (
                   <button
                     type="button"
@@ -430,10 +441,18 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
                       e.stopPropagation();
                       setIsExpanded((expanded) => !expanded);
                     }}
-                    className="mt-2 inline-flex items-center gap-1 rounded-lg py-1 text-xs font-medium text-amber-600 hover:text-amber-500 dark:text-amber-300 dark:hover:text-amber-200 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/50"
+                    className={`mt-1.5 inline-flex items-center gap-1 rounded-lg py-0.5 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+                      isUser
+                        ? 'text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 focus-visible:ring-blue-500/50'
+                        : 'text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 focus-visible:ring-blue-500/50'
+                    }`}
                   >
-                    <span>{contentView.isExpanded ? 'See less' : 'See more'}</span>
-                    <RefreshCw className={`h-3 w-3 ${contentView.isExpanded ? '-rotate-90' : 'rotate-90'} transition-transform`} />
+                    <span>{contentView.isExpanded ? 'Show less' : 'Show more'}</span>
+                    <ChevronDown
+                      className={`h-3.5 w-3.5 transition-transform duration-200 ${
+                        contentView.isExpanded ? 'rotate-180' : ''
+                      }`}
+                    />
                   </button>
                 )}
               </>

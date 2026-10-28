@@ -23,6 +23,7 @@ import {
   Check,
   BarChart3,
 } from 'lucide-react';
+import { renderFormattedMarkdown, renderInlineMarkdown } from '../utils/markdown.tsx';
 
 export interface DebateRound {
   agent: string;
@@ -490,7 +491,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                       </span>
                       Actual Situation (Facts vs Assumptions)
                     </div>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{analysis.actualSituation}</p>
+                    <div className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{renderFormattedMarkdown(analysis.actualSituation)}</div>
                   </div>
 
                   <div className="p-3.5 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800">
@@ -500,7 +501,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                       </span>
                       What Matters Most
                     </div>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{analysis.whatMattersMost}</p>
+                    <div className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{renderFormattedMarkdown(analysis.whatMattersMost)}</div>
                   </div>
 
                   <div className="p-3.5 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800">
@@ -512,7 +513,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                     </div>
                     <ul className="text-xs text-slate-700 dark:text-slate-300 space-y-1 list-disc list-inside">
                       {analysis.realisticOptions?.map((opt, i) => (
-                        <li key={i}>{opt}</li>
+                        <li key={i}>{renderInlineMarkdown(opt)}</li>
                       ))}
                     </ul>
                   </div>
@@ -524,7 +525,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                       </span>
                       Trade-offs &amp; Resource Costs
                     </div>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{analysis.tradeOffs}</p>
+                    <div className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{renderFormattedMarkdown(analysis.tradeOffs)}</div>
                   </div>
 
                   <div className="p-3.5 rounded-xl bg-red-500/10 dark:bg-red-950/10 border border-red-200 dark:border-red-900/40">
@@ -532,7 +533,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                       <ShieldAlert className="w-3.5 h-3.5 text-red-500 dark:text-red-400" />
                       Principal Risks &amp; Diminishing Returns
                     </div>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{analysis.principalRisks}</p>
+                    <div className="text-xs text-slate-700 dark:text-slate-300 leading-relaxed">{renderFormattedMarkdown(analysis.principalRisks)}</div>
                   </div>
 
                   <div className="p-3.5 rounded-xl bg-emerald-500/10 dark:bg-emerald-950/10 border border-emerald-200 dark:border-emerald-900/40">
@@ -540,9 +541,9 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                       <Lightbulb className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
                       Recommended Course of Action
                     </div>
-                    <p className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed font-medium">
-                      {analysis.recommendedAction}
-                    </p>
+                    <div className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed font-medium">
+                      {renderFormattedMarkdown(analysis.recommendedAction)}
+                    </div>
                   </div>
                 </div>
 
@@ -551,13 +552,13 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                     <Target className="w-4 h-4 text-amber-500 dark:text-amber-400" />
                     Next Practical Step (Immediate Execution)
                   </div>
-                  <p className="text-xs md:text-sm text-slate-900 dark:text-slate-100 font-semibold leading-relaxed">
-                    {analysis.nextPracticalStep}
-                  </p>
+                  <div className="text-xs md:text-sm text-slate-900 dark:text-slate-100 font-semibold leading-relaxed">
+                    {renderFormattedMarkdown(analysis.nextPracticalStep)}
+                  </div>
                   {analysis.clarifyingQuestion && (
-                    <p className="mt-2 text-xs text-amber-800 dark:text-amber-200/90 italic border-t border-amber-300 dark:border-amber-500/20 pt-2">
-                      💡 Clarifying Question: {analysis.clarifyingQuestion}
-                    </p>
+                    <div className="mt-2 text-xs text-amber-800 dark:text-amber-200/90 italic border-t border-amber-300 dark:border-amber-500/20 pt-2 flex items-center gap-1">
+                      <span>💡 Clarifying Question:</span> {renderInlineMarkdown(analysis.clarifyingQuestion)}
+                    </div>
                   )}
                 </div>
 
@@ -574,7 +575,7 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                     </div>
                     <ul className="text-xs text-slate-700 dark:text-slate-300 space-y-1 list-disc list-inside leading-relaxed">
                       {analysis.challengerCritique.points.map((pt, idx) => (
-                        <li key={idx}>{pt}</li>
+                        <li key={idx}>{renderInlineMarkdown(pt)}</li>
                       ))}
                     </ul>
                   </div>
@@ -811,42 +812,8 @@ export const DecisionAnalyzerModal: React.FC<DecisionAnalyzerModalProps> = ({
                           </span>
                         </div>
 
-                        <div className="text-xs sm:text-[13px] text-slate-800 dark:text-slate-200 leading-relaxed whitespace-pre-line font-sans">
-                          {round.text.split(/(\[(?:Verified|Inferred|Hypothesis|Unknown)\])/g).map((part, idx) => {
-                            if (part === '[Verified]') {
-                              return (
-                                <span key={idx} className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 text-[10px] font-bold rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30">
-                                  <Check className="w-3 h-3 text-emerald-500" />
-                                  Verified
-                                </span>
-                              );
-                            }
-                            if (part === '[Inferred]') {
-                              return (
-                                <span key={idx} className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 text-[10px] font-bold rounded bg-sky-500/15 text-sky-700 dark:text-sky-300 border border-sky-500/30">
-                                  <Sparkles className="w-3 h-3 text-sky-500" />
-                                  Inferred
-                                </span>
-                              );
-                            }
-                            if (part === '[Hypothesis]') {
-                              return (
-                                <span key={idx} className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 text-[10px] font-bold rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                                  <Lightbulb className="w-3 h-3 text-amber-500" />
-                                  Hypothesis
-                                </span>
-                              );
-                            }
-                            if (part === '[Unknown]') {
-                              return (
-                                <span key={idx} className="inline-flex items-center gap-1 mx-1 px-1.5 py-0.5 text-[10px] font-bold rounded bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30">
-                                  <AlertCircle className="w-3 h-3 text-rose-500" />
-                                  Unknown
-                                </span>
-                              );
-                            }
-                            return part;
-                          })}
+                        <div className="text-xs sm:text-[13px] text-slate-800 dark:text-slate-200 leading-relaxed font-sans">
+                          {renderFormattedMarkdown(round.text)}
                         </div>
 
                         {/* Icon-Only Action Row matching ChatGPT style */}

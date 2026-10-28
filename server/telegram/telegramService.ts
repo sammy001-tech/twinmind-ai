@@ -27,6 +27,7 @@ import {
 } from '../services/telegramConfigService.ts';
 import type { AppSettings } from '../../src/types/index.ts';
 import { pcmToWav } from '../services/audioGenerationService.ts';
+import { formatLatexToUnicodeMath } from '../../src/utils/mathTextFormatter.ts';
 
 export interface TelegramConfig {
   token: string;
@@ -1478,7 +1479,8 @@ class TelegramBotManager {
   }
 
   private async replyLongText(ctx: any, text: string, options: Record<string, unknown> = {}): Promise<void> {
-    const chunks = splitChannelMessage(text, 'telegram');
+    const formattedText = formatLatexToUnicodeMath(text);
+    const chunks = splitChannelMessage(formattedText, 'telegram');
     if (chunks.length === 0) throw new Error('TELEGRAM_OUTPUT_EMPTY: no usable reply text was generated');
     if (this.config.ownerId === null) throw new Error('TELEGRAM_OWNER_ID_REQUIRED: cannot persist an unpaired Telegram reply');
 
@@ -1488,7 +1490,7 @@ class TelegramBotManager {
       channel: 'telegram',
       externalIdentity: this.config.ownerId,
       role: 'assistant',
-      content: text,
+      content: formattedText,
       ...(this.config.activeProvider ? { provider: this.config.activeProvider } : {}),
       ...(this.config.activeModel ? { model: this.config.activeModel } : {}),
       deliveryStatus: 'pending',
@@ -1520,7 +1522,7 @@ class TelegramBotManager {
       this.syncedMessages.unshift({
         id: `tg-${randomUUID()}`,
         sender: 'assistant',
-        text,
+        text: formattedText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       });
       if (this.syncedMessages.length > 50) this.syncedMessages.pop();

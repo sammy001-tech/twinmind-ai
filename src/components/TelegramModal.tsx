@@ -18,6 +18,7 @@ import {
   MessageSquare,
   Key,
 } from 'lucide-react';
+import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 
 interface TelegramStatus {
   isRunning: boolean;
@@ -728,15 +729,17 @@ export const TelegramModal: React.FC<TelegramModalProps> = ({
                         key={msg.id}
                         className={`p-2.5 rounded-xl text-xs ${
                           msg.sender === 'user'
-                            ? 'bg-slate-800 ml-6 text-white'
-                            : 'bg-indigo-950/40 border border-indigo-500/20 mr-6 text-slate-200'
+                            ? 'bg-[#EEF3FB] dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/60 ml-6 text-slate-900 dark:text-slate-100 shadow-xs'
+                            : 'bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 mr-6 text-slate-800 dark:text-slate-200 shadow-xs'
                         }`}
                       >
                         <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
                           <span>{msg.sender === 'user' ? `${displayName || 'Owner'} (Telegram)` : `${brandName} (Telegram)`}</span>
                           <span>{msg.timestamp}</span>
                         </div>
-                        <p className="text-xs leading-relaxed">{msg.text}</p>
+                        <div className="text-xs leading-relaxed font-sans">
+                          {renderFormattedMarkdown(msg.text)}
+                        </div>
                       </div>
                     ))}
                   </div>

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import { ChatMessage, ChannelType } from '../types/index.ts';
+import { formatLatexToUnicodeMath } from '../utils/mathTextFormatter.ts';
 
 interface ChatExportModalProps {
   isOpen: boolean;
@@ -117,7 +118,8 @@ export const ChatExportModal: React.FC<ChatExportModalProps> = ({
 
         doc.setFontSize(9);
         doc.setFont('helvetica', 'normal');
-        const textLines = doc.splitTextToSize(msg.content, contentWidth - 10);
+        const cleanContent = formatLatexToUnicodeMath(msg.content);
+        const textLines = doc.splitTextToSize(cleanContent, contentWidth - 10);
         const cardHeight = Math.max(16, textLines.length * 4.6 + 12);
 
         checkPageBreak(cardHeight + 4);
@@ -294,13 +296,14 @@ export const ChatExportModal: React.FC<ChatExportModalProps> = ({
               .map((m) => {
                 const isUser = m.role === 'user';
                 const modelTag = m.modelInfo?.model ? ` [${m.modelInfo.provider}: ${m.modelInfo.model}]` : '';
+                const cleanContent = formatLatexToUnicodeMath(m.content);
                 return `
                 <div class="message ${isUser ? 'user' : 'twin'}">
                   <div class="sender-line">
                     <span>${isUser ? '👤 ' + (userName || 'User') : `💡 ${brandName} (Digital Twin)`}${modelTag}</span>
                     <span class="timestamp">${m.timestamp || ''}</span>
                   </div>
-                  <div class="content">${m.content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+                  <div class="content">${cleanContent.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
                 </div>
               `;
               })
