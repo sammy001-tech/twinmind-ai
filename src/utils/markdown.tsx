@@ -219,9 +219,9 @@ function renderAstTokens(tokens: Token[] | undefined, prefix = 'tok'): React.Rea
       case 'blockquote': {
         const bToken = token as Tokens.Blockquote;
         nodes.push(
-          <blockquote key={key} className="border-l-4 border-amber-500/60 pl-3 my-2 italic text-slate-700 dark:text-slate-300">
+          <div key={key} className="my-3.5 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3.5 sm:p-4 text-slate-800 dark:text-slate-100 shadow-xs backdrop-blur-xs leading-relaxed">
             {renderAstTokens(bToken.tokens, `${key}-bq`)}
-          </blockquote>
+          </div>
         );
         break;
       }

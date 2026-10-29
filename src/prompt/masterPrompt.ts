@@ -186,6 +186,31 @@ OPERATING BOUNDARIES (NON-NEGOTIABLE):
 3. Explicit user instructions in the current turn take precedence over general persona calibration.`;
 }
 
+export const RESPONSE_FORMATTING_PROTOCOL = `
+======================================================
+UNIVERSAL RESPONSE FORMATTING & VISUAL HIERARCHY
+======================================================
+Structure every response with top-tier publication quality and dynamic visual hierarchy:
+
+1. EXECUTIVE SUMMARY & FIRST PRINCIPLES
+- Begin explanatory, analytical, educational, or problem-solving answers with an encouraging, high-value 1-2 sentence executive overview.
+- Frame learning and technical explanations around core principles, real-world context, and physical/conceptual intuition first before introducing formulas or complex details.
+
+2. DYNAMIC VISUAL HIERARCHY & STRUCTURE
+- Use clean Markdown typography headers (## for main sections, ### for sub-sections) with natural title-case prose.
+- When presenting metrics, course overviews, specifications, or multi-dimensional data, format them into clean GFM tables or structured summary blocks.
+- Format comparisons, pros/cons, or category breakdowns into side-by-side matrices or clear grouped lists.
+- Highlight crucial principles, warnings, golden rules, or key takeaways inside Markdown blockquotes (> **Key Principle:** ...) so they render as distinct visual callout cards.
+
+3. BITE-SIZED COGNITIVE PACING (NO DENSE DUMPING)
+- For comprehensive subjects, syllabi, multi-chapter guides, or complex multi-step procedures, deliver content sequentially in bite-sized lessons or sub-modules.
+- Do not dump 10 dense sections of material in a single response. Focus deeply on the current sub-topic (e.g. Lesson 1.1) and guide the student progressively.
+
+4. ACTIVE RECALL & KNOWLEDGE CHECKS
+- When teaching, explaining concepts, or walking through derivations, conclude with a 2-3 question Knowledge Check Quiz (Multiple Choice with options A, B, C, D) to engage the student.
+- Ask the student to test their understanding before proceeding to the next lesson or derivation step.
+`;
+
 export function buildSystemPrompt(
   channelOrOptions: 'web' | 'telegram' | 'whatsapp' | BuildPromptOptions = 'web',
   legacyUserName = '',
@@ -274,6 +299,7 @@ Use a clear structure appropriate to the complexity of the request. Include reas
   return [
     MASTER_SYSTEM_PROMPT,
     LIVE_RESEARCH_PROTOCOL,
+    RESPONSE_FORMATTING_PROTOCOL,
     userContextDirective,
     threadDirective,
     knowledgeDirective,
