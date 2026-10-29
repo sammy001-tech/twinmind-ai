@@ -11,6 +11,11 @@ export interface MessageContentView {
   isExpanded: boolean;
 }
 
+export interface PresentationOptions {
+  channel?: 'web' | 'telegram' | 'whatsapp';
+  customLimit?: number;
+}
+
 /**
  * Finds a safe cut position that does not break in the middle of a LaTeX math block ($$ or $)
  */
@@ -41,17 +46,33 @@ export function findSafeMathSliceIndex(text: string, limit: number): number {
 }
 
 /**
- * Dynamically determines presentation content view for any message.
- * Purges all hardcoded role checks: any message (user, assistant, or system) is evaluated
- * dynamically based on runtime content length, line structure, and active parameters.
+ * Determines presentation content view for a message based on channel and content structure:
+ * - On Web theme: Assistant messages NEVER collapse (providing full, continuous reading canvas).
+ *   User messages on Web (especially on mobile screens) DO collapse when long, displaying
+ *   the soft ice-blue gradient fade and blue 'Show more' / 'Show less' chevron toggle.
+ * - On Telegram & WhatsApp: Both user and assistant messages collapse when long to maintain
+ *   compact mobile messaging bubbles.
+ * - Streaming text is never hidden behind a preview.
  */
 export function getMessageContentView(
   content: string,
-  _role?: string,
+  role?: string,
   expanded = false,
   isStreaming = false,
-  customLimit?: number,
+  options?: number | PresentationOptions,
 ): MessageContentView {
+  const customLimit = typeof options === 'number' ? options : options?.customLimit;
+  const channel = typeof options === 'object' ? options?.channel : undefined;
+
+  // Rule 1: On Web theme, assistant responses always remain fully expanded without truncation
+  if (channel === 'web' && role === 'assistant') {
+    return {
+      content,
+      canExpand: false,
+      isExpanded: false,
+    };
+  }
+
   const previewLimit = Number.isFinite(customLimit) && customLimit! > 0
     ? customLimit!
     : DEFAULT_DYNAMIC_PREVIEW_LIMIT;
@@ -60,7 +81,7 @@ export function getMessageContentView(
   const exceedsLineThreshold = lines.length > DEFAULT_DYNAMIC_MAX_LINES;
   const exceedsCharThreshold = content.length > previewLimit;
 
-  // Dynamically evaluate expansion capability without role discrimination
+  // Evaluates expansion capability: true when not streaming and threshold is exceeded
   const canExpand = !isStreaming && (exceedsCharThreshold || exceedsLineThreshold);
   const isExpanded = canExpand && expanded;
 

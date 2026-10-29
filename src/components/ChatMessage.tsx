@@ -321,6 +321,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     message.role,
     isExpanded,
     isStreaming,
+    { channel },
   );
 
   // Channel-tailored style mapping while maintaining UNIFIED features across Light and Dark modes

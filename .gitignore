@@ -3,9 +3,39 @@ build/
 dist/
 coverage/
 .DS_Store
+Thumbs.db
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment and sensitive settings
 .env*
 !.env.example
 twin-settings.json
 *.settings.json
+
+# Temporary files and backup artifacts
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+tmp/
+temp/
+
+# AI Studio media artifacts and prompt attachments
+public/assets/aistudio/
+public/assets/uploads/
+public/assets/temp/
+.aistudio/
+**/.tempmediaStorage/
+**/.tempMediaStorage/
+artifacts/
+
+# Alternative lockfiles
+bun.lock
+bun.lockb
+yarn.lock
+pnpm-lock.yaml
 

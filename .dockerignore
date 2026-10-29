@@ -11,3 +11,10 @@ npm-debug.log*
 !.env.example
 twin-settings.json
 *.settings.json
+.aistudio
+public/assets/aistudio
+**/.tempmediaStorage
+artifacts
+*.tmp
+*.temp
+bun.lock

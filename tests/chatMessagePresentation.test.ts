@@ -6,40 +6,53 @@ import {
   DEFAULT_DYNAMIC_PREVIEW_LIMIT,
 } from '../src/utils/chatMessagePresentation.ts';
 
-test('dynamic resolution evaluates user and assistant messages identically without role discrimination', () => {
+test('on web channel: assistant messages never collapse, while user messages remain collapsible', () => {
+  const longText = 'A long message with lots of detailed information. '.repeat(20);
+
+  // Assistant on web channel is NEVER truncated or collapsed
+  const webAssistant = getMessageContentView(longText, 'assistant', false, false, { channel: 'web' });
+  assert.equal(webAssistant.canExpand, false);
+  assert.equal(webAssistant.isExpanded, false);
+  assert.equal(webAssistant.content, longText);
+
+  // User on web channel (e.g. mobile screen) IS collapsible
+  const webUser = getMessageContentView(longText, 'user', false, false, { channel: 'web' });
+  assert.equal(webUser.canExpand, true);
+  assert.equal(webUser.isExpanded, false);
+  assert.ok(webUser.content.endsWith('…'));
+
+  // User on web expands cleanly
+  const webUserExpanded = getMessageContentView(longText, 'user', true, false, { channel: 'web' });
+  assert.equal(webUserExpanded.canExpand, true);
+  assert.equal(webUserExpanded.isExpanded, true);
+  assert.equal(webUserExpanded.content, longText);
+});
+
+test('on telegram and whatsapp channels: both user and assistant messages are collapsible', () => {
+  const longText = 'A long chat bubble message for mobile messaging apps. '.repeat(20);
+
+  for (const channel of ['telegram', 'whatsapp'] as const) {
+    const assistantView = getMessageContentView(longText, 'assistant', false, false, { channel });
+    assert.equal(assistantView.canExpand, true);
+    assert.equal(assistantView.isExpanded, false);
+
+    const userView = getMessageContentView(longText, 'user', false, false, { channel });
+    assert.equal(userView.canExpand, true);
+    assert.equal(userView.isExpanded, false);
+  }
+});
+
+test('short messages remain fully visible without expansion toggle across all channels', () => {
   const shortText = 'Short message that stays fully visible.';
-  const longText = 'Dynamic prompt or response content '.repeat(20);
-
-  // Both user and assistant short messages are not expanded
-  assert.equal(getMessageContentView(shortText, 'user', false).canExpand, false);
-  assert.equal(getMessageContentView(shortText, 'assistant', false).canExpand, false);
-
-  // Both user and assistant long messages dynamically resolve canExpand = true
-  const userView = getMessageContentView(longText, 'user', false);
-  const assistantView = getMessageContentView(longText, 'assistant', false);
-
-  assert.equal(userView.canExpand, true);
-  assert.equal(assistantView.canExpand, true);
-  assert.equal(userView.isExpanded, false);
-  assert.equal(assistantView.isExpanded, false);
-  assert.ok(userView.content.endsWith('…'));
-  assert.ok(assistantView.content.endsWith('…'));
+  assert.equal(getMessageContentView(shortText, 'user', false, false, { channel: 'web' }).canExpand, false);
+  assert.equal(getMessageContentView(shortText, 'assistant', false, false, { channel: 'web' }).canExpand, false);
+  assert.equal(getMessageContentView(shortText, 'user', false, false, { channel: 'telegram' }).canExpand, false);
+  assert.equal(getMessageContentView(shortText, 'assistant', false, false, { channel: 'whatsapp' }).canExpand, false);
 });
 
-test('dynamically expands any message regardless of role when expanded is true', () => {
-  const longText = 'Expanded message content '.repeat(20);
-  const userExpanded = getMessageContentView(longText, 'user', true);
-  const assistantExpanded = getMessageContentView(longText, 'assistant', true);
-
-  assert.equal(userExpanded.isExpanded, true);
-  assert.equal(userExpanded.content, longText);
-  assert.equal(assistantExpanded.isExpanded, true);
-  assert.equal(assistantExpanded.content, longText);
-});
-
-test('dynamically triggers expansion based on multi-line count threshold', () => {
+test('dynamically triggers expansion based on multi-line count threshold for collapsible messages', () => {
   const multiLineContent = 'Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7';
-  const view = getMessageContentView(multiLineContent, 'user', false);
+  const view = getMessageContentView(multiLineContent, 'user', false, false, { channel: 'web' });
   assert.equal(view.canExpand, true);
   assert.equal(view.isExpanded, false);
   assert.ok(view.content.includes('Line 5'));
@@ -56,7 +69,7 @@ test('findSafeMathSliceIndex preserves closing LaTeX math delimiters', () => {
 
 test('does not truncate streaming content before response completes', () => {
   const content = 'Live streamed content '.repeat(50);
-  const view = getMessageContentView(content, 'assistant', false, true);
+  const view = getMessageContentView(content, 'assistant', false, true, { channel: 'telegram' });
   assert.equal(view.canExpand, false);
   assert.equal(view.content, content);
 });

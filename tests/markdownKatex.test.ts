@@ -102,3 +102,98 @@ test('renderInlineMarkdown renders epistemic badges alongside math equations', (
   assert.equal(hasMath, true, 'Math formula must render alongside the badge');
 });
 
+test('renderFormattedMarkdown parses level 4 headings (####) as styled heading elements', () => {
+  const markdown = '#### 1. Identify and differentiate the inside';
+  const elements = renderFormattedMarkdown(markdown);
+  assert.equal(elements.length, 1);
+
+  const headingEl = elements[0] as React.ReactElement;
+  assert.equal(headingEl.type, 'h5', 'Markdown #### must render as an h5 element');
+  assert.ok(
+    (headingEl.props as any)?.className?.includes('font-bold'),
+    'Heading element must have bold styling class'
+  );
+});
+
+test('renderFormattedMarkdown parses nested math inside bold (**Inside function $g(x)$:**)', () => {
+  const markdown = '**Inside function $g(x)$:** $4x^2 - 5x + 2$';
+  const elements = renderFormattedMarkdown(markdown);
+  assert.equal(elements.length, 1);
+
+  const paragraphEl = elements[0] as React.ReactElement;
+  const children = React.Children.toArray((paragraphEl.props as any).children) as React.ReactElement[];
+  
+  // Find the strong element
+  const strongEl = children.find((c) => c.type === 'strong');
+  assert.ok(strongEl, 'Bold wrapper must exist');
+
+  // Verify strong element contains a KaTeX rendered math span
+  const strongChildren = React.Children.toArray((strongEl.props as any).children) as React.ReactElement[];
+  const mathInBold = strongChildren.find(
+    (c) => React.isValidElement(c) && (c.props as any)?.dangerouslySetInnerHTML?.__html?.includes('katex')
+  );
+  assert.ok(mathInBold, 'Math formula $g(x)$ must be rendered as KaTeX inside the bold tag');
+});
+
+test('renderFormattedMarkdown renders math numerals ($2$, $0$, ($6$), ($3$)) and equations ($g\'(x) = 8x - 5$)', () => {
+  const sample = [
+    '• Derivative of the constant $2$ is $0$',
+    '• So, $g\'(x) = 8x - 5$',
+    'You bring the exponent ($6$) down and multiply by ($3$)',
+  ].join('\n');
+
+  const elements = renderFormattedMarkdown(sample);
+  assert.ok(elements.length >= 1);
+
+  // Recursively collect all elements with KaTeX
+  const collectKaTeX = (nodes: any[]): any[] => {
+    const list: any[] = [];
+    for (const node of nodes) {
+      if (React.isValidElement(node)) {
+        if ((node.props as any)?.dangerouslySetInnerHTML?.__html?.includes('katex')) {
+          list.push(node);
+        }
+        if ((node.props as any)?.children) {
+          list.push(...collectKaTeX(React.Children.toArray((node.props as any).children)));
+        }
+      }
+    }
+    return list;
+  };
+
+  const allMath = collectKaTeX(elements);
+  // Expected KaTeX math: $2$, $0$, $g'(x) = 8x - 5$, $6$, $3$ (total 5)
+  assert.equal(allMath.length, 5, 'All 5 math instances ($2$, $0$, equation, $6$, $3$) must render as KaTeX');
+});
+
+test('renderFormattedMarkdown never renders a div inside a p tag (hydration safety)', () => {
+  const samples = [
+    'A paragraph with display math:\n$$g(x) = 4x^2 - 5x + 2$$\nand trailing text.',
+    'A paragraph with code:\n```js\nconsole.log(1);\n```',
+    'Plain text paragraph without math.',
+  ];
+
+  for (const sample of samples) {
+    const elements = renderFormattedMarkdown(sample);
+    
+    // Recursively check that no <p> element has a <div> descendant
+    const assertNoDivInP = (node: any, insideP = false) => {
+      if (!React.isValidElement(node)) return;
+      
+      const isP = node.type === 'p';
+      if (insideP && node.type === 'div') {
+        assert.fail(`Found <div> descendant inside <p> tag in markdown output for: ${sample}`);
+      }
+      
+      if ((node.props as any)?.children) {
+        React.Children.forEach((node.props as any).children, (child) => {
+          assertNoDivInP(child, insideP || isP);
+        });
+      }
+    };
+
+    elements.forEach((el) => assertNoDivInP(el, false));
+  }
+});
+
+
