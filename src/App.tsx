@@ -312,6 +312,8 @@ export default function App() {
             processingStatus: resolveMessageProcessingStatus(m.metadata?.processingStatus),
             modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
+            imageData: m.metadata?.imageData || undefined,
+            audioUrl: m.metadata?.audioUrl || undefined,
           }));
           pendingThreadRestoreRef.current = threadId;
           setMessages(loaded);
@@ -435,7 +437,7 @@ export default function App() {
       }).catch(() => {});
     }
 
-    await handleSendMessage(newContent, false, undefined, truncated);
+    await handleSendMessage(newContent, false, undefined, truncated, undefined, targetMsg?.imageData);
   };
 
   const handleDeleteMessage = async (messageId: string) => {

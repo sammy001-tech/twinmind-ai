@@ -1176,14 +1176,29 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     let assistantDbId: number | undefined;
 
     const lastUserMsgToSave = messages[messages.length - 1];
-    if (lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData)) {
+    if (lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData || lastUserMsgToSave.audioData)) {
       try {
+        const metadata: Record<string, unknown> = {};
+        if (lastUserMsgToSave.imageData) {
+          metadata.hasImage = true;
+          metadata.mimeType = lastUserMsgToSave.imageData.mimeType;
+          metadata.imageData = {
+            mimeType: lastUserMsgToSave.imageData.mimeType,
+            data: lastUserMsgToSave.imageData.data,
+            name: lastUserMsgToSave.imageData.name,
+          };
+        }
+        if (lastUserMsgToSave.audioData) {
+          metadata.hasAudio = true;
+          metadata.audioData = lastUserMsgToSave.audioData;
+        }
+
         userDbId = await neonDb.saveMessage({
           session_id: effectiveThreadId,
           channel: (channel as 'web' | 'telegram' | 'whatsapp') || 'web',
           role: 'user',
           content: typeof lastUserMsgToSave.content === 'string' ? lastUserMsgToSave.content : '',
-          metadata: lastUserMsgToSave.imageData ? { hasImage: true, mimeType: lastUserMsgToSave.imageData.mimeType } : undefined,
+          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
           provider: targetProvider,
           model: targetModel,
         });
