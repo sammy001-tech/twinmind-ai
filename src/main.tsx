@@ -3,6 +3,7 @@ import App from './App.tsx';
 import AuthGate from './components/AuthGate.tsx';
 import './index.css';
 import 'katex/dist/katex.min.css';
+import 'highlight.js/styles/atom-one-dark.css';
 
 if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
   try {

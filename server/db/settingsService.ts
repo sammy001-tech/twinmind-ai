@@ -63,21 +63,41 @@ class SettingsManager {
         const raw = fs.readFileSync(SETTINGS_FILE_PATH, 'utf-8');
         const diskSettings = JSON.parse(raw);
         if (diskSettings && typeof diskSettings === 'object') {
+          const diskModels = (diskSettings.providerModels && typeof diskSettings.providerModels === 'object')
+            ? (diskSettings.providerModels as Record<string, string | undefined>)
+            : {};
+
+          const mergedProviderModels = {
+            gemini: (typeof diskModels.gemini === 'string' && diskModels.gemini.trim())
+              || this.currentSettings.providerModels?.gemini
+              || '',
+            groq: (typeof diskModels.groq === 'string' && diskModels.groq.trim())
+              || this.currentSettings.providerModels?.groq
+              || '',
+            mistral: (typeof diskModels.mistral === 'string' && diskModels.mistral.trim())
+              || this.currentSettings.providerModels?.mistral
+              || '',
+          };
+
+          const activeProvider = (typeof diskSettings.activeProvider === 'string' && diskSettings.activeProvider.trim())
+            ? diskSettings.activeProvider
+            : this.currentSettings.activeProvider;
+
+          let activeModel = (typeof diskSettings.activeModel === 'string' && diskSettings.activeModel.trim())
+            ? diskSettings.activeModel
+            : this.currentSettings.activeModel;
+
+          if (!activeModel && activeProvider) {
+            activeModel = mergedProviderModels[activeProvider as keyof typeof mergedProviderModels] || '';
+          }
+
           this.currentSettings = {
             ...this.currentSettings,
             ...diskSettings,
-            providerModels: {
-              ...this.currentSettings.providerModels,
-              ...(diskSettings.providerModels || {}),
-            },
+            activeProvider,
+            activeModel,
+            providerModels: mergedProviderModels,
           };
-          // Ensure activeModel matches current provider if not explicitly set
-          if (!this.currentSettings.activeModel) {
-            const prov = this.currentSettings.activeProvider;
-            this.currentSettings.activeModel = prov
-              ? (this.currentSettings.providerModels[prov as keyof typeof this.currentSettings.providerModels] || '')
-              : '';
-          }
         }
       }
     } catch (err) {
@@ -125,18 +145,56 @@ class SettingsManager {
       const dbSettings = await neonDb.getSettings();
       if (dbSettings && typeof dbSettings === 'object') {
         const typedDb = dbSettings as unknown as Partial<AppSettings>;
+        const dbModels = (typedDb.providerModels && typeof typedDb.providerModels === 'object')
+          ? (typedDb.providerModels as Record<string, string | undefined>)
+          : {};
+
+        // Merge provider models preserving non-empty models from memory/disk if DB has empty string
+        const mergedProviderModels = {
+          gemini: (typeof dbModels.gemini === 'string' && dbModels.gemini.trim())
+            || this.currentSettings.providerModels?.gemini
+            || '',
+          groq: (typeof dbModels.groq === 'string' && dbModels.groq.trim())
+            || this.currentSettings.providerModels?.groq
+            || '',
+          mistral: (typeof dbModels.mistral === 'string' && dbModels.mistral.trim())
+            || this.currentSettings.providerModels?.mistral
+            || '',
+        };
+
+        const activeProvider = (typeof typedDb.activeProvider === 'string' && typedDb.activeProvider.trim())
+          ? typedDb.activeProvider
+          : this.currentSettings.activeProvider;
+
+        let activeModel = (typeof typedDb.activeModel === 'string' && typedDb.activeModel.trim())
+          ? typedDb.activeModel
+          : this.currentSettings.activeModel;
+
+        if (!activeModel && activeProvider) {
+          activeModel = mergedProviderModels[activeProvider as keyof typeof mergedProviderModels] || '';
+        }
+
         this.currentSettings = {
           ...this.currentSettings,
           ...typedDb,
-          providerModels: {
-            ...this.currentSettings.providerModels,
-            ...(typedDb.providerModels || {}),
-          },
+          activeProvider,
+          activeModel,
+          providerModels: mergedProviderModels,
         };
-        if (typedDb.activeModel) {
-          this.currentSettings.activeModel = typedDb.activeModel;
-        }
+
         this.saveToDisk();
+
+        // If in-memory settings had models that database was missing, sync back to database
+        const dbNeedsUpdate =
+          (!dbModels.gemini && Boolean(mergedProviderModels.gemini)) ||
+          (!dbModels.groq && Boolean(mergedProviderModels.groq)) ||
+          (!dbModels.mistral && Boolean(mergedProviderModels.mistral)) ||
+          (!typedDb.activeProvider && Boolean(activeProvider)) ||
+          (!typedDb.activeModel && Boolean(activeModel));
+
+        if (dbNeedsUpdate) {
+          await neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>);
+        }
       }
     } catch (err) {
       console.warn('[SettingsManager] Could not sync settings from Neon DB:', err);
@@ -148,25 +206,42 @@ class SettingsManager {
    * Atomic update of settings across Memory, Disk, and Neon DB
    */
   public async updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+    const rawPatchModels = (patch.providerModels && typeof patch.providerModels === 'object')
+      ? (patch.providerModels as Record<string, string | undefined>)
+      : {};
+
     const updatedProviderModels = {
-      ...this.currentSettings.providerModels,
-      ...(patch.providerModels || {}),
+      gemini: (typeof rawPatchModels.gemini === 'string' && rawPatchModels.gemini.trim())
+        || (patch.providerModels && 'gemini' in patch.providerModels ? patch.providerModels.gemini : this.currentSettings.providerModels?.gemini)
+        || '',
+      groq: (typeof rawPatchModels.groq === 'string' && rawPatchModels.groq.trim())
+        || (patch.providerModels && 'groq' in patch.providerModels ? patch.providerModels.groq : this.currentSettings.providerModels?.groq)
+        || '',
+      mistral: (typeof rawPatchModels.mistral === 'string' && rawPatchModels.mistral.trim())
+        || (patch.providerModels && 'mistral' in patch.providerModels ? patch.providerModels.mistral : this.currentSettings.providerModels?.mistral)
+        || '',
     };
 
     // If an activeModel was specified for a specific provider
-    if (patch.activeModel) {
+    if (typeof patch.activeModel === 'string' && patch.activeModel.trim()) {
       const targetProvider = patch.activeProvider || this.currentSettings.activeProvider;
       if (targetProvider === 'gemini' || targetProvider === 'groq' || targetProvider === 'mistral') {
-        updatedProviderModels[targetProvider] = patch.activeModel;
+        updatedProviderModels[targetProvider] = patch.activeModel.trim();
       }
     }
 
-    // If activeProvider changed but activeModel was not provided, sync activeModel from providerModels
-    let activeModel = patch.activeModel || this.currentSettings.activeModel;
-    if (patch.activeProvider && !patch.activeModel) {
-      const prov = patch.activeProvider;
-      if (prov === 'gemini' || prov === 'groq' || prov === 'mistral') {
-        activeModel = updatedProviderModels[prov] || activeModel;
+    const activeProvider = (typeof patch.activeProvider === 'string' && patch.activeProvider.trim())
+      ? patch.activeProvider
+      : this.currentSettings.activeProvider;
+
+    // If activeProvider changed or is set, resolve activeModel
+    let activeModel = typeof patch.activeModel === 'string' && patch.activeModel.trim()
+      ? patch.activeModel.trim()
+      : this.currentSettings.activeModel;
+
+    if (activeProvider && !activeModel) {
+      if (activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral') {
+        activeModel = updatedProviderModels[activeProvider] || '';
       }
     }
 
@@ -192,10 +267,14 @@ class SettingsManager {
     const nextSettings: AppSettings = {
       ...this.currentSettings,
       ...filteredPatch,
+      ...(activeProvider ? { activeProvider } : {}),
       activeModel,
       providerModels: updatedProviderModels,
     };
     const durableFields = [
+      'activeProvider',
+      'activeModel',
+      'providerModels',
       'customGeminiKey',
       'customGroqKey',
       'customMistralKey',

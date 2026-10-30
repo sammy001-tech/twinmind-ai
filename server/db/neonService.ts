@@ -1243,6 +1243,24 @@ class NeonDatabaseService {
   }
 
   /**
+   * Delete messages in a thread from a specific message ID onward (inclusive or exclusive)
+   */
+  public async pruneThreadMessages(threadId: string, fromMessageId: number, inclusive = true): Promise<number> {
+    if (!this.pool || !this.isConnected || !Number.isSafeInteger(fromMessageId)) return 0;
+    try {
+      const operator = inclusive ? '>=' : '>';
+      const res = await this.pool.query(
+        `DELETE FROM conversations WHERE session_id = $1 AND id ${operator} $2 RETURNING id;`,
+        [threadId, fromMessageId]
+      );
+      return res.rowCount ?? 0;
+    } catch (err) {
+      console.error('[NeonDB] Error pruning thread messages:', err);
+      return 0;
+    }
+  }
+
+  /**
    * Edit/update a message content
    */
   public async updateMessage(messageId: number | string, newContent: string, sessionId?: string): Promise<boolean> {
@@ -2027,7 +2045,8 @@ class NeonDatabaseService {
    * Persist unified application & brain settings
    */
   public async saveSettings(settings: Record<string, unknown>): Promise<boolean> {
-    if (!this.pool || !this.isConnected) return false;
+    const connected = await this.ensureConnected();
+    if (!connected || !this.pool || !this.isConnected) return false;
 
     try {
       await this.pool.query(
@@ -2048,7 +2067,8 @@ class NeonDatabaseService {
    * Retrieve unified application & brain settings
    */
   public async getSettings(): Promise<Record<string, unknown> | null> {
-    if (!this.pool || !this.isConnected) return null;
+    const connected = await this.ensureConnected();
+    if (!connected || !this.pool || !this.isConnected) return null;
 
     try {
       const res = await this.pool.query(

@@ -196,11 +196,17 @@ export default function App() {
   // Synchronize any setting change directly to Neon PostgreSQL database via /api/settings
   const syncSettingsToServer = async (patch: Partial<AppSettings>) => {
     try {
-      await fetch('/api/settings', {
+      const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.settings?.providerModels) {
+          setProviderModels(data.settings.providerModels);
+        }
+      }
     } catch (err) {
       console.warn('Failed to sync settings to database:', err);
     }
@@ -425,19 +431,42 @@ export default function App() {
     const msgIndex = messages.findIndex((m) => m.id === messageId);
     if (msgIndex === -1) return;
 
-    const truncated = messages.slice(0, msgIndex);
-    setMessages(truncated);
-
     const targetMsg = messages[msgIndex];
-    if (targetMsg?.dbId) {
-      fetch(`/api/messages/${targetMsg.dbId}`, {
+    const userDbId = targetMsg?.dbId;
+
+    // 1. Update the user message in DB and prune any downstream messages from this thread
+    if (userDbId) {
+      fetch(`/api/messages/${userDbId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: newContent, threadId: activeThreadId }),
-      }).catch(() => {});
+      }).catch((err) => console.warn('Failed to update edited message in DB:', err));
+
+      if (activeThreadId) {
+        fetch(`/api/threads/${encodeURIComponent(activeThreadId)}/messages?fromMessageId=${userDbId}&inclusive=false`, {
+          method: 'DELETE',
+        }).catch((err) => console.warn('Failed to prune subsequent messages in DB:', err));
+      }
     }
 
-    await handleSendMessage(newContent, false, undefined, truncated, undefined, targetMsg?.imageData);
+    // 2. Truncate messages in UI to include this edited user prompt
+    const updatedUserMsg: ChatMessage = { ...targetMsg, content: newContent };
+    const truncatedWithUpdatedUser = [...messages.slice(0, msgIndex), updatedUserMsg];
+    setMessages(truncatedWithUpdatedUser);
+
+    // 3. Regenerate assistant response without duplicating the user prompt
+    await handleSendMessage(
+      newContent,
+      false,
+      targetMsg?.audioData,
+      truncatedWithUpdatedUser,
+      undefined,
+      targetMsg?.imageData,
+      {
+        existingUserDbId: userDbId,
+        skipUserAppend: true,
+      }
+    );
   };
 
   const handleDeleteMessage = async (messageId: string) => {
@@ -511,6 +540,7 @@ export default function App() {
     syncSettingsToServer({
       activeProvider: p as 'gemini' | 'groq' | 'mistral',
       activeModel: targetModel,
+      providerModels,
     });
   };
 
@@ -727,7 +757,12 @@ export default function App() {
     audioData?: { mimeType: string; data: string },
     baseMessages: ChatMessage[] = messages,
     useSwarm?: boolean,
-    imageData?: { mimeType: string; data: string; name?: string }
+    imageData?: { mimeType: string; data: string; name?: string },
+    retryOptions?: {
+      existingUserDbId?: number;
+      replaceAssistantDbId?: number;
+      skipUserAppend?: boolean;
+    }
   ) => {
     if ((!text.trim() && !audioData && !imageData) || isLoading) return;
 
@@ -744,18 +779,20 @@ export default function App() {
       syncSettingsToServer({ activeThreadId: currentThreadId });
     }
 
-    const userMsg: ChatMessage = {
-      id: `user-${now}`,
-      role: 'user',
-      content: text,
-      audioData,
-      imageData,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      createdAt: now,
-      channel,
-    };
+    const userMsg: ChatMessage = (retryOptions?.skipUserAppend && baseMessages.length > 0)
+      ? baseMessages[baseMessages.length - 1]
+      : {
+          id: `user-${now}`,
+          role: 'user',
+          content: text,
+          audioData,
+          imageData,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          createdAt: now,
+          channel,
+        };
 
-    const newMessages = [...baseMessages, userMsg];
+    const newMessages = retryOptions?.skipUserAppend ? baseMessages : [...baseMessages, userMsg];
     setMessages(newMessages);
     setIsLoading(true);
 
@@ -796,6 +833,8 @@ export default function App() {
           nickname,
           threadId: currentThreadId,
           threadTitle: baseMessages.length === 0 ? text.slice(0, 48) : undefined,
+          existingUserDbId: retryOptions?.existingUserDbId || (retryOptions?.skipUserAppend ? userMsg.dbId : undefined),
+          replaceAssistantDbId: retryOptions?.replaceAssistantDbId,
           userContext: {
             nickname: nickname || displayName,
             userName,
@@ -1159,8 +1198,39 @@ export default function App() {
     if (userMsgIndex < 0) return;
 
     const userMsg = messages[userMsgIndex];
-    const priorMessages = messages.slice(0, userMsgIndex);
-    await handleSendMessage(userMsg.content, false, undefined, priorMessages);
+    const assistantMsg = messages[index];
+
+    // 1. Durably prune old assistant turn and any subsequent messages from the database
+    if (activeThreadId) {
+      if (assistantMsg?.dbId) {
+        fetch(`/api/threads/${encodeURIComponent(activeThreadId)}/messages?fromMessageId=${assistantMsg.dbId}&inclusive=true`, {
+          method: 'DELETE',
+        }).catch((err) => console.warn('Failed to prune retried messages in DB:', err));
+      } else if (userMsg?.dbId) {
+        fetch(`/api/threads/${encodeURIComponent(activeThreadId)}/messages?fromMessageId=${userMsg.dbId}&inclusive=false`, {
+          method: 'DELETE',
+        }).catch((err) => console.warn('Failed to prune subsequent messages in DB:', err));
+      }
+    }
+
+    // 2. In memory, truncate the list to include up to the triggering user prompt
+    const priorWithUser = messages.slice(0, userMsgIndex + 1);
+    setMessages(priorWithUser);
+
+    // 3. Regenerate the assistant reply using the existing user message without duplicating it
+    await handleSendMessage(
+      userMsg.content,
+      false,
+      userMsg.audioData,
+      priorWithUser,
+      undefined,
+      userMsg.imageData,
+      {
+        existingUserDbId: userMsg.dbId,
+        replaceAssistantDbId: assistantMsg?.dbId,
+        skipUserAppend: true,
+      }
+    );
   };
 
   const handleExportChat = () => {

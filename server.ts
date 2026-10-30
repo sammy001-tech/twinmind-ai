@@ -843,6 +843,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       model,
       threadId, // Persistent multi-thread conversation ID
       threadTitle, // Optional title for this thread
+      existingUserDbId, // Optional: if prompt already persisted in DB, avoid duplicating row
+      replaceAssistantDbId, // Optional: old assistant message to prune before saving replacement
       customGeminiKey,
       customGroqKey,
       customMistralKey,
@@ -1171,39 +1173,55 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
     if (!fullReply.trim()) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no chat reply');
 
+    // If retrying or replacing an assistant turn, prune the old assistant turn durably
+    const numericReplaceAssistantDbId = Number(replaceAssistantDbId);
+    if (Number.isSafeInteger(numericReplaceAssistantDbId) && numericReplaceAssistantDbId > 0) {
+      try {
+        await neonDb.deleteMessage(numericReplaceAssistantDbId, effectiveThreadId);
+      } catch (err) {
+        console.warn('[NeonDB] Prune replaced assistant turn error:', err);
+      }
+    }
+
     // Persist messages to Neon Postgres and report the result.
     let userDbId: number | undefined;
     let assistantDbId: number | undefined;
 
     const lastUserMsgToSave = messages[messages.length - 1];
-    if (lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData || lastUserMsgToSave.audioData)) {
-      try {
-        const metadata: Record<string, unknown> = {};
-        if (lastUserMsgToSave.imageData) {
-          metadata.hasImage = true;
-          metadata.mimeType = lastUserMsgToSave.imageData.mimeType;
-          metadata.imageData = {
-            mimeType: lastUserMsgToSave.imageData.mimeType,
-            data: lastUserMsgToSave.imageData.data,
-            name: lastUserMsgToSave.imageData.name,
-          };
-        }
-        if (lastUserMsgToSave.audioData) {
-          metadata.hasAudio = true;
-          metadata.audioData = lastUserMsgToSave.audioData;
-        }
+    const numericExistingUserDbId = Number(existingUserDbId);
+    if (Number.isSafeInteger(numericExistingUserDbId) && numericExistingUserDbId > 0) {
+      // Reusing existing user prompt in this thread without inserting a duplicate user record
+      userDbId = numericExistingUserDbId;
+    } else {
+      if (lastUserMsgToSave && (lastUserMsgToSave.content || lastUserMsgToSave.imageData || lastUserMsgToSave.audioData)) {
+        try {
+          const metadata: Record<string, unknown> = {};
+          if (lastUserMsgToSave.imageData) {
+            metadata.hasImage = true;
+            metadata.mimeType = lastUserMsgToSave.imageData.mimeType;
+            metadata.imageData = {
+              mimeType: lastUserMsgToSave.imageData.mimeType,
+              data: lastUserMsgToSave.imageData.data,
+              name: lastUserMsgToSave.imageData.name,
+            };
+          }
+          if (lastUserMsgToSave.audioData) {
+            metadata.hasAudio = true;
+            metadata.audioData = lastUserMsgToSave.audioData;
+          }
 
-        userDbId = await neonDb.saveMessage({
-          session_id: effectiveThreadId,
-          channel: (channel as 'web' | 'telegram' | 'whatsapp') || 'web',
-          role: 'user',
-          content: typeof lastUserMsgToSave.content === 'string' ? lastUserMsgToSave.content : '',
-          metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-          provider: targetProvider,
-          model: targetModel,
-        });
-      } catch (dbErr) {
-        console.warn('[NeonDB] Save user msg error:', dbErr);
+          userDbId = await neonDb.saveMessage({
+            session_id: effectiveThreadId,
+            channel: (channel as 'web' | 'telegram' | 'whatsapp') || 'web',
+            role: 'user',
+            content: typeof lastUserMsgToSave.content === 'string' ? lastUserMsgToSave.content : '',
+            metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+            provider: targetProvider,
+            model: targetModel,
+          });
+        } catch (dbErr) {
+          console.warn('[NeonDB] Save user msg error:', dbErr);
+        }
       }
     }
     if (fullReply) {
@@ -1413,6 +1431,23 @@ app.get('/api/threads/:id/messages', async (req: Request, res: Response): Promis
     res.json({ success: true, messages });
   } catch (err: unknown) {
     res.status(500).json({ error: 'Failed to retrieve thread messages' });
+  }
+});
+
+// Prune messages in a thread from a given message ID onward (inclusive or exclusive)
+app.delete('/api/threads/:id/messages', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const fromId = Number(req.query.fromMessageId);
+    const inclusive = req.query.inclusive !== 'false';
+    if (!Number.isSafeInteger(fromId) || fromId <= 0) {
+      res.status(400).json({ error: 'Valid positive integer fromMessageId is required.' });
+      return;
+    }
+    const count = await neonDb.pruneThreadMessages(id, fromId, inclusive);
+    res.json({ success: true, prunedCount: count });
+  } catch (err: unknown) {
+    res.status(500).json({ error: 'Failed to prune thread messages' });
   }
 });
 

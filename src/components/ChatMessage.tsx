@@ -26,6 +26,7 @@ import {
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { ArtifactCard } from './ArtifactCard.tsx';
 import { getMessageContentView } from '../utils/chatMessagePresentation.ts';
+import { useContentComplexity } from '../hooks/useContentComplexity.ts';
 
 export interface GroupedMessages {
   groupId: string;
@@ -324,6 +325,12 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     { channel },
   );
 
+  const complexity = useContentComplexity(
+    isUser ? message.content : displayedContent,
+    channel,
+    isUser
+  );
+
   // Channel-tailored style mapping while maintaining UNIFIED features across Light and Dark modes
   const getBubbleStyle = () => {
     if (isUser) {
@@ -345,16 +352,16 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
       // Assistant
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]'
-          : 'bg-[#17232f] text-slate-100 border border-slate-700/70 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]';
+          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]'
+          : 'bg-[#17232f] text-slate-100 border border-slate-700/70 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-[#f7f9fa] text-[#202c33] border border-slate-200/80 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]'
-          : 'bg-[#1f2c34] text-[#e9edef] border border-slate-700/60 rounded-2xl rounded-tl-sm px-3.5 py-3 text-[14px] leading-6 shadow-sm max-w-[98%] sm:max-w-[90%]';
+          ? 'bg-[#f7f9fa] text-[#202c33] border border-slate-200/80 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]'
+          : 'bg-[#1f2c34] text-[#e9edef] border border-slate-700/60 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]';
       }
       // ChatGPT-inspired assistant canvas: readable typography without a heavy card.
-      return 'bg-transparent border-0 shadow-none px-0 py-1 text-slate-900 dark:text-slate-100 text-[15px] sm:text-base leading-7 w-full';
+      return 'bg-transparent border-0 shadow-none text-slate-900 dark:text-slate-100 w-full';
     }
   };
 
@@ -369,9 +376,10 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         onTouchEnd={handleTouchEnd}
         onTouchMove={handleTouchMove}
         onContextMenu={handleContextMenu}
+        style={complexity.adaptiveStyles.styleVariables}
         className={`relative transition-all duration-200 select-text ${
           isMatch ? 'ring-2 ring-amber-400 border-amber-400 shadow-md shadow-amber-500/10' : ''
-        } ${getBubbleStyle()} ${isUser ? 'cursor-pointer active:scale-[0.99]' : ''}`}
+        } ${getBubbleStyle()} ${!isUser ? complexity.adaptiveStyles.containerClassName : ''} ${isUser ? 'cursor-pointer active:scale-[0.99]' : ''}`}
       >
         {/* Telegram Header Badge */}
         {!isUser && channel === 'telegram' && isFirstInGroup && (
@@ -414,7 +422,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         {isEditing ? (
           editBox
         ) : (
-          <div className={`space-y-1 ${channel === 'web' ? 'text-[15px] sm:text-base leading-7 tracking-[0.005em]' : 'text-[14px] sm:text-[15px] leading-6'}`}>
+          <div className={`transition-all duration-150 ${complexity.adaptiveStyles.bodyClassName}`}>
             {!message.content && !isUser ? (
               <div className="flex items-center gap-1.5 py-1 text-amber-500 dark:text-amber-400">
                 <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
@@ -423,7 +431,9 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
             ) : (
               <>
                 <div className="relative">
-                  {renderFormattedMarkdown(contentView.content)}
+                  {renderFormattedMarkdown(contentView.content, {
+                    isMultiPart: !isUser && complexity.isMultiPart,
+                  })}
                   {contentView.canExpand && !contentView.isExpanded && (
                     <div
                       className={`pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t ${

@@ -3,6 +3,8 @@ import { Check, Copy, Sparkles, Lightbulb, AlertCircle } from 'lucide-react';
 import katex from 'katex';
 import { Marked, type Token, type Tokens } from 'marked';
 import markedKatex from 'marked-katex-extension';
+import hljs from 'highlight.js';
+import { classifyContentStructure } from './contentClassifier.ts';
 
 // Initialize configured Marked instance with official KaTeX extension
 const markedEngine = new Marked({
@@ -48,6 +50,18 @@ interface CodeBlockProps {
 const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
+  const highlightedHtml = React.useMemo(() => {
+    try {
+      const cleanLang = (language || '').trim().toLowerCase();
+      if (cleanLang && hljs.getLanguage(cleanLang)) {
+        return hljs.highlight(code, { language: cleanLang, ignoreIllegals: true }).value;
+      }
+      return hljs.highlightAuto(code).value;
+    } catch {
+      return null;
+    }
+  }, [code, language]);
+
   const handleCopy = async () => {
     try {
       if (!navigator.clipboard?.writeText) {
@@ -63,10 +77,10 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
   return (
     <section
       aria-label={language ? language + ' code block' : 'Code block'}
-      className="my-4 min-w-0 overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs dark:border-slate-700/80 dark:bg-slate-950/90"
+      className="my-4 min-w-0 overflow-hidden rounded-2xl border border-slate-700/80 bg-[#1e1e1e] text-slate-100 shadow-xs dark:border-slate-800 dark:bg-slate-950"
     >
-      <div className="flex min-h-10 items-center justify-between gap-3 border-b border-slate-200/90 bg-slate-50 px-3 sm:px-4 dark:border-slate-800 dark:bg-slate-900/90">
-        <span className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+      <div className="flex min-h-10 items-center justify-between gap-3 border-b border-slate-700/80 bg-slate-900/90 px-3 sm:px-4">
+        <span className="truncate text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
           {language || 'Code'}
         </span>
         <button
@@ -74,14 +88,21 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
           onClick={() => void handleCopy()}
           aria-label={copyState === 'copied' ? 'Code copied' : 'Copy code'}
           title={copyState === 'failed' ? 'Clipboard access failed' : copyState === 'copied' ? 'Copied' : 'Copy code'}
-          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-200 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-slate-300 transition-colors hover:bg-slate-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60"
         >
-          {copyState === 'copied' ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+          {copyState === 'copied' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
           <span aria-live="polite">{copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy code'}</span>
         </button>
       </div>
-      <pre className="max-h-[32rem] overflow-auto overscroll-x-contain p-3.5 text-[13px] leading-6 text-slate-800 sm:p-4 dark:text-slate-100">
-        <code className="font-mono whitespace-pre">{code}</code>
+      <pre className="max-h-[32rem] overflow-auto overscroll-x-contain p-3.5 text-[13px] leading-6 text-slate-100 sm:p-4 font-mono">
+        {highlightedHtml ? (
+          <code
+            className={`hljs font-mono whitespace-pre ${language ? `language-${language}` : ''}`}
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
+        ) : (
+          <code className="font-mono whitespace-pre">{code}</code>
+        )}
       </pre>
     </section>
   );
@@ -389,14 +410,49 @@ function normalizeMarkdown(text: string): string {
     .replace(/(^|[^\n])\n---(\n|$)/g, (_m, p1, p2) => `${p1}\n\n---\n${p2}`);
 }
 
+export interface MarkdownRenderOptions {
+  isMultiPart?: boolean;
+}
+
 /**
  * Renders full markdown with KaTeX mathematical formulas, GFM tables, code blocks,
  * epistemic status badges, and headings via standard Marked AST parser without ad-hoc regexes.
+ * When isMultiPart is enabled, modular sections are dynamically wrapped in structured containers.
  */
-export const renderFormattedMarkdown = (text: string): React.ReactNode[] => {
+export const renderFormattedMarkdown = (
+  text: string,
+  options?: MarkdownRenderOptions
+): React.ReactNode[] => {
   if (!text) return [];
   const normalized = normalizeMarkdown(text);
   const tokens = markedEngine.lexer(normalized);
+
+  if (options?.isMultiPart) {
+    const classified = classifyContentStructure(tokens, normalized);
+    if (classified.hasDistinctModules && classified.sections.length > 1) {
+      return classified.sections.map((sec, idx) => {
+        // Preamble without headings can render directly
+        if (sec.type === 'preamble' && !sec.headingToken) {
+          return (
+            <div key={`section-${sec.id}-${idx}`} className="space-y-2">
+              {renderAstTokens(sec.tokens, `sec-${sec.id}`)}
+            </div>
+          );
+        }
+
+        // Modular container with distinct visual padding for structured sections
+        return (
+          <section
+            key={`section-${sec.id}-${idx}`}
+            className="my-3.5 rounded-2xl border border-slate-200/90 bg-slate-50/60 p-4 sm:p-5 shadow-xs transition-colors dark:border-slate-800/80 dark:bg-slate-900/40"
+          >
+            {renderAstTokens(sec.tokens, `sec-${sec.id}`)}
+          </section>
+        );
+      });
+    }
+  }
+
   return renderAstTokens(tokens, 'root');
 };
 

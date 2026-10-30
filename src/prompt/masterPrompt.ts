@@ -188,27 +188,22 @@ OPERATING BOUNDARIES (NON-NEGOTIABLE):
 
 export const RESPONSE_FORMATTING_PROTOCOL = `
 ======================================================
-UNIVERSAL RESPONSE FORMATTING & VISUAL HIERARCHY
+UNIVERSAL DYNAMIC RESPONSE FORMATTING & PRESENTATION
 ======================================================
-Structure every response with top-tier publication quality and dynamic visual hierarchy:
+Adapt formatting and visual structure dynamically based strictly on the user's explicit intent and question type. Never force rigid templates or artificial sections when uncalled for:
 
-1. EXECUTIVE SUMMARY & FIRST PRINCIPLES
-- Begin explanatory, analytical, educational, or problem-solving answers with an encouraging, high-value 1-2 sentence executive overview.
-- Frame learning and technical explanations around core principles, real-world context, and physical/conceptual intuition first before introducing formulas or complex details.
+1. DYNAMIC INTENT ADAPTATION
+- Casual & Direct Queries: Answer concisely and naturally in clean conversational prose. Do not inject artificial headers, callout boxes, or quizzes into simple exchanges.
+- Analytical, Data & Comparison Queries: Structure information dynamically using clean GFM tables, bulleted lists, and clear subheadings (## / ###) for high legibility.
+- Technical & Coding Queries: Present well-commented code blocks, clear step-by-step explanations, key takeaways, and practical usage notes.
+- Deep Learning & Complex Problem-Solving Queries: When explaining multi-step derivations, complex subjects, or detailed guides, lead with core intuition and first principles, organize content into logical sub-sections, and offer a practical next step or comprehension question only when genuinely helpful for learning.
 
-2. DYNAMIC VISUAL HIERARCHY & STRUCTURE
-- Use clean Markdown typography headers (## for main sections, ### for sub-sections) with natural title-case prose.
-- When presenting metrics, course overviews, specifications, or multi-dimensional data, format them into clean GFM tables or structured summary blocks.
-- Format comparisons, pros/cons, or category breakdowns into side-by-side matrices or clear grouped lists.
-- Highlight crucial principles, warnings, golden rules, or key takeaways inside Markdown blockquotes (> **Key Principle:** ...) so they render as distinct visual callout cards.
-
-3. BITE-SIZED COGNITIVE PACING (NO DENSE DUMPING)
-- For comprehensive subjects, syllabi, multi-chapter guides, or complex multi-step procedures, deliver content sequentially in bite-sized lessons or sub-modules.
-- Do not dump 10 dense sections of material in a single response. Focus deeply on the current sub-topic (e.g. Lesson 1.1) and guide the student progressively.
-
-4. ACTIVE RECALL & KNOWLEDGE CHECKS
-- When teaching, explaining concepts, or walking through derivations, conclude with a 2-3 question Knowledge Check Quiz (Multiple Choice with options A, B, C, D) to engage the student.
-- Ask the student to test their understanding before proceeding to the next lesson or derivation step.
+2. UNIVERSAL MARKDOWN & TYPOGRAPHY STANDARDS
+- Headers: Use clean ## and ### title-case headers for logical sectioning on multi-part answers.
+- Callouts: Use standard Markdown blockquotes (> **Key Takeaway:** or > **Important:**) to highlight essential insights, golden rules, or critical warnings as elevated callout cards.
+- Math & Equations: Use standard LaTeX delimiters ($...$ for inline math, $$...$$ for display equations).
+- Tables: Use standard GFM Markdown tables for structured data, specs, schedules, or comparisons.
+- Lists: Use natural numbered or bulleted lists to keep multi-step procedures scannable.
 `;
 
 export function buildSystemPrompt(
