@@ -25,6 +25,7 @@ import { isExperimentLifecycleStatus, validatePredictionForecast } from './serve
 import { sentinelService } from './server/services/sentinelService.ts';
 import { modelCatalogService } from './server/services/modelCatalogService.ts';
 import { ownerAuthService } from './server/services/authService.ts';
+import { historicalAwarenessService } from './server/services/historicalAwarenessService.ts';
 import { artifactAccessService } from './server/services/artifactAccessService.ts';
 import { getArtifactStorageStatus } from './server/services/artifactStorageService.ts';
 import { isArtifactGenerationRequest } from './server/utils/artifactFormat.ts';
@@ -941,6 +942,15 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       console.warn('Communication style analysis warning:', sErr);
     }
 
+    // Retrieve historical context for the current session
+    let historicalContext = '';
+    try {
+      const metadata = await historicalAwarenessService.getLastInteractionMetadata();
+      historicalContext = historicalAwarenessService.formatHistoricalContext(metadata);
+    } catch (hErr) {
+      console.warn('Historical awareness recall warning in chat:', hErr);
+    }
+
     // Build system prompt with explicit User Context & recalled pgvector knowledge
     const systemInstruction = buildSystemPrompt({
       channel,
@@ -954,6 +964,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: effectiveThinkingLevel,
       communicationStyleDirective,
+      historicalContext,
     });
 
     const effectiveGroqKey = customGroqKey || process.env.GROQ_API_KEY;
@@ -2607,6 +2618,7 @@ app.post('/api/knowledge/conflicts/resolve', async (req: Request, res: Response)
 });
 
 // Communication Style & Emotional Tone Analysis Endpoint
+// Communication Style & Emotional Tone Analysis Endpoint
 app.post('/api/communication-style', async (req: Request, res: Response) => {
   try {
     const { messages = [], threadId, customGeminiKey } = req.body;
@@ -2634,6 +2646,16 @@ app.post('/api/communication-style', async (req: Request, res: Response) => {
     res.json({ success: true, analysis });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to analyze communication style' });
+  }
+});
+
+// Historical Awareness Metadata Endpoint
+app.get('/api/historical-awareness', async (_req: Request, res: Response) => {
+  try {
+    const metadata = await historicalAwarenessService.getLastInteractionMetadata();
+    res.json({ success: true, metadata });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to retrieve historical metadata' });
   }
 });
 
@@ -3222,4 +3244,17 @@ app.listen(PORT, '0.0.0.0', async () => {
   } catch (tgErr) {
     console.warn('Initial Telegram bot startup deferred (waiting for token configuration):', tgErr);
   }
+
+  // Start background Historical Awareness summarization (Checks every 15 minutes)
+  const runSummarization = async () => {
+    try {
+      await historicalAwarenessService.runBackgroundSummarization((prompt, system) => 
+        twinAgentService.generateCompletion({ prompt, systemInstruction: system })
+      );
+    } catch (err) {
+      console.error('Periodic summarization error:', err);
+    }
+  };
+  void runSummarization();
+  setInterval(runSummarization, 1000 * 60 * 15);
 });

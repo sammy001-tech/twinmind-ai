@@ -319,4 +319,11 @@ export interface CommunicationStyleAnalysis {
   keyEmotionalInsights: string[];
 }
 
+export interface HistoricalInteractionMetadata {
+  lastActivityDate: string | null;
+  lastThreadTitle: string | null;
+  recentThreads: Array<{ title: string; updatedAt: string }>;
+  totalThreads: number;
+}
+
 

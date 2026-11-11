@@ -453,6 +453,18 @@ class NeonDatabaseService {
         -- Review idempotency uniqueness is upgraded below.
         CREATE INDEX IF NOT EXISTS idx_persona_memories_category ON persona_memories(category);
         CREATE INDEX IF NOT EXISTS idx_persona_memories_created ON persona_memories(created_at DESC);
+        CREATE TABLE IF NOT EXISTS thread_summaries (
+          id SERIAL PRIMARY KEY,
+          thread_id VARCHAR(64) NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+          summary TEXT NOT NULL,
+          decisions JSONB DEFAULT '[]',
+          unresolved_tasks JSONB DEFAULT '[]',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (thread_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_thread_summaries_thread ON thread_summaries(thread_id);
       `);
 
       // Idempotent schema upgrade for new forecast, review, and experiment contracts.
@@ -708,6 +720,17 @@ class NeonDatabaseService {
     }
 
     return status;
+  }
+
+  /**
+   * Execute a generic query on the pool. This is a internal-only power tool
+   * for trusted background services that require direct SQL access.
+   */
+  public async query(text: string, params?: unknown[]): Promise<any> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('DATABASE_UNAVAILABLE');
+    }
+    return this.pool.query(text, params);
   }
 
   /**
@@ -968,6 +991,29 @@ class NeonDatabaseService {
       }));
     } catch (err) {
       console.error('[NeonDB] Error fetching messages:', err);
+      return [];
+    }
+  }
+
+  /**
+   * Identifies threads that have been idle (no updates) for a specified threshold
+   * and do not have a summary or have an outdated summary.
+   */
+  public async getThreadsNeedingSummary(idleThresholdHours = 2): Promise<string[]> {
+    if (!this.pool || !this.isConnected) return [];
+    try {
+      const res = await this.pool.query(
+        `SELECT t.id
+         FROM chat_threads t
+         LEFT JOIN thread_summaries s ON s.thread_id = t.id
+         WHERE t.updated_at < CURRENT_TIMESTAMP - INTERVAL '1 hour' * $1
+           AND (s.id IS NULL OR s.updated_at < t.updated_at)
+         LIMIT 10`,
+        [idleThresholdHours]
+      );
+      return res.rows.map(r => r.id);
+    } catch (err) {
+      console.error('[NeonDB] Error identifying threads needing summary:', err);
       return [];
     }
   }
@@ -2507,6 +2553,36 @@ class NeonDatabaseService {
     } catch (err) {
       console.error('[NeonDB] Error deleting persona memory:', err);
       return false;
+    }
+  }
+  /**
+   * Search messages across all threads using text matching.
+   */
+  public async searchMessages(query: string, limit = 10): Promise<ConversationMessage[]> {
+    if (!this.pool || !this.isConnected || !query.trim()) return [];
+
+    try {
+      const res = await this.pool.query(
+        `SELECT * FROM conversations
+         WHERE content ILIKE $1
+         ORDER BY created_at DESC
+         LIMIT $2`,
+        [`%${query}%`, limit]
+      );
+      return res.rows.map((r) => ({
+        id: r.id,
+        session_id: r.session_id,
+        channel: r.channel,
+        role: r.role,
+        content: r.content,
+        provider: r.provider,
+        model: r.model,
+        metadata: r.metadata,
+        created_at: r.created_at,
+      }));
+    } catch (err) {
+      console.error('[NeonDB] Error searching messages:', err);
+      return [];
     }
   }
 }

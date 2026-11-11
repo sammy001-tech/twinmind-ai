@@ -8,6 +8,7 @@ import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
 import { memoryService } from './memoryService.ts';
 import { calibrationService } from './calibrationService.ts';
 import { modelCatalogService } from './modelCatalogService.ts';
+import { historicalAwarenessService } from './historicalAwarenessService.ts';
 import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, resolveBoundedIntegerSetting, resolveResearchSearchDepth } from '../utils/researchEvidence.ts';
 
 const Type = {
@@ -118,6 +119,30 @@ export const GEMINI_TWIN_TOOLS: any[] = [
         },
       },
       required: ['type', 'content', 'fileName'],
+    },
+  },
+  {
+    name: 'searchConversationHistory',
+    description:
+      'Search through the history of past conversations with the user to recall specific details, decisions, or topics discussed across different threads.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: {
+          type: Type.STRING,
+          description: 'The search query to look up in conversation history',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'recallDecisionsAndTasks',
+    description:
+      'Retrieve a summary of recent decisions, unresolved tasks, and commitments identified across the conversation history.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {},
     },
   },
 ];
@@ -239,6 +264,36 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
           },
         },
         required: ['type', 'content', 'fileName'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'searchConversationHistory',
+      description:
+        'Search through the history of past conversations with the user to recall specific details, decisions, or topics discussed across different threads.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The search query to look up in conversation history',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recallDecisionsAndTasks',
+      description:
+        'Retrieve a summary of recent decisions, unresolved tasks, and commitments identified across the conversation history.',
+      parameters: {
+        type: 'object',
+        properties: {},
       },
     },
   },
@@ -1074,15 +1129,18 @@ Respond in valid JSON:
     let recalledKnowledge: Array<{ id: string | number; title: string; content: string; category: string; similarity?: number }> = [];
     let learnedContext = '';
     let calibrationContext = '';
+    let historicalContext = '';
     try {
-      const [k, p, c] = await Promise.all([
+      const [k, p, c, h] = await Promise.all([
         knowledgeService.search(userPrompt, 3, 0.45).catch(() => []),
         memoryService.getLearnedPersonaContext().catch(() => ''),
-        calibrationService.getCalibrationContext().catch(() => '')
+        calibrationService.getCalibrationContext().catch(() => ''),
+        historicalAwarenessService.getLastInteractionMetadata().then(m => historicalAwarenessService.formatHistoricalContext(m)).catch(() => '')
       ]);
       recalledKnowledge = k;
       learnedContext = p;
       calibrationContext = c;
+      historicalContext = h;
     } catch (kErr) {
       console.warn('[TwinAgent] Retrieval warning:', kErr);
     }
@@ -1101,6 +1159,7 @@ Respond in valid JSON:
       activeThreadTitle,
       learnedContext,
       calibrationContext,
+      historicalContext,
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: resolvedThinkingLevel,
     });
@@ -1186,6 +1245,10 @@ Respond in valid JSON:
         result = await this.executeDecisionAnalysis(String(args.dilemma || ''), channel, provider, model);
       } else if (name === 'generateExecutiveSummary') {
         result = await this.executeExecutiveSummary(args.timeframe ? String(args.timeframe) : undefined);
+      } else if (name === 'searchConversationHistory') {
+        result = await historicalAwarenessService.searchConversationHistory(String(args.query || ''));
+      } else if (name === 'recallDecisionsAndTasks') {
+        result = await historicalAwarenessService.recallDecisionsAndTasks();
       } else if (name === 'generateArtifact') {
         const { specialistSwarmService } = await import('./specialistSwarmService.ts');
 

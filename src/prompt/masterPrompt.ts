@@ -73,6 +73,7 @@ export interface BuildPromptOptions {
   soulTuning?: { tone?: number; directness?: number; perspective?: number };
   thinkingLevel?: 'low' | 'medium' | 'high';
   communicationStyleDirective?: string;
+  historicalContext?: string;
 }
 
 export function compileThinkingLevelDirective(thinkingLevel?: 'low' | 'medium' | 'high' | string): string {
@@ -243,6 +244,7 @@ export function buildSystemPrompt(
   let activeThreadTitle = '';
   let learnedContext = '';
   let calibrationContext = '';
+  let historicalContext = '';
   let soulTuningDirective = '';
   let thinkingLevelDirective = '';
   let communicationStyleDirective = '';
@@ -258,6 +260,7 @@ export function buildSystemPrompt(
     activeThreadTitle = channelOrOptions.activeThreadTitle || '';
     learnedContext = channelOrOptions.learnedContext || '';
     calibrationContext = channelOrOptions.calibrationContext || '';
+    historicalContext = channelOrOptions.historicalContext || '';
     soulTuningDirective = compileSoulTuningDirective(channelOrOptions.soulTuning);
     thinkingLevelDirective = compileThinkingLevelDirective(channelOrOptions.thinkingLevel);
     communicationStyleDirective = channelOrOptions.communicationStyleDirective || '';
@@ -331,5 +334,6 @@ Use a clear structure appropriate to the complexity of the request. Include reas
     communicationStyleDirective,
     learnedContext,
     calibrationContext,
+    historicalContext,
   ].filter(Boolean).join('');
 }

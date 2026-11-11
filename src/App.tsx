@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel } from './types/index.ts';
+import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel, HistoricalInteractionMetadata, CommunicationStyleAnalysis } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
 import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
@@ -134,6 +134,8 @@ export default function App() {
     perspective: 50,
   });
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('low');
+  const [historicalMetadata, setHistoricalMetadata] = useState<HistoricalInteractionMetadata | null>(null);
+  const [styleAnalysis, setStyleAnalysis] = useState<CommunicationStyleAnalysis | null>(null);
 
   // Theme hook (Dark, Light, System)
   const { themeMode, setThemeMode, isDark } = useTheme();
@@ -275,7 +277,58 @@ export default function App() {
 
     loadSettings();
     loadThreads();
+    fetchHistoricalMetadata();
   }, []);
+
+  const fetchHistoricalMetadata = async () => {
+    try {
+      const res = await fetch('/api/historical-awareness');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.metadata) {
+          setHistoricalMetadata(data.metadata);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch historical metadata:', err);
+    }
+  };
+
+  const fetchStyleAnalysisSummary = async () => {
+    if (messages.length === 0) {
+      setStyleAnalysis(null);
+      return;
+    }
+    try {
+      const res = await fetch('/api/communication-style', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: messages.slice(-10).map(m => ({
+            role: m.role,
+            content: m.content,
+            created_at: m.createdAt ? new Date(m.createdAt).toISOString() : m.timestamp
+          })),
+          threadId: activeThreadId
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.analysis) {
+          setStyleAnalysis(data.analysis);
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch style analysis summary:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (messages.length > 0) {
+      const timer = setTimeout(fetchStyleAnalysisSummary, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [messages.length, activeThreadId]);
 
   // Load conversation threads from Database
   const loadThreads = async () => {
@@ -1339,6 +1392,8 @@ export default function App() {
         onSelectThinkingMode={handleSelectThinkingPreset}
         thinkingLevel={thinkingLevel}
         onThinkingLevelChange={handleThinkingLevelChange}
+        historicalMetadata={historicalMetadata}
+        styleAnalysis={styleAnalysis}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}

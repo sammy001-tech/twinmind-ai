@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType } from '../types/index.ts';
+import { ChannelType, HistoricalInteractionMetadata, CommunicationStyleAnalysis } from '../types/index.ts';
 import { ThemeMode } from '../hooks/useTheme.ts';
 import {
   MessageSquare,
@@ -23,6 +23,8 @@ import {
   Settings,
   Mic,
   HeartHandshake,
+  History,
+  Info,
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
 import { useAuthSession } from '../contexts/AuthSessionContext.tsx';
@@ -58,6 +60,8 @@ interface HeaderProps {
   onSelectThinkingMode?: (tuning: SoulTuningConfig) => Promise<void> | void;
   thinkingLevel?: ThinkingLevel;
   onThinkingLevelChange?: (level: ThinkingLevel) => void | Promise<void>;
+  historicalMetadata?: HistoricalInteractionMetadata | null;
+  styleAnalysis?: CommunicationStyleAnalysis | null;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -88,6 +92,8 @@ export const Header: React.FC<HeaderProps> = ({
   onSelectThinkingMode,
   thinkingLevel = 'low',
   onThinkingLevelChange,
+  historicalMetadata,
+  styleAnalysis,
 }) => {
   const displayName = nickname.trim() || userName.trim();
   const authSession = useAuthSession();
@@ -235,6 +241,36 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             )}
           </div>
+
+          {/* Historical Awareness Status */}
+          {historicalMetadata && historicalMetadata.lastActivityDate && (
+            <div className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-[10px] text-slate-500 dark:text-slate-400 group relative">
+              <History className="w-3 h-3 text-indigo-500" />
+              <span className="font-medium whitespace-nowrap">
+                Last: {new Date(historicalMetadata.lastActivityDate).toLocaleDateString()}
+              </span>
+              
+              {/* Tooltip on hover */}
+              <div className="absolute top-10 left-0 w-48 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xl p-2.5 z-50 opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-200">
+                <div className="flex items-center gap-2 mb-1.5 pb-1.5 border-b border-slate-100 dark:border-slate-800">
+                  <History className="w-3.5 h-3.5 text-indigo-500" />
+                  <span className="font-bold text-slate-900 dark:text-white text-[11px]">Historical Awareness</span>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Total Threads:</span>
+                    <span className="text-slate-700 dark:text-slate-200 font-bold">{historicalMetadata.totalThreads}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Last Topic:</span>
+                    <span className="text-slate-700 dark:text-slate-200 font-bold truncate max-w-[80px]">
+                      {historicalMetadata.lastThreadTitle || 'None'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Side: Thinking Level & Thinking Mode Selector & Action Buttons */}
@@ -259,11 +295,22 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={onOpenCommunicationStyleWidget}
-              className="flex items-center gap-1.5 px-2 py-1.5 rounded-xl bg-pink-500/10 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/20 transition active:scale-95 group shadow-xs"
+              className="flex items-center gap-1.5 px-2 py-1.5 rounded-xl bg-pink-500/10 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/20 transition active:scale-95 group shadow-xs relative"
               title="Tone & Persona Mirror"
             >
-              <HeartHandshake className="w-4 h-4" />
-              <span className="text-[10px] font-bold uppercase tracking-wider hidden md:inline">Persona</span>
+              <HeartHandshake className={`w-4 h-4 ${styleAnalysis ? 'text-pink-500 animate-pulse' : ''}`} />
+              <div className="flex flex-col items-start leading-none">
+                <span className="text-[10px] font-bold uppercase tracking-wider hidden md:inline">Persona</span>
+                {styleAnalysis && (
+                  <span className="text-[8px] font-medium text-slate-500 dark:text-slate-400 hidden lg:inline">
+                    {styleAnalysis.overallSentiment}
+                  </span>
+                )}
+              </div>
+              
+              {styleAnalysis && (
+                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-pink-500 border border-white dark:border-slate-950 shadow-sm" />
+              )}
             </button>
           )}
 
