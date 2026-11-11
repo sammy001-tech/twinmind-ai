@@ -3,10 +3,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
-  calculateContentComplexity,
-  calculateAdaptiveTypography,
-} from '../src/utils/contentComplexity.ts';
-import {
+  classifyResponseContent,
   classifyContentStructure,
 } from '../src/utils/contentClassifier.ts';
 import {
@@ -18,20 +15,19 @@ import markedKatex from 'marked-katex-extension';
 const testMarked = new Marked({ gfm: true, breaks: true });
 testMarked.use(markedKatex({ throwOnError: false, nonStandard: true }));
 
-test('calculateContentComplexity handles empty and trivial strings safely', () => {
-  const empty = calculateContentComplexity('');
-  assert.equal(empty.complexityScore, 0);
-  assert.equal(empty.complexityTier, 'compact');
-  assert.equal(empty.isMultiPart, false);
-  assert.equal(empty.headingCount, 0);
+test('classifyResponseContent handles empty and trivial strings safely', () => {
+  const empty = classifyResponseContent('');
+  assert.equal(empty.complexity, 'low');
+  assert.equal(empty.primaryType, 'conversational');
+  assert.equal(empty.structuralCounts.paragraphs, 0);
 
-  const short = calculateContentComplexity('Hello! How can I help you today?');
-  assert.equal(short.complexityTier, 'compact');
-  assert.equal(short.isMultiPart, false);
-  assert.ok(short.complexityScore < 14);
+  const short = classifyResponseContent('Hello! How can I help you today?');
+  assert.equal(short.complexity, 'low');
+  assert.equal(short.primaryType, 'conversational');
+  assert.ok(short.structuralCounts.paragraphs >= 1);
 });
 
-test('calculateContentComplexity dynamically scores structured technical content', () => {
+test('classifyResponseContent dynamically scores structured technical content', () => {
   const technicalResponse = [
     '# Architectural Overview',
     'Here is the primary workflow for processing inbound messages:',
@@ -58,23 +54,22 @@ test('calculateContentComplexity dynamically scores structured technical content
     '3. Step 3: Persist transaction audit trail',
   ].join('\n');
 
-  const metrics = calculateContentComplexity(technicalResponse);
-  assert.ok(metrics.headingCount >= 3, 'Must detect 3+ headings');
-  assert.ok(metrics.tableCount >= 1, 'Must detect table');
-  assert.ok(metrics.codeBlockCount >= 1, 'Must detect code block');
-  assert.ok(metrics.mathBlockCount >= 1, 'Must detect math block');
-  assert.ok(metrics.listCount >= 1, 'Must detect list');
-  assert.equal(metrics.isMultiPart, true, 'Complex multi-section response must be multi-part');
-  assert.ok(metrics.complexityScore >= 30, 'Score should reflect dense or deep-technical content');
-  assert.ok(metrics.complexityTier === 'dense' || metrics.complexityTier === 'deep-technical');
+  const metadata = classifyResponseContent(technicalResponse);
+  const { structuralCounts: stats } = metadata;
+  
+  assert.ok(stats.headings >= 3, 'Must detect 3+ headings');
+  assert.ok(stats.tables >= 1, 'Must detect table');
+  assert.ok(stats.codeBlocks >= 1, 'Must detect code block');
+  assert.ok(stats.mathBlocks >= 1, 'Must detect math block');
+  assert.ok(stats.lists >= 1, 'Must detect list');
+  assert.ok(metadata.complexity === 'high' || metadata.complexity === 'ultra', 'Score should reflect dense or deep-technical content');
+  assert.equal(metadata.primaryType, 'data_heavy', 'Tables prioritize data_heavy classification');
 });
 
-test('calculateAdaptiveTypography adjusts typography and spacing across complexity tiers', () => {
-  const compactMetrics = calculateContentComplexity('Quick answer: Yes, that is correct.');
-  const compactStyles = calculateAdaptiveTypography(compactMetrics, 'web', false);
-  assert.equal(compactStyles.spacingTier, 'compact');
-  assert.ok(compactStyles.containerClassName.includes('px-0'));
-  assert.ok(compactStyles.styleVariables['--content-font-size']);
+test('layoutHints adjusts typography and spacing across complexity tiers', () => {
+  const compactMetadata = classifyResponseContent('Quick answer: Yes, that is correct.');
+  assert.equal(compactMetadata.complexity, 'low');
+  assert.ok(compactMetadata.layoutHints.containerClassName.includes('px-1'));
 
   const denseResponse = [
     '### Step 1: Mathematical Foundations',
@@ -87,16 +82,12 @@ test('calculateAdaptiveTypography adjusts typography and spacing across complexi
     '| Latency | 12ms |',
   ].join('\n');
 
-  const denseMetrics = calculateContentComplexity(denseResponse);
-  const denseStyles = calculateAdaptiveTypography(denseMetrics, 'web', false);
-  assert.equal(denseStyles.spacingTier, 'spacious');
-  assert.ok(denseStyles.bodyClassName.includes('space-y-'));
-  assert.ok(denseStyles.styleVariables['--content-section-gap']);
-
-  // Channel adaptation: Telegram / WhatsApp have card container padding
-  const telegramStyles = calculateAdaptiveTypography(denseMetrics, 'telegram', false);
-  assert.ok(telegramStyles.containerClassName.includes('px-'));
+  const denseMetadata = classifyResponseContent(denseResponse);
+  assert.ok(denseMetadata.complexity === 'high' || denseMetadata.complexity === 'ultra');
+  assert.ok(denseMetadata.layoutHints.sectionSpacing.includes('space-y-'));
+  assert.equal(denseMetadata.layoutHints.showHierarchyLines, true);
 });
+
 
 test('classifyContentStructure groups multi-part AST tokens into modular sections', () => {
   const doc = [

@@ -340,34 +340,35 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     if (isUser) {
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-[#eeffde] text-[#172b20] border border-[#b2e59e] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]'
-          : 'bg-[#223b53] text-slate-100 border border-[#385873] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]';
+          ? 'bg-[#eeffde] text-[#172b20] border border-[#b2e59e] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm'
+          : 'bg-[#223b53] text-slate-100 border border-[#385873] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]'
-          : 'bg-[#075e54] text-[#f0f2f5] border border-[#168c7b]/70 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm max-w-[95%] sm:max-w-[85%]';
+          ? 'bg-[#d9fdd3] text-[#111b21] border border-[#b4f0aa] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm'
+          : 'bg-[#075e54] text-[#f0f2f5] border border-[#168c7b]/70 rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[14px] leading-6 shadow-sm';
       }
       // Web chat: Soft Cool Blue-Gray Tint matching user's reference design
       return !isDark
-        ? 'bg-[#EEF3FB] text-slate-900 border border-slate-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-xs max-w-[95%] sm:max-w-[85%]'
-        : 'bg-slate-800/85 text-slate-100 border border-slate-700/60 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-xs max-w-[95%] sm:max-w-[85%]';
+        ? 'bg-[#EEF3FB] text-slate-900 border border-slate-200/80 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-xs'
+        : 'bg-slate-800/85 text-slate-100 border border-slate-700/60 rounded-[24px] rounded-br-md px-4 py-3 text-[15px] sm:text-base leading-7 shadow-xs';
     } else {
       // Assistant
       if (channel === 'telegram') {
         return !isDark
-          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]'
-          : 'bg-[#17232f] text-slate-100 border border-slate-700/70 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]';
+          ? 'bg-white text-slate-900 border border-slate-200/90 rounded-2xl rounded-tl-sm shadow-sm'
+          : 'bg-[#17232f] text-slate-100 border border-slate-700/70 rounded-2xl rounded-tl-sm shadow-sm';
       }
       if (channel === 'whatsapp') {
         return !isDark
-          ? 'bg-[#f7f9fa] text-[#202c33] border border-slate-200/80 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]'
-          : 'bg-[#1f2c34] text-[#e9edef] border border-slate-700/60 rounded-2xl rounded-tl-sm shadow-sm max-w-[98%] sm:max-w-[90%]';
+          ? 'bg-[#f7f9fa] text-[#202c33] border border-slate-200/80 rounded-2xl rounded-tl-sm shadow-sm'
+          : 'bg-[#1f2c34] text-[#e9edef] border border-slate-700/60 rounded-2xl rounded-tl-sm shadow-sm';
       }
       // ChatGPT-inspired assistant canvas: readable typography without a heavy card.
       return 'bg-transparent border-0 shadow-none text-slate-900 dark:text-slate-100 w-full';
     }
   };
+
 
   return (
     <div
@@ -380,11 +381,11 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         onTouchEnd={handleTouchEnd}
         onTouchMove={handleTouchMove}
         onContextMenu={handleContextMenu}
-        style={complexity.adaptiveStyles.styleVariables}
         className={`relative transition-all duration-200 select-text ${
           isMatch ? 'ring-2 ring-amber-400 border-amber-400 shadow-md shadow-amber-500/10' : ''
-        } ${getBubbleStyle()} ${!isUser ? complexity.adaptiveStyles.containerClassName : ''} ${isUser ? 'cursor-pointer active:scale-[0.99]' : ''}`}
+        } ${getBubbleStyle()} ${!isUser ? complexity.layoutHints.containerClassName : ''} ${isUser ? 'max-w-[95%] sm:max-w-[85%] cursor-pointer active:scale-[0.99]' : complexity.layoutHints.maxWidthClass}`}
       >
+
         {/* Telegram Header Badge */}
         {!isUser && channel === 'telegram' && isFirstInGroup && (
           <div className={`mb-1 flex items-center gap-1.5 border-b border-slate-200/70 pb-1 text-xs font-semibold dark:border-white/10 ${isDark ? 'text-sky-400' : 'text-sky-700'}`}>
@@ -426,7 +427,8 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         {isEditing ? (
           editBox
         ) : (
-          <div className={`transition-all duration-150 ${complexity.adaptiveStyles.bodyClassName}`}>
+          <div className={`transition-all duration-150 ${complexity.layoutHints.bodyClassName} ${!isUser && complexity.layoutHints.showHierarchyLines ? 'border-l-2 border-slate-200/50 dark:border-slate-800/50 pl-4' : ''}`}>
+
             {!message.content && !isUser ? (
               <div className="flex items-center gap-1.5 py-1 text-amber-500 dark:text-amber-400">
                 <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />

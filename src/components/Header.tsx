@@ -25,6 +25,8 @@ import {
   HeartHandshake,
   History,
   Info,
+  AlertTriangle,
+  ShieldCheck,
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
 import { useAuthSession } from '../contexts/AuthSessionContext.tsx';
@@ -62,6 +64,8 @@ interface HeaderProps {
   onThinkingLevelChange?: (level: ThinkingLevel) => void | Promise<void>;
   historicalMetadata?: HistoricalInteractionMetadata | null;
   styleAnalysis?: CommunicationStyleAnalysis | null;
+  vaultConflictCount?: number;
+  onOpenKnowledgeVault?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -94,6 +98,8 @@ export const Header: React.FC<HeaderProps> = ({
   onThinkingLevelChange,
   historicalMetadata,
   styleAnalysis,
+  vaultConflictCount = 0,
+  onOpenKnowledgeVault,
 }) => {
   const displayName = nickname.trim() || userName.trim();
   const authSession = useAuthSession();
@@ -310,6 +316,37 @@ export const Header: React.FC<HeaderProps> = ({
               
               {styleAnalysis && (
                 <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-pink-500 border border-white dark:border-slate-950 shadow-sm" />
+              )}
+            </button>
+          )}
+
+          {onOpenKnowledgeVault && (
+            <button
+              type="button"
+              onClick={onOpenKnowledgeVault}
+              className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border transition active:scale-95 group shadow-xs relative ${
+                vaultConflictCount > 0 
+                  ? 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20 animate-in pulse duration-1000 iteration-infinite'
+                  : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'
+              }`}
+              title={vaultConflictCount > 0 ? `Belief Auditor: ${vaultConflictCount} active conflicts detected!` : "Intellectual Integrity Auditor"}
+            >
+              {vaultConflictCount > 0 ? (
+                <AlertTriangle className="w-4 h-4 text-rose-500" />
+              ) : (
+                <ShieldCheck className="w-4 h-4 text-emerald-500" />
+              )}
+              <div className="flex flex-col items-start leading-none">
+                <span className="text-[10px] font-bold uppercase tracking-wider hidden md:inline">Auditor</span>
+                {vaultConflictCount > 0 && (
+                  <span className="text-[8px] font-black hidden lg:inline">CONFLICT</span>
+                )}
+              </div>
+              
+              {vaultConflictCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-rose-600 text-[9px] font-bold text-white border-2 border-white dark:border-slate-950 shadow-sm">
+                  {vaultConflictCount}
+                </span>
               )}
             </button>
           )}

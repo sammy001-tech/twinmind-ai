@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AlertTriangle, CheckCircle2, History, Trash2, RefreshCw, Sparkles, ArrowRight, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, History, Trash2, RefreshCw, Sparkles, ArrowRight, X, ShieldCheck } from 'lucide-react';
 import { BeliefConflict } from '../types/index.ts';
 
 interface BeliefConflictCardProps {
@@ -62,16 +62,19 @@ export const BeliefConflictCard: React.FC<BeliefConflictCardProps> = ({
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
-            <AlertTriangle className="w-3.5 h-3.5" />
+          <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/30">
+            <ShieldCheck className="w-4 h-4" />
           </div>
           <div>
-            <h4 className="text-xs font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
-              <span>Belief Conflict &amp; Premise Tension</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/20 font-mono font-medium uppercase tracking-wider">
+            <h4 className="text-[11px] font-black text-amber-800 dark:text-amber-200 uppercase tracking-tighter flex items-center gap-1.5">
+              <span>Intellectual Integrity Auditor</span>
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-600 text-white font-mono text-[9px]">
                 {conflict.conflictType.replace('_', ' ')}
               </span>
             </h4>
+            <div className="text-[10px] font-bold text-amber-700/70 dark:text-amber-400/70">
+              PREMISE TENSION DETECTED
+            </div>
           </div>
         </div>
 
@@ -79,7 +82,7 @@ export const BeliefConflictCard: React.FC<BeliefConflictCardProps> = ({
           <button
             type="button"
             onClick={() => onDismiss(conflict.id)}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
+            className="p-1 rounded-lg text-amber-400 hover:text-amber-600 dark:hover:text-amber-200 transition"
             title="Dismiss tension banner"
           >
             <X className="w-3.5 h-3.5" />

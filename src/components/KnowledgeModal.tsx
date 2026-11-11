@@ -27,8 +27,10 @@ import {
   Check,
   ExternalLink,
   Network,
+  Milestone,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
+import { BeliefEvolutionTimeline } from './BeliefEvolutionTimeline.tsx';
 
 interface KnowledgeModalProps {
   isOpen: boolean;
@@ -75,7 +77,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   onOpenPromptCreator,
   isEmbedded = false,
 }) => {
-  const [activeTab, setActiveTab] = useState<'browse' | 'graph' | 'conflicts' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
+  const [activeTab, setActiveTab] = useState<'browse' | 'graph' | 'conflicts' | 'evolution' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
   const [documents, setDocuments] = useState<KnowledgeItem[]>([]);
   const [categories, setCategories] = useState<Array<{ category: string; count: number }>>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -527,6 +529,18 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
               )}
             </button>
             <button
+              onClick={() => setActiveTab('evolution')}
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
+                activeTab === 'evolution'
+                  ? 'bg-indigo-600 text-white font-bold shadow-xs'
+                  : 'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10'
+              }`}
+              title="View the growth and pivots of your stored beliefs"
+            >
+              <Milestone className="w-3 h-3" />
+              <span>Evolution</span>
+            </button>
+            <button
               onClick={() => setActiveTab('add')}
               className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1 ${
                 activeTab === 'add'
@@ -921,6 +935,24 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                   ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'evolution' && (
+            <div className="space-y-4 max-w-2xl mx-auto pb-8">
+              <div className="p-4 rounded-xl bg-indigo-500/10 border border-indigo-500/20 space-y-1">
+                <div className="flex items-center gap-2">
+                  <Milestone className="w-4 h-4 text-indigo-500" />
+                  <h4 className="font-bold text-xs text-slate-900 dark:text-white">
+                    Intellectual Growth & Strategic Pivots
+                  </h4>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                  Track how your perspectives, decisions, and premises have evolved over time. This timeline highlights intentional mind-changes preserved from the Belief Auditor.
+                </p>
+              </div>
+
+              <BeliefEvolutionTimeline documents={documents} />
             </div>
           )}
 

@@ -59,6 +59,17 @@ EVIDENCE-BASED THINKING PARTNERSHIP
 7. Never invent memories, personal opinions, or private facts to create a feeling of familiarity.
 8. Support the user's independent judgment; do not encourage dependence on the assistant.`;
 
+export const INTELLECTUAL_INTEGRITY_PROTOCOL = `
+======================================================
+INTELLECTUAL INTEGRITY & CONSISTENCY PROTOCOL
+======================================================
+1. PRIORITIZE CONSISTENCY OVER AGREEMENT: If a user statement or request contradicts a previously established decision, policy, or core belief in the Knowledge Vault, you MUST identify the tension.
+2. CHALLENGE GENTLY BUT FIRMLY: Do not "yes-man" the user. Use phrases like: "This appears to pivot from our previous decision on [Topic]. Should we formally update our stance, or is this a situational exception?"
+3. LABEL ASSUMPTIONS: Distinguish between "Verified Facts" (from the Vault/Web), "Working Hypotheses" (new ideas), and "Inferred Preferences".
+4. ZERO-FABRICATION INTEGRITY: If you detect a conflict and lack the data to resolve it, state the unknown clearly. Do not pretend the conflict doesn't exist.
+5. EVOLUTIONARY REASONING: When the user intentionally changes their mind (a "pivot"), acknowledge the transition and archive the old reasoning as "Superseded" rather than simply deleting it.
+`;
+
 export interface BuildPromptOptions {
   channel?: 'web' | 'telegram' | 'whatsapp';
   userName?: string;
@@ -323,6 +334,7 @@ Use a clear structure appropriate to the complexity of the request. Include reas
   return [
     MASTER_SYSTEM_PROMPT,
     LIVE_RESEARCH_PROTOCOL,
+    INTELLECTUAL_INTEGRITY_PROTOCOL,
     RESPONSE_FORMATTING_PROTOCOL,
     userContextDirective,
     threadDirective,

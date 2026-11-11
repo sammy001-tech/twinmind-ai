@@ -136,6 +136,7 @@ export default function App() {
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('low');
   const [historicalMetadata, setHistoricalMetadata] = useState<HistoricalInteractionMetadata | null>(null);
   const [styleAnalysis, setStyleAnalysis] = useState<CommunicationStyleAnalysis | null>(null);
+  const [vaultConflictCount, setVaultConflictCount] = useState<number>(0);
 
   // Theme hook (Dark, Light, System)
   const { themeMode, setThemeMode, isDark } = useTheme();
@@ -329,6 +330,24 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [messages.length, activeThreadId]);
+
+  const fetchVaultConflicts = async () => {
+    try {
+      const res = await fetch('/api/knowledge/conflicts/scan');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.conflicts)) {
+        setVaultConflictCount(data.conflicts.length);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch vault conflicts for header:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchVaultConflicts();
+    const interval = setInterval(fetchVaultConflicts, 60000); // Check every minute
+    return () => clearInterval(interval);
+  }, []);
 
   // Load conversation threads from Database
   const loadThreads = async () => {
@@ -1394,6 +1413,8 @@ export default function App() {
         onThinkingLevelChange={handleThinkingLevelChange}
         historicalMetadata={historicalMetadata}
         styleAnalysis={styleAnalysis}
+        vaultConflictCount={vaultConflictCount}
+        onOpenKnowledgeVault={() => setActiveTab('knowledge')}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
