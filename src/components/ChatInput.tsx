@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, PromptTemplate } from '../types/index.ts';
+import { ChannelType, PromptTemplate, ThinkingLevel } from '../types/index.ts';
+import { ThinkingLevelSelector } from './ThinkingLevelSelector.tsx';
 import {
   Send,
   Sparkles,
@@ -34,6 +35,8 @@ interface ChatInputProps {
   initialSwarmMode?: boolean;
   onOpenKnowledgeVault?: () => void;
   onOpenDecisionAnalyzer?: () => void;
+  thinkingLevel?: ThinkingLevel;
+  onThinkingLevelChange?: (level: ThinkingLevel) => void | Promise<void>;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -45,6 +48,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   initialSwarmMode = false,
   onOpenKnowledgeVault,
   onOpenDecisionAnalyzer,
+  thinkingLevel = 'low',
+  onThinkingLevelChange,
 }) => {
   const [text, setText] = useState('');
   const [requestVoiceNote, setRequestVoiceNote] = useState(false);
@@ -405,8 +410,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             />
           </div>
 
-          {/* Right Action Group: Mic & Circular Send Button */}
+          {/* Right Action Group: Thinking Level Selector, Mic & Circular Send Button */}
           <div className="flex items-center gap-1.5 shrink-0 pb-0.5">
+            {onThinkingLevelChange && (
+              <ThinkingLevelSelector
+                value={thinkingLevel}
+                onChange={onThinkingLevelChange}
+                compact={true}
+                dropUp={true}
+              />
+            )}
             
             {/* Mic / Audio Record Button */}
             <button

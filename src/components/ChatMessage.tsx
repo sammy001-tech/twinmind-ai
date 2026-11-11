@@ -25,6 +25,8 @@ import {
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { ArtifactCard } from './ArtifactCard.tsx';
+import { BeliefConflictCard } from './BeliefConflictCard.tsx';
+import { AutonomousMemoryBadge } from './AutonomousMemoryBadge.tsx';
 import { getMessageContentView } from '../utils/chatMessagePresentation.ts';
 import { useContentComplexity } from '../hooks/useContentComplexity.ts';
 
@@ -118,6 +120,7 @@ interface ChatMessageProps {
   onEditAndRegenerate?: (messageId: string, newContent: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onRetryMessage?: (messageId: string) => void;
+  onOpenKnowledgeVault?: () => void;
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
   hasMultipleInGroup?: boolean;
@@ -138,6 +141,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   onEditAndRegenerate,
   onDeleteMessage,
   onRetryMessage,
+  onOpenKnowledgeVault,
   isFirstInGroup = true,
   isLastInGroup = true,
   hasMultipleInGroup = false,
@@ -491,6 +495,19 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
+        {message.beliefConflict && !isEditing && (
+          <div className="mt-3 w-full min-w-0">
+            <BeliefConflictCard conflict={message.beliefConflict} />
+          </div>
+        )}
+
+        {message.autonomousMemory && !isEditing && (
+          <AutonomousMemoryBadge
+            memoryEvent={message.autonomousMemory}
+            onOpenVault={onOpenKnowledgeVault}
+          />
+        )}
+
         {isUser && message.processingStatus === 'processing' && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
           <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} role="status" aria-live="polite">
             <span>Processing</span>
@@ -768,6 +785,7 @@ interface GroupedChatMessageListProps {
   onEditAndRegenerate?: (messageId: string, newContent: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onRetryMessage?: (messageId: string) => void;
+  onOpenKnowledgeVault?: () => void;
   searchQuery?: string;
   autoPlayVoice?: boolean;
   voiceSpeed?: number;
@@ -785,6 +803,7 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   onEditAndRegenerate,
   onDeleteMessage,
   onRetryMessage,
+  onOpenKnowledgeVault,
   searchQuery = '',
   autoPlayVoice = false,
   voiceSpeed = 1,
@@ -827,6 +846,7 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
                     onEditAndRegenerate={onEditAndRegenerate}
                     onDeleteMessage={onDeleteMessage}
                     onRetryMessage={onRetryMessage}
+                    onOpenKnowledgeVault={onOpenKnowledgeVault}
                     isFirstInGroup={msgIdx === 0}
                     isLastInGroup={msgIdx === group.messages.length - 1}
                     hasMultipleInGroup={hasMultiple}

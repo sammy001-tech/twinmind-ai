@@ -27,8 +27,10 @@ import {
   Loader2,
   Sliders,
 } from 'lucide-react';
-import { LiveModelInfo, SoulTuningConfig } from '../types/index.ts';
+import { LiveModelInfo, SoulTuningConfig, ThinkingLevel, ChatMessage } from '../types/index.ts';
 import { THINKING_PRESETS } from '../utils/thinkingModes.ts';
+import { ThinkingLevelSelector } from './ThinkingLevelSelector.tsx';
+import { CommunicationStyleWidget } from './CommunicationStyleWidget.tsx';
 import { ThemeMode } from '../hooks/useTheme.ts';
 import { apiFetch } from '../utils/apiFetch.ts';
 
@@ -69,7 +71,11 @@ interface SettingsModalProps {
   userName?: string;
   nickname?: string;
   onSaveName?: (name: string, nick: string) => void;
+  thinkingLevel?: ThinkingLevel;
+  onThinkingLevelChange?: (level: ThinkingLevel) => void | Promise<void>;
   isEmbedded?: boolean;
+  messages?: ChatMessage[];
+  threadId?: string | null;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -105,7 +111,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   userName = '',
   nickname = '',
   onSaveName,
+  thinkingLevel = 'low',
+  onThinkingLevelChange,
   isEmbedded = false,
+  messages = [],
+  threadId = null,
 }) => {
   const [selectedProviderTab, setSelectedProviderTab] = useState<'gemini' | 'groq' | 'mistral'>(
     activeProvider === 'groq' || activeProvider === 'mistral' ? activeProvider : 'gemini'
@@ -2727,6 +2737,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </form>
         </div>
 
+        {/* Thinking Level (Dynamic Cognitive Depth) */}
+        {onThinkingLevelChange && (
+          <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+                <h3 className="text-xs font-semibold text-slate-900 dark:text-white">
+                  Thinking Level (Cognitive Pacing &amp; Depth)
+                </h3>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+              Dynamically calibrate your twin's reasoning depth. Modulates cognitive pacing across all providers (Gemini, Groq, Mistral) and native API thinking parameters without hardcoded model assumptions.
+            </p>
+
+            <div className="max-w-xs">
+              <ThinkingLevelSelector
+                value={thinkingLevel}
+                onChange={onThinkingLevelChange}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Digital Twin "Soul" Tuning (Behavioral Calibration) */}
         <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-4">
           <div className="flex items-center justify-between flex-wrap gap-2">
@@ -2917,6 +2952,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <strong>Operating Boundaries:</strong> Behavioral calibration controls conversational style and analytical emphasis. It does not replace factual truth, safety constraints, or specific task instructions.
           </div>
         </div>
+
+        {/* Embedded Communication Style & Emotional Persona Analysis Widget */}
+        <CommunicationStyleWidget
+          messages={messages}
+          threadId={threadId}
+          isEmbedded={true}
+        />
 
         {/* Dynamic Voice Selection (Provider Driven) */}
         <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3.5">

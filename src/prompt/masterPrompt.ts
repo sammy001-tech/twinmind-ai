@@ -71,6 +71,28 @@ export interface BuildPromptOptions {
   learnedContext?: string;
   calibrationContext?: string;
   soulTuning?: { tone?: number; directness?: number; perspective?: number };
+  thinkingLevel?: 'low' | 'medium' | 'high';
+  communicationStyleDirective?: string;
+}
+
+export function compileThinkingLevelDirective(thinkingLevel?: 'low' | 'medium' | 'high' | string): string {
+  if (!thinkingLevel) return '';
+  switch (thinkingLevel) {
+    case 'low':
+      return `\n\nCOGNITIVE DEPTH & PACING (THINKING LEVEL: LOW - FAST AND EFFICIENT)
+- Reasoning Depth: Fast and efficient.
+- Operational Directive: Deliver swift, direct, concise problem-solving without excessive internal monologue, redundant preambles, or unneeded verbosity. Prioritize quick turnaround and high signal-to-noise ratio.`;
+    case 'medium':
+      return `\n\nCOGNITIVE DEPTH & PACING (THINKING LEVEL: MEDIUM - BALANCED DEPTH)
+- Reasoning Depth: Balanced depth.
+- Operational Directive: Provide balanced analytical depth. Walk through essential reasoning steps clearly and methodically while maintaining strong practical structure and punchy readability.`;
+    case 'high':
+      return `\n\nCOGNITIVE DEPTH & PACING (THINKING LEVEL: HIGH - EXTRA THOROUGH)
+- Reasoning Depth: Extra thorough.
+- Operational Directive: Conduct rigorous multi-angle exploration, comprehensive edge-case inspection, and deep analytical reasoning before synthesizing final answers. Leave no critical nuance unexamined.`;
+    default:
+      return '';
+  }
 }
 
 export interface ValidatedSoulTuning {
@@ -222,6 +244,8 @@ export function buildSystemPrompt(
   let learnedContext = '';
   let calibrationContext = '';
   let soulTuningDirective = '';
+  let thinkingLevelDirective = '';
+  let communicationStyleDirective = '';
 
   if (typeof channelOrOptions === 'object' && channelOrOptions !== null) {
     channel = channelOrOptions.channel || 'web';
@@ -235,6 +259,8 @@ export function buildSystemPrompt(
     learnedContext = channelOrOptions.learnedContext || '';
     calibrationContext = channelOrOptions.calibrationContext || '';
     soulTuningDirective = compileSoulTuningDirective(channelOrOptions.soulTuning);
+    thinkingLevelDirective = compileThinkingLevelDirective(channelOrOptions.thinkingLevel);
+    communicationStyleDirective = channelOrOptions.communicationStyleDirective || '';
   } else if (typeof channelOrOptions === 'string') {
     channel = channelOrOptions;
   }
@@ -301,6 +327,8 @@ Use a clear structure appropriate to the complexity of the request. Include reas
     identityDirective,
     channelDirective,
     soulTuningDirective,
+    thinkingLevelDirective,
+    communicationStyleDirective,
     learnedContext,
     calibrationContext,
   ].filter(Boolean).join('');

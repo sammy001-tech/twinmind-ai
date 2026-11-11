@@ -1,4 +1,4 @@
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import { randomUUID } from 'node:crypto';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
@@ -267,6 +267,7 @@ export interface TwinAgentTurnOptions {
   model?: string;
   providerOverride?: 'gemini' | 'groq' | 'mistral' | string;
   modelOverride?: string;
+  thinkingLevel?: 'low' | 'medium' | 'high';
   signal?: AbortSignal;
   onToolStart?: (toolName: string, args: Record<string, unknown>, toolId: string) => void;
   onToolComplete?: (toolName: string, result: unknown, toolId: string) => void;
@@ -1086,8 +1087,9 @@ Respond in valid JSON:
       console.warn('[TwinAgent] Retrieval warning:', kErr);
     }
 
-    // Build Master System Prompt with Recalled Context, Soul Tuning & Safety Directives
+    // Build Master System Prompt with Recalled Context, Soul Tuning, Dynamic Thinking Level & Safety Directives
     const currentSettings = settingsManager.getSettings();
+    const resolvedThinkingLevel = options.thinkingLevel || currentSettings.thinkingLevel || 'low';
     const systemInstruction = buildSystemPrompt({
       channel,
       userName,
@@ -1100,6 +1102,7 @@ Respond in valid JSON:
       learnedContext,
       calibrationContext,
       soulTuning: currentSettings.soulTuning,
+      thinkingLevel: resolvedThinkingLevel,
     });
 
     const toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
@@ -1304,21 +1307,56 @@ Respond in valid JSON:
       let round = 0;
       const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
 
+      const geminiThinkingLevel =
+        resolvedThinkingLevel === 'high'
+          ? ThinkingLevel.HIGH
+          : resolvedThinkingLevel === 'medium'
+          ? ThinkingLevel.MEDIUM
+          : ThinkingLevel.LOW;
+
+      const callGeminiWithDynamicThinking = async (
+        generateCall: (useThinking: boolean) => Promise<any>,
+        operationName: string
+      ) => {
+        try {
+          return await callWithBoundedRetry(
+            () => generateCall(true),
+            { operationName, signal: options.signal }
+          );
+        } catch (err: any) {
+          const errMsg = String(err?.message || '');
+          // If the model rejects thinkingConfig dynamically at runtime, execute cleanly without it.
+          // Zero hardcoded model names.
+          if (/thinking(config|level)|unsupported\s+field|unknown\s+field|invalidargument/i.test(errMsg)) {
+            return await callWithBoundedRetry(
+              () => generateCall(false),
+              { operationName: `${operationName}_noThinking`, signal: options.signal }
+            );
+          }
+          throw err;
+        }
+      };
+
       while (round < MAX_ROUNDS) {
         round++;
 
-        const response = await callWithBoundedRetry(
-          () =>
-            geminiClient.models.generateContent({
+        const response = await callGeminiWithDynamicThinking(
+          (useThinking) => {
+            const config: any = {
+              systemInstruction,
+              temperature: 0.7,
+              tools: [{ functionDeclarations: GEMINI_TWIN_TOOLS }],
+            };
+            if (useThinking) {
+              config.thinkingConfig = { thinkingLevel: geminiThinkingLevel };
+            }
+            return geminiClient.models.generateContent({
               model,
               contents,
-              config: {
-                systemInstruction,
-                temperature: 0.7,
-                tools: [{ functionDeclarations: GEMINI_TWIN_TOOLS }],
-              },
-            }),
-          { operationName: `GeminiAgentRound(${round})`, signal: options.signal }
+              config,
+            });
+          },
+          `GeminiAgentRound(${round})`
         );
 
         const functionCalls = response.functionCalls;
@@ -1378,9 +1416,16 @@ Respond in valid JSON:
       }
 
       // If budget reached (3 rounds), perform final direct synthesis
-      const finalSynthesis = await callWithBoundedRetry(
-        () =>
-          geminiClient.models.generateContent({
+      const finalSynthesis = await callGeminiWithDynamicThinking(
+        (useThinking) => {
+          const config: any = {
+            systemInstruction,
+            temperature: 0.7,
+          };
+          if (useThinking) {
+            config.thinkingConfig = { thinkingLevel: geminiThinkingLevel };
+          }
+          return geminiClient.models.generateContent({
             model,
             contents: [
               ...contents,
@@ -1393,12 +1438,10 @@ Respond in valid JSON:
                 ],
               },
             ],
-            config: {
-              systemInstruction,
-              temperature: 0.7,
-            },
-          }),
-        { operationName: 'GeminiBudgetFinalSynthesis' }
+            config,
+          });
+        },
+        'GeminiBudgetFinalSynthesis'
       );
 
       const finalReply = finalSynthesis.text?.trim() || '';

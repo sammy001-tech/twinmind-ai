@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { KnowledgeItem } from '../types/index.ts';
+import { KnowledgeItem, BeliefConflict } from '../types/index.ts';
+import { KnowledgeGraphView } from './KnowledgeGraphView.tsx';
+import { BeliefConflictCard } from './BeliefConflictCard.tsx';
 import {
   Database,
   Search,
@@ -11,6 +13,7 @@ import {
   Tag,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   Loader2,
   RefreshCw,
   SlidersHorizontal,
@@ -23,6 +26,7 @@ import {
   Link2,
   Check,
   ExternalLink,
+  Network,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 
@@ -71,10 +75,36 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   onOpenPromptCreator,
   isEmbedded = false,
 }) => {
-  const [activeTab, setActiveTab] = useState<'browse' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
+  const [activeTab, setActiveTab] = useState<'browse' | 'graph' | 'conflicts' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
   const [documents, setDocuments] = useState<KnowledgeItem[]>([]);
   const [categories, setCategories] = useState<Array<{ category: string; count: number }>>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [vaultConflicts, setVaultConflicts] = useState<BeliefConflict[]>([]);
+  const [isScanningConflicts, setIsScanningConflicts] = useState(false);
+  const [conflictScanMessage, setConflictScanMessage] = useState<string | null>(null);
+
+  const handleScanConflicts = async () => {
+    setIsScanningConflicts(true);
+    setConflictScanMessage(null);
+    try {
+      const res = await fetch('/api/knowledge/conflicts/scan');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.conflicts)) {
+        setVaultConflicts(data.conflicts);
+        if (data.conflicts.length === 0) {
+          setConflictScanMessage('Vault audit complete: No contradictory premises detected across current stored memories.');
+        } else {
+          setConflictScanMessage(`Detected ${data.conflicts.length} active belief divergence(s) requiring strategic resolution.`);
+        }
+      } else {
+        setConflictScanMessage(data.error || 'Failed to scan vault conflicts');
+      }
+    } catch (err) {
+      setConflictScanMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsScanningConflicts(false);
+    }
+  };
   const [statusInfo, setStatusInfo] = useState<{
     totalDocuments: number;
     embeddedDocuments: number;
@@ -463,6 +493,40 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
               Vault ({documents.length})
             </button>
             <button
+              onClick={() => setActiveTab('graph')}
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
+                activeTab === 'graph'
+                  ? 'bg-purple-600 text-white font-bold shadow-xs'
+                  : 'text-purple-600 dark:text-purple-400 hover:bg-purple-500/10'
+              }`}
+              title="Force-Directed Memory Connections Map"
+            >
+              <Network className="w-3 h-3" />
+              <span>Memory Graph</span>
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('conflicts');
+                if (vaultConflicts.length === 0 && !isScanningConflicts) {
+                  handleScanConflicts();
+                }
+              }}
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
+                activeTab === 'conflicts'
+                  ? 'bg-rose-600 text-white font-bold shadow-xs'
+                  : 'text-rose-600 dark:text-rose-400 hover:bg-rose-500/10'
+              }`}
+              title="Autonomous Contradiction Detector & Belief Updater"
+            >
+              <AlertTriangle className="w-3 h-3" />
+              <span>Belief Auditor</span>
+              {vaultConflicts.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[9px] bg-rose-500/20 text-rose-700 dark:text-rose-300 font-bold border border-rose-500/30">
+                  {vaultConflicts.length}
+                </span>
+              )}
+            </button>
+            <button
               onClick={() => setActiveTab('add')}
               className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1 ${
                 activeTab === 'add'
@@ -753,6 +817,110 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                   })
                 )}
               </div>
+            </div>
+          )}
+
+          {activeTab === 'graph' && (
+            <div className="h-[520px] sm:h-[580px] flex flex-col space-y-2">
+              <div className="flex items-center justify-between pb-1.5 border-b border-slate-200 dark:border-slate-800 shrink-0">
+                <div className="flex items-center gap-2">
+                  <Network className="w-4 h-4 text-purple-500" />
+                  <h4 className="font-bold text-xs text-slate-900 dark:text-white">
+                    Memory Connections &amp; Vector Similarity Map
+                  </h4>
+                </div>
+                <span className="text-[10px] text-slate-500 hidden sm:inline">
+                  Interactive Force-Directed Physics • Live Neon pgvector documents
+                </span>
+              </div>
+              <KnowledgeGraphView
+                className="flex-1 min-h-0"
+                onInsertToChat={onInsertToChat}
+                onDocDeleted={() => {
+                  fetchDocuments();
+                  fetchCategories();
+                  fetchStatus();
+                }}
+              />
+            </div>
+          )}
+
+          {activeTab === 'conflicts' && (
+            <div className="space-y-4 max-w-2xl mx-auto">
+              <div className="p-4 rounded-xl bg-gradient-to-r from-rose-500/10 via-amber-500/10 to-transparent border border-rose-500/20 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-500" />
+                    <h4 className="font-bold text-xs text-slate-900 dark:text-white">
+                      Autonomous Contradiction Detector &amp; Belief Updater
+                    </h4>
+                  </div>
+                  <button
+                    onClick={handleScanConflicts}
+                    disabled={isScanningConflicts}
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-medium text-xs transition flex items-center gap-1.5 shadow-xs disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isScanningConflicts ? 'animate-spin' : ''}`} />
+                    <span>{isScanningConflicts ? 'Auditing Vault...' : 'Run Belief Audit'}</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  Scans your stored knowledge premises to detect conflicting instructions, outdated paradigms, or architectural reversals. When a contradiction is discovered, resolve it with a single click: <strong>Strategic Evolution</strong> (dated pivot), <strong>Update Record</strong> (overwrite), or <strong>Retire Record</strong> (prune).
+                </p>
+                {conflictScanMessage && (
+                  <p className="text-[11px] font-medium text-rose-700 dark:text-rose-300 pt-1">
+                    {conflictScanMessage}
+                  </p>
+                )}
+              </div>
+
+              {isScanningConflicts && (
+                <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
+                  <Loader2 className="w-6 h-6 animate-spin text-rose-500" />
+                  <p className="text-xs text-slate-600 dark:text-slate-400">
+                    Cross-referencing knowledge premises using dynamic semantic analysis...
+                  </p>
+                </div>
+              )}
+
+              {!isScanningConflicts && vaultConflicts.length === 0 && (
+                <div className="py-12 flex flex-col items-center justify-center text-center space-y-2 p-6 rounded-xl border border-dashed border-slate-200 dark:border-slate-800">
+                  <CheckCircle2 className="w-8 h-8 text-emerald-500" />
+                  <h5 className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                    Vault is Strategically Harmonious
+                  </h5>
+                  <p className="text-[11px] text-slate-500 max-w-sm">
+                    No active contradictions or mutually opposing premises detected across your {documents.length} stored records.
+                  </p>
+                  <button
+                    onClick={handleScanConflicts}
+                    className="mt-2 text-xs text-rose-600 hover:underline flex items-center gap-1"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Run deep audit now</span>
+                  </button>
+                </div>
+              )}
+
+              {!isScanningConflicts && vaultConflicts.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs text-slate-500 px-1">
+                    <span>Active Divergences ({vaultConflicts.length})</span>
+                    <span>Click an action to execute real database update</span>
+                  </div>
+                  {vaultConflicts.map((conflict) => (
+                    <BeliefConflictCard
+                      key={conflict.id}
+                      conflict={conflict}
+                      onResolved={() => {
+                        fetchDocuments();
+                        fetchCategories();
+                        handleScanConflicts();
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

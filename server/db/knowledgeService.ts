@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { neonDb } from './neonService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
+import type { GraphNode, GraphEdge, KnowledgeGraphData } from '../../src/types/index.ts';
 
 export interface KnowledgeDoc {
   id: string | number;
@@ -132,8 +133,8 @@ class KnowledgeService {
   /**
    * List all documents
    */
-  public async listDocuments(category?: string, query?: string) {
-    return await neonDb.getKnowledgeList(category, query);
+  public async listDocuments(category?: string, query?: string, limit?: number) {
+    return await neonDb.getKnowledgeList(category, query, limit);
   }
 
   /**
@@ -191,6 +192,107 @@ class KnowledgeService {
    */
   public async deleteCategory(categoryToDelete: string, fallbackCategory = 'personal_note'): Promise<number> {
     return this.renameCategory(categoryToDelete, fallbackCategory);
+  }
+
+  /**
+   * Update document content, title, category, or tags
+   */
+  public async updateDocument(
+    id: string | number,
+    patch: { title?: string; content?: string; category?: string; tags?: string[] }
+  ): Promise<boolean> {
+    let embedding: number[] | undefined;
+    if (patch.title || patch.content) {
+      const textToEmbed = `${patch.title || ''}\n\n${patch.content || ''}`.trim();
+      if (textToEmbed) {
+        embedding = await this.generateEmbedding(textToEmbed);
+      }
+    }
+    return await neonDb.updateKnowledge(id, {
+      ...patch,
+      embedding: embedding && embedding.length > 0 ? embedding : undefined,
+    });
+  }
+
+  /**
+   * Generate graph nodes and edges for the Visual Knowledge Graph
+   */
+  public async getKnowledgeGraph(): Promise<KnowledgeGraphData> {
+    const docs = await this.listDocuments(undefined, undefined, 200);
+    const nodes: GraphNode[] = docs.map((doc) => ({
+      id: `doc-${doc.id}`,
+      dbId: doc.id,
+      title: doc.title,
+      category: doc.category || 'personal_note',
+      tags: Array.isArray(doc.tags) ? doc.tags : [],
+      snippet: (doc.content || '').slice(0, 180),
+      wordCount: (doc.content || '').trim().split(/\s+/).filter(Boolean).length,
+      hasEmbedding: Boolean(doc.hasEmbedding),
+      createdAt: doc.createdAt,
+    }));
+
+    // Derive deterministic edges between nodes based on shared tags and category clusters
+    const edges: GraphEdge[] = [];
+    const edgeKeySet = new Set<string>();
+
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i];
+        const b = nodes[j];
+
+        // 1. Shared tags check
+        const sharedTags = a.tags.filter((t) =>
+          b.tags.some((bt) => bt.toLowerCase() === t.toLowerCase())
+        );
+        if (sharedTags.length > 0) {
+          const edgeId = `edge-tag-${a.id}-${b.id}`;
+          if (!edgeKeySet.has(edgeId)) {
+            edgeKeySet.add(edgeId);
+            edges.push({
+              id: edgeId,
+              source: a.id,
+              target: b.id,
+              type: 'shared_tag',
+              weight: Math.min(1.0, 0.4 + sharedTags.length * 0.2),
+              label: sharedTags.slice(0, 2).join(', '),
+            });
+          }
+        } else if (a.category && b.category && a.category === b.category) {
+          // 2. Same category cluster edge (subtler weight)
+          const edgeId = `edge-cat-${a.id}-${b.id}`;
+          if (!edgeKeySet.has(edgeId)) {
+            edgeKeySet.add(edgeId);
+            edges.push({
+              id: edgeId,
+              source: a.id,
+              target: b.id,
+              type: 'shared_category',
+              weight: 0.25,
+            });
+          }
+        }
+      }
+    }
+
+    // Category summary statistics
+    const catMap = new Map<string, number>();
+    for (const n of nodes) {
+      catMap.set(n.category, (catMap.get(n.category) || 0) + 1);
+    }
+
+    const categories = Array.from(catMap.entries()).map(([name, count]) => ({
+      name,
+      count,
+      color: '',
+    }));
+
+    return {
+      nodes,
+      edges,
+      categories,
+      totalNodes: nodes.length,
+      totalEdges: edges.length,
+    };
   }
 
   /**

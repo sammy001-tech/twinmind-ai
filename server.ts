@@ -15,6 +15,9 @@ import { twinAgentService } from './server/services/twinAgentService.ts';
 import { specialistSwarmService } from './server/services/specialistSwarmService.ts';
 import { swarmSessionRegistry } from './server/utils/swarmResourceManager.ts';
 import { twilioService } from './server/services/twilioService.ts';
+import { contradictionDetectorService } from './server/services/contradictionDetectorService.ts';
+import { communicationStyleService } from './server/services/communicationStyleService.ts';
+import { autonomousMemoryService } from './server/services/autonomousMemoryService.ts';
 import { jobQueueService } from './server/services/jobQueueService.ts';
 import { whatsAppWorker } from './server/services/whatsappWorker.ts';
 import { calibrationService } from './server/services/calibrationService.ts';
@@ -32,6 +35,7 @@ import {
   ingestDocumentChunks,
   fetchAndIngestWebPage,
 } from './server/services/documentIngestionService.ts';
+import type { AutonomousMemoryEvent } from './src/types/index.ts';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -849,6 +853,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       customGroqKey,
       customMistralKey,
       customTavilyKey,
+      thinkingLevel,
     } = req.body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -877,6 +882,9 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     const effectiveNickname = userContext?.nickname || nickname || currentSettings.nickname || '';
     const effectiveUserName = userContext?.userName || userName || currentSettings.userName || '';
     const effectiveVoice = userContext?.selectedVoice || currentSettings.voice || '';
+    const effectiveThinkingLevel = (typeof thinkingLevel === 'string' && (thinkingLevel === 'low' || thinkingLevel === 'medium' || thinkingLevel === 'high'))
+      ? thinkingLevel
+      : (currentSettings.thinkingLevel || 'low');
 
     // Never reuse a model identifier saved for a different provider or silently select another model.
     const targetProvider = provider;
@@ -903,6 +911,36 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       }
     }
 
+    // Cancel work when the response stream is abandoned, not when the request body finishes reading.
+    const abortController = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) abortController.abort();
+    });
+
+    // Evaluate if incoming user statement updates an existing Vault record or creates a new one
+    let autonomousMemoryEvent: AutonomousMemoryEvent | null = null;
+    if (queryUserMsg && queryUserMsg.content) {
+      try {
+        autonomousMemoryEvent = await autonomousMemoryService.evaluateAndPersist(queryUserMsg.content, {
+          customGeminiKey: customGeminiKey || currentSettings.customGeminiKey,
+          signal: abortController.signal,
+        });
+      } catch (memErr) {
+        console.warn('[AutonomousMemory] Persistence warning:', memErr);
+      }
+    }
+
+    // Analyze user communication style & tone to tune persona resonance
+    let communicationStyleDirective = '';
+    try {
+      const styleAnalysis = await communicationStyleService.analyzeCommunicationStyle(messages, {
+        customGeminiKey: customGeminiKey || currentSettings.customGeminiKey,
+      });
+      communicationStyleDirective = communicationStyleService.getPersonaPromptDirective(styleAnalysis);
+    } catch (sErr) {
+      console.warn('Communication style analysis warning:', sErr);
+    }
+
     // Build system prompt with explicit User Context & recalled pgvector knowledge
     const systemInstruction = buildSystemPrompt({
       channel,
@@ -913,6 +951,9 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       selectedVoice: effectiveVoice,
       recalledKnowledge,
       activeThreadTitle: effectiveThreadTitle,
+      soulTuning: currentSettings.soulTuning,
+      thinkingLevel: effectiveThinkingLevel,
+      communicationStyleDirective,
     });
 
     const effectiveGroqKey = customGroqKey || process.env.GROQ_API_KEY;
@@ -941,14 +982,12 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       })}\n\n`
     );
 
+    if (autonomousMemoryEvent) {
+      res.write(`data: ${JSON.stringify({ autonomousMemory: autonomousMemoryEvent })}\n\n`);
+    }
+
     // Track full reply for database persistence
     let fullReply = '';
-
-    // Cancel work when the response stream is abandoned, not when the request body finishes reading.
-    const abortController = new AbortController();
-    res.on('close', () => {
-      if (!res.writableEnded) abortController.abort();
-    });
 
     // Keep-alive heartbeat every 10s to prevent proxy timeouts
     const heartbeatTimer = setInterval(() => {
@@ -1097,6 +1136,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         customGroqKey,
         customMistralKey,
         customTavilyKey,
+        thinkingLevel: effectiveThinkingLevel,
         signal: abortController.signal,
         providerOverride: targetProvider as any,
         modelOverride: targetModel,
@@ -1173,6 +1213,20 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
     if (!fullReply.trim()) throw new Error('AI_OUTPUT_EMPTY: selected provider returned no chat reply');
 
+    // Autonomous Contradiction Detection against stored memory premises
+    let detectedConflict = null;
+    try {
+      detectedConflict = await contradictionDetectorService.detectContradiction(lastUserQuery, {
+        customGeminiKey,
+        signal: abortController.signal,
+      });
+      if (detectedConflict) {
+        res.write(`data: ${JSON.stringify({ beliefConflict: detectedConflict })}\n\n`);
+      }
+    } catch (cErr) {
+      console.warn('[ContradictionDetector] Evaluation warning:', cErr);
+    }
+
     // If retrying or replacing an assistant turn, prune the old assistant turn durably
     const numericReplaceAssistantDbId = Number(replaceAssistantDbId);
     if (Number.isSafeInteger(numericReplaceAssistantDbId) && numericReplaceAssistantDbId > 0) {
@@ -1233,7 +1287,11 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           content: fullReply,
           provider: targetProvider,
           model: targetModel,
-          metadata: { artifacts: (req as any)._artifacts || [] },
+          metadata: {
+            artifacts: (req as any)._artifacts || [],
+            beliefConflict: detectedConflict || undefined,
+            autonomousMemory: autonomousMemoryEvent || undefined,
+          },
         });
       } catch (dbErr) {
         console.warn('[NeonDB] Save assistant msg error:', dbErr);
@@ -2506,6 +2564,76 @@ app.post('/api/knowledge/categories/delete', async (req: Request, res: Response)
     res.json({ success: true, modified });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to delete category' });
+  }
+});
+
+// Visual Knowledge Graph & Memory Connections Map
+app.get('/api/knowledge/graph', async (_req: Request, res: Response) => {
+  try {
+    const graphData = await knowledgeService.getKnowledgeGraph();
+    res.json({ success: true, graph: graphData });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to generate knowledge graph' });
+  }
+});
+
+// Autonomous Contradiction Scanner & Belief Updater
+app.get('/api/knowledge/conflicts/scan', async (_req: Request, res: Response) => {
+  try {
+    const conflicts = await contradictionDetectorService.scanVaultConflicts();
+    res.json({ success: true, conflicts });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to scan vault conflicts' });
+  }
+});
+
+app.post('/api/knowledge/conflicts/resolve', async (req: Request, res: Response) => {
+  try {
+    const { conflictId, docId, action, newStatement } = req.body;
+    if (!docId || !action) {
+      res.status(400).json({ success: false, error: 'docId and action are required' });
+      return;
+    }
+    const result = await contradictionDetectorService.resolveConflict({
+      conflictId,
+      docId,
+      action,
+      newStatement,
+    });
+    res.json(result);
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to resolve belief conflict' });
+  }
+});
+
+// Communication Style & Emotional Tone Analysis Endpoint
+app.post('/api/communication-style', async (req: Request, res: Response) => {
+  try {
+    const { messages = [], threadId, customGeminiKey } = req.body;
+    let targetMessages = Array.isArray(messages) ? messages : [];
+
+    // If threadId provided and messages empty, retrieve thread messages from Neon DB
+    if (targetMessages.length === 0 && typeof threadId === 'string' && threadId.trim()) {
+      try {
+        const dbMsgs = await neonDb.getThreadMessages(threadId.trim());
+        if (dbMsgs && dbMsgs.length > 0) {
+          targetMessages = dbMsgs.map((m) => ({
+            role: m.role,
+            content: m.content,
+            created_at: m.created_at,
+          }));
+        }
+      } catch (dbErr) {
+        console.warn('Failed to fetch thread messages for style analysis:', dbErr);
+      }
+    }
+
+    const analysis = await communicationStyleService.analyzeCommunicationStyle(targetMessages, {
+      customGeminiKey,
+    });
+    res.json({ success: true, analysis });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to analyze communication style' });
   }
 });
 

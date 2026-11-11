@@ -61,6 +61,71 @@ export interface ChatMessage {
   swarmTrace?: SwarmSessionState;
   researchActivity?: LiveResearchActivity[];
   artifacts?: GeneratedArtifact[];
+  beliefConflict?: BeliefConflict;
+  autonomousMemory?: AutonomousMemoryEvent;
+}
+
+export interface AutonomousMemoryEvent {
+  id: string;
+  action: 'update_existing' | 'create_new';
+  docId: number | string;
+  docTitle: string;
+  category: string;
+  confidenceScore: number; // 0 to 100
+  tier: 'architectural' | 'preference' | 'workflow';
+  summary: string;
+  updatedContent?: string;
+  previousContent?: string;
+  userStatementSnippet: string;
+  timestamp: string;
+}
+
+export interface BeliefConflict {
+  id: string;
+  existingDocId: number | string;
+  existingTitle: string;
+  existingExcerpt: string;
+  conflictType: 'direct_contradiction' | 'policy_pivot' | 'preference_update';
+  explanation: string;
+  userStatement: string;
+  suggestedAction: 'update_record' | 'retire_record' | 'mark_evolution';
+  status?: 'pending' | 'resolved' | 'dismissed';
+  resolutionAction?: 'update' | 'retire' | 'evolve';
+}
+
+export interface GraphNode {
+  id: string;
+  dbId: number | string;
+  title: string;
+  category: string;
+  tags: string[];
+  snippet: string;
+  wordCount: number;
+  hasEmbedding: boolean;
+  createdAt: string;
+  clusterGroup?: number;
+  x?: number;
+  y?: number;
+  vx?: number;
+  vy?: number;
+  radius?: number;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: 'shared_tag' | 'shared_category' | 'semantic_similarity';
+  weight: number;
+  label?: string;
+}
+
+export interface KnowledgeGraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  categories: Array<{ name: string; count: number; color: string }>;
+  totalNodes: number;
+  totalEdges: number;
 }
 
 export interface SwarmToolCall {
@@ -165,6 +230,8 @@ export interface SoulTuningConfig {
   perspective: number; // 0 (skeptical/devil's advocate) to 100 (visionary/optimistic)
 }
 
+export type ThinkingLevel = 'low' | 'medium' | 'high';
+
 export interface AppSettings {
   brandName?: string;
   activeProvider: 'gemini' | 'groq' | 'mistral' | '';
@@ -202,7 +269,54 @@ export interface AppSettings {
   keyTestStatuses?: KeyTestStatusMap;
   themeMode?: 'dark' | 'light' | 'system';
   soulTuning?: SoulTuningConfig;
+  thinkingLevel?: ThinkingLevel;
   webGroundingEnabled?: boolean;
+}
+
+export interface SentimentDataPoint {
+  messageIndex: number;
+  timestamp: string;
+  userSnippet: string;
+  sentiment: 'positive' | 'neutral' | 'analytical' | 'frustrated' | 'enthusiastic' | 'direct';
+  score: number; // -1.0 to +1.0
+  urgency: number; // 0 to 10
+  formality: number; // 0 to 10
+  technicalDepth: number; // 0 to 10
+  dominantEmotion: string;
+}
+
+export interface ToneBreakdown {
+  label: string;
+  percentage: number;
+  color: string;
+}
+
+export interface PerceivedTrait {
+  trait: string; // e.g. 'Empathetic', 'Analytical', 'Concise', 'Diagnostic', 'Transparent'
+  score: number; // 0 to 100
+  description: string;
+  badgeColor?: string;
+}
+
+export interface TwinPersonaAdaptation {
+  activeToneMode: string;
+  recommendedPacing: 'concise_fast' | 'balanced' | 'empathetic_thorough' | 'deep_technical';
+  empathyLevel: number; // 0 to 100
+  formalityTarget: number; // 0 to 100
+  adaptedBehaviors: string[];
+  explanation: string;
+  perceivedTraits?: PerceivedTrait[];
+}
+
+export interface CommunicationStyleAnalysis {
+  totalAnalyzedMessages: number;
+  overallSentiment: string;
+  averageScore: number;
+  toneBreakdown: ToneBreakdown[];
+  timeline: SentimentDataPoint[];
+  personaAdaptation: TwinPersonaAdaptation;
+  perceivedTraits: PerceivedTrait[];
+  keyEmotionalInsights: string[];
 }
 
 

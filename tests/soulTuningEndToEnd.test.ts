@@ -31,7 +31,7 @@ test('end-to-end verification: soul tuning propagates from durable settings into
     channel: 'web',
     userName: activeSettings.userName || 'Operator',
     activeProvider: 'gemini',
-    activeModel: 'gemini-2.5-flash',
+    activeModel: 'gemini-3.8-flash',
     soulTuning: activeSettings.soulTuning,
   });
 

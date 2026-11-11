@@ -9,7 +9,7 @@ test.after(async () => {
 
 test('SettingsManager durably persists configured provider models across all 3 providers', async () => {
   const testModels = {
-    gemini: 'gemini-2.5-flash',
+    gemini: 'gemini-3.8-flash',
     groq: 'llama-3.3-70b-versatile',
     mistral: 'mistral-large-latest',
   };
@@ -17,20 +17,20 @@ test('SettingsManager durably persists configured provider models across all 3 p
   // 1. Update settings with explicit models for all 3 providers
   const updated = await settingsManager.updateSettings({
     activeProvider: 'gemini',
-    activeModel: 'gemini-2.5-flash',
+    activeModel: 'gemini-3.8-flash',
     providerModels: testModels,
   });
 
-  assert.equal(updated.providerModels.gemini, 'gemini-2.5-flash');
+  assert.equal(updated.providerModels.gemini, 'gemini-3.8-flash');
   assert.equal(updated.providerModels.groq, 'llama-3.3-70b-versatile');
   assert.equal(updated.providerModels.mistral, 'mistral-large-latest');
   assert.equal(updated.activeProvider, 'gemini');
-  assert.equal(updated.activeModel, 'gemini-2.5-flash');
+  assert.equal(updated.activeModel, 'gemini-3.8-flash');
 
   // 2. Simulate server restart hydration from database
   const hydrated = await settingsManager.syncFromDatabase();
 
-  assert.equal(hydrated.providerModels.gemini, 'gemini-2.5-flash');
+  assert.equal(hydrated.providerModels.gemini, 'gemini-3.8-flash');
   assert.equal(hydrated.providerModels.groq, 'llama-3.3-70b-versatile');
   assert.equal(hydrated.providerModels.mistral, 'mistral-large-latest');
 
@@ -43,7 +43,7 @@ test('syncFromDatabase preserves valid in-memory/disk provider models if databas
   // Set memory to known configured models
   await settingsManager.updateSettings({
     providerModels: {
-      gemini: 'gemini-2.5-flash',
+      gemini: 'gemini-3.8-flash',
       groq: 'llama-3.3-70b-versatile',
       mistral: 'mistral-large-latest',
     },
@@ -51,7 +51,7 @@ test('syncFromDatabase preserves valid in-memory/disk provider models if databas
 
   // Verify sync preserves them
   const rehydrated = await settingsManager.syncFromDatabase();
-  assert.equal(rehydrated.providerModels.gemini, 'gemini-2.5-flash');
+  assert.equal(rehydrated.providerModels.gemini, 'gemini-3.8-flash');
   assert.equal(rehydrated.providerModels.groq, 'llama-3.3-70b-versatile');
   assert.equal(rehydrated.providerModels.mistral, 'mistral-large-latest');
 });
@@ -67,6 +67,6 @@ test('updateSettings preserves existing provider models when updating a single p
   assert.equal(next.activeModel, 'llama-3.3-70b-specdec');
   assert.equal(next.providerModels.groq, 'llama-3.3-70b-specdec');
   // Gemini and Mistral models must remain intact!
-  assert.equal(next.providerModels.gemini, 'gemini-2.5-flash');
+  assert.equal(next.providerModels.gemini, 'gemini-3.8-flash');
   assert.equal(next.providerModels.mistral, 'mistral-large-latest');
 });

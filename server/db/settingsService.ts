@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type { AppSettings } from '../../src/types/index.ts';
 import { validateSoulTuningInput } from '../../src/prompt/masterPrompt.ts';
+import { isValidThinkingLevel, DEFAULT_THINKING_LEVEL } from '../../src/utils/thinkingLevel.ts';
 import { neonDb } from './neonService.ts';
 import { maskProviderCredential, normalizeProviderCredential, resolveCredentialSourceForDisplay } from '../services/providerCredentialService.ts';
 
@@ -41,6 +42,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   proactiveAlertChannel: (process.env.PROACTIVE_ALERT_CHANNEL as 'whatsapp' | 'telegram' | 'none') || 'none',
   themeMode: 'system',
   soulTuning: { tone: 50, directness: 50, perspective: 50 },
+  thinkingLevel: DEFAULT_THINKING_LEVEL,
   webGroundingEnabled: false,
 };
 
@@ -264,6 +266,12 @@ class SettingsManager {
       filteredPatch.soulTuning = validation.config;
     }
 
+    if ('thinkingLevel' in filteredPatch && filteredPatch.thinkingLevel !== undefined) {
+      if (!isValidThinkingLevel(filteredPatch.thinkingLevel)) {
+        throw new Error('INVALID_THINKING_LEVEL: thinking level must be "low", "medium", or "high"');
+      }
+    }
+
     const nextSettings: AppSettings = {
       ...this.currentSettings,
       ...filteredPatch,
@@ -290,6 +298,7 @@ class SettingsManager {
       'telegramOwnerUsername',
       'telegramPairingCode',
       'soulTuning',
+      'thinkingLevel',
       'webGroundingEnabled',
     ] as const;
     const requiresDurableWrite = durableFields.some((field) =>
@@ -363,6 +372,7 @@ class SettingsManager {
       voiceSpeed: s.voiceSpeed,
       ttsModel: s.ttsModel || '',
       soulTuning: s.soulTuning || { tone: 50, directness: 50, perspective: 50 },
+      thinkingLevel: s.thinkingLevel || DEFAULT_THINKING_LEVEL,
       webGroundingEnabled: Boolean(s.webGroundingEnabled),
       customPrompts: s.customPrompts || [],
       activeThreadId: s.activeThreadId ?? null,

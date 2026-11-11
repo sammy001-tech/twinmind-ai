@@ -2229,6 +2229,51 @@ class NeonDatabaseService {
   }
 
   /**
+   * Update a knowledge document title, content, category, tags, or embedding
+   */
+  public async updateKnowledge(
+    id: number | string,
+    patch: { title?: string; content?: string; category?: string; tags?: string[]; embedding?: number[] }
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+
+    try {
+      const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+      const params: unknown[] = [id];
+
+      if (patch.title !== undefined) {
+        params.push(patch.title);
+        updates.push(`title = $${params.length}`);
+      }
+      if (patch.content !== undefined) {
+        params.push(patch.content);
+        updates.push(`content = $${params.length}`);
+      }
+      if (patch.category !== undefined) {
+        params.push(patch.category);
+        updates.push(`category = $${params.length}`);
+      }
+      if (patch.tags !== undefined) {
+        params.push(JSON.stringify(patch.tags));
+        updates.push(`tags = $${params.length}`);
+      }
+      if (patch.embedding && patch.embedding.length > 0) {
+        params.push(`[${patch.embedding.join(',')}]`);
+        updates.push(`embedding = $${params.length}::vector`);
+      }
+
+      await this.pool.query(
+        `UPDATE twin_knowledge SET ${updates.join(', ')} WHERE id = $1`,
+        params
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error updating knowledge document:', err);
+      return false;
+    }
+  }
+
+  /**
    * Get telemetry stats for pgvector knowledge base
    */
   public async getKnowledgeStats(): Promise<{

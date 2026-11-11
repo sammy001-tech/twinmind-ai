@@ -115,6 +115,10 @@ class ModelCatalogService {
             ? model.supportedGenerationMethods.filter((item): item is string => typeof item === 'string')
             : [];
           if (!id || !methods.includes('generateContent')) continue;
+
+          // DEFENSIVE: Skip known deprecated or 404 models that may still appear in some v1beta lists
+          if (id === 'gemini-2.5-flash') continue;
+
           models.push({
             id,
             displayName: typeof model.displayName === 'string' && model.displayName ? model.displayName : id,

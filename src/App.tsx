@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig } from './types/index.ts';
+import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
 import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
@@ -19,6 +19,7 @@ import { ChatSearchInput } from './components/ChatSearchInput.tsx';
 import { CustomPromptModal } from './components/CustomPromptModal.tsx';
 import { EmptyState } from './components/EmptyState.tsx';
 import { VoiceRecorderModal } from './components/VoiceRecorderModal.tsx';
+import { CommunicationStyleWidget } from './components/CommunicationStyleWidget.tsx';
 import { useTheme, ThemeMode } from './hooks/useTheme.ts';
 import {
   Sparkles,
@@ -132,6 +133,7 @@ export default function App() {
     directness: 50,
     perspective: 50,
   });
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('low');
 
   // Theme hook (Dark, Light, System)
   const { themeMode, setThemeMode, isDark } = useTheme();
@@ -146,6 +148,7 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isCustomPromptModalOpen, setIsCustomPromptModalOpen] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+  const [isStyleWidgetOpen, setIsStyleWidgetOpen] = useState(false);
 
   // In-Chat Search & Filtering State
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -217,6 +220,11 @@ export default function App() {
     syncSettingsToServer({ themeMode: mode });
   };
 
+  const handleThinkingLevelChange = async (level: ThinkingLevel) => {
+    setThinkingLevel(level);
+    await syncSettingsToServer({ thinkingLevel: level });
+  };
+
   // Load server-persisted unified settings dynamically from Database on mount (no stale local storage)
   useEffect(() => {
     // Proactively purge any legacy stale local storage
@@ -250,6 +258,7 @@ export default function App() {
             if (s.customPrompts && Array.isArray(s.customPrompts)) setCustomPrompts(s.customPrompts);
             if (s.activeThreadId) setActiveThreadId(s.activeThreadId);
             if (s.themeMode) setThemeMode(s.themeMode);
+            if (s.thinkingLevel) setThinkingLevel(s.thinkingLevel);
             if (s.soulTuning && typeof s.soulTuning === 'object') {
               setSoulTuning({
                 tone: typeof s.soulTuning.tone === 'number' ? s.soulTuning.tone : 50,
@@ -318,6 +327,7 @@ export default function App() {
             processingStatus: resolveMessageProcessingStatus(m.metadata?.processingStatus),
             modelInfo: typeof m.provider === 'string' && m.provider ? { provider: m.provider, model: typeof m.model === 'string' ? m.model : '' } : undefined,
             artifacts: m.metadata?.artifacts || [],
+            beliefConflict: m.metadata?.beliefConflict || undefined,
             imageData: m.metadata?.imageData || undefined,
             audioUrl: m.metadata?.audioUrl || undefined,
           }));
@@ -847,6 +857,7 @@ export default function App() {
           model: activeModel,
           customGroqKey,
           customMistralKey,
+          thinkingLevel,
           useSwarm,
         }),
       });
@@ -885,6 +896,24 @@ export default function App() {
               const parsed = JSON.parse(dataStr);
               if (parsed.error) {
                 throw new Error(parsed.error);
+              }
+              // Autonomous Contradiction Detector & Belief Updater event
+              if (parsed.beliefConflict) {
+                ensureAssistantMessage({ beliefConflict: parsed.beliefConflict });
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId ? { ...msg, beliefConflict: parsed.beliefConflict } : msg
+                  )
+                );
+              }
+              // Autonomous Memory Engine event
+              if (parsed.autonomousMemory) {
+                ensureAssistantMessage({ autonomousMemory: parsed.autonomousMemory });
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId ? { ...msg, autonomousMemory: parsed.autonomousMemory } : msg
+                  )
+                );
               }
               // Model info metadata
               if (parsed.meta) {
@@ -1305,8 +1334,11 @@ export default function App() {
         onThemeModeChange={handleThemeModeChange}
         onProviderChange={handleProviderChange}
         onOpenVoiceModal={() => setIsVoiceModalOpen(true)}
+        onOpenCommunicationStyleWidget={() => setIsStyleWidgetOpen(true)}
         soulTuning={soulTuning}
         onSelectThinkingMode={handleSelectThinkingPreset}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={handleThinkingLevelChange}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
@@ -1442,6 +1474,7 @@ export default function App() {
                     onEditAndRegenerate={handleEditAndRegenerate}
                     onDeleteMessage={handleDeleteMessage}
                     onRetryMessage={handleRetryMessage}
+                    onOpenKnowledgeVault={() => setActiveTab('knowledge')}
                     searchQuery={searchQuery}
                     autoPlayVoice={autoPlayVoice}
                     voiceSpeed={voiceSpeed}
@@ -1487,6 +1520,8 @@ export default function App() {
               onRefreshPrompts={() => fetchPrompts(true)}
               onOpenKnowledgeVault={() => setActiveTab('knowledge')}
               onOpenDecisionAnalyzer={() => setActiveTab('advice')}
+              thinkingLevel={thinkingLevel}
+              onThinkingLevelChange={handleThinkingLevelChange}
             />
           </div>
         )}
@@ -1567,6 +1602,10 @@ export default function App() {
             onAutoPlayVoiceChange={handleAutoPlayVoiceChange}
             voiceSpeed={voiceSpeed}
             onVoiceSpeedChange={handleVoiceSpeedChange}
+            thinkingLevel={thinkingLevel}
+            onThinkingLevelChange={handleThinkingLevelChange}
+            messages={messages}
+            threadId={activeThreadId}
           />
         )}
       </div>
@@ -1657,6 +1696,14 @@ export default function App() {
         brandName={brandName}
         userName={userName}
         nickname={nickname}
+      />
+
+      {/* Communication Style & Emotional Tone Analysis Widget */}
+      <CommunicationStyleWidget
+        isOpen={isStyleWidgetOpen}
+        onClose={() => setIsStyleWidgetOpen(false)}
+        messages={messages}
+        threadId={activeThreadId}
       />
     </div>
   );
