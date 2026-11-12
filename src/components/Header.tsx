@@ -281,76 +281,80 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right Side: Thinking Level & Thinking Mode Selector & Action Buttons */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {onThinkingLevelChange && (
-            <ThinkingLevelSelector
-              value={thinkingLevel}
-              onChange={onThinkingLevelChange}
-              compact={true}
-            />
-          )}
+          {/* Secondary Controls - Desktop View (Hidden on mobile < 768px to prevent overflow) */}
+          <div className="hidden md:flex items-center gap-1.5 sm:gap-2">
+            {onThinkingLevelChange && (
+              <ThinkingLevelSelector
+                value={thinkingLevel}
+                onChange={onThinkingLevelChange}
+                compact={true}
+              />
+            )}
 
-          {soulTuning && onSelectThinkingMode && (
-            <ThinkingModeSelector
-              soulTuning={soulTuning}
-              onSelectPreset={onSelectThinkingMode}
-              onOpenSettings={onOpenSettingsModal}
-            />
-          )}
+            {soulTuning && onSelectThinkingMode && (
+              <ThinkingModeSelector
+                soulTuning={soulTuning}
+                onSelectPreset={onSelectThinkingMode}
+                onOpenSettings={onOpenSettingsModal}
+              />
+            )}
 
-          {onOpenCommunicationStyleWidget && (
-            <button
-              type="button"
-              onClick={onOpenCommunicationStyleWidget}
-              className="flex items-center gap-1.5 px-2 py-1.5 rounded-xl bg-pink-500/10 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/20 transition active:scale-95 group shadow-xs relative"
-              title="Tone & Persona Mirror"
-            >
-              <HeartHandshake className={`w-4 h-4 ${styleAnalysis ? 'text-pink-500 animate-pulse' : ''}`} />
-              <div className="flex flex-col items-start leading-none">
-                <span className="text-[10px] font-bold uppercase tracking-wider hidden md:inline">Persona</span>
+            {onOpenCommunicationStyleWidget && (
+              <button
+                type="button"
+                onClick={onOpenCommunicationStyleWidget}
+                className="flex items-center gap-1.5 px-2 py-1.5 rounded-xl bg-pink-500/10 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/20 transition active:scale-95 group shadow-xs relative"
+                title="Tone & Persona Mirror"
+              >
+                <HeartHandshake className={`w-4 h-4 ${styleAnalysis ? 'text-pink-500 animate-pulse' : ''}`} />
+                <div className="flex flex-col items-start leading-none">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Persona</span>
+                  {styleAnalysis && (
+                    <span className="text-[8px] font-medium text-slate-500 dark:text-slate-400">
+                      {styleAnalysis.overallSentiment}
+                    </span>
+                  )}
+                </div>
+                
                 {styleAnalysis && (
-                  <span className="text-[8px] font-medium text-slate-500 dark:text-slate-400 hidden lg:inline">
-                    {styleAnalysis.overallSentiment}
+                  <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-pink-500 border border-white dark:border-slate-950 shadow-sm" />
+                )}
+              </button>
+            )}
+
+            {onOpenKnowledgeVault && (
+              <button
+                type="button"
+                onClick={onOpenKnowledgeVault}
+                className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border transition active:scale-95 group shadow-xs relative ${
+                  vaultConflictCount > 0 
+                    ? 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20 animate-in pulse duration-1000 iteration-infinite'
+                    : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'
+                }`}
+                title={vaultConflictCount > 0 ? `Belief Auditor: ${vaultConflictCount} active conflicts detected!` : "Intellectual Integrity Auditor"}
+              >
+                {vaultConflictCount > 0 ? (
+                  <AlertTriangle className="w-4 h-4 text-rose-500" />
+                ) : (
+                  <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                )}
+                <div className="flex flex-col items-start leading-none">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Auditor</span>
+                  {vaultConflictCount > 0 && (
+                    <span className="text-[8px] font-black">CONFLICT</span>
+                  )}
+                </div>
+                
+                {vaultConflictCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-rose-600 text-[9px] font-bold text-white border-2 border-white dark:border-slate-950 shadow-sm">
+                    {vaultConflictCount}
                   </span>
                 )}
-              </div>
-              
-              {styleAnalysis && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-pink-500 border border-white dark:border-slate-950 shadow-sm" />
-              )}
-            </button>
-          )}
+              </button>
+            )}
+          </div>
 
-          {onOpenKnowledgeVault && (
-            <button
-              type="button"
-              onClick={onOpenKnowledgeVault}
-              className={`flex items-center gap-1.5 px-2 py-1.5 rounded-xl border transition active:scale-95 group shadow-xs relative ${
-                vaultConflictCount > 0 
-                  ? 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/20 animate-in pulse duration-1000 iteration-infinite'
-                  : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20'
-              }`}
-              title={vaultConflictCount > 0 ? `Belief Auditor: ${vaultConflictCount} active conflicts detected!` : "Intellectual Integrity Auditor"}
-            >
-              {vaultConflictCount > 0 ? (
-                <AlertTriangle className="w-4 h-4 text-rose-500" />
-              ) : (
-                <ShieldCheck className="w-4 h-4 text-emerald-500" />
-              )}
-              <div className="flex flex-col items-start leading-none">
-                <span className="text-[10px] font-bold uppercase tracking-wider hidden md:inline">Auditor</span>
-                {vaultConflictCount > 0 && (
-                  <span className="text-[8px] font-black hidden lg:inline">CONFLICT</span>
-                )}
-              </div>
-              
-              {vaultConflictCount > 0 && (
-                <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-rose-600 text-[9px] font-bold text-white border-2 border-white dark:border-slate-950 shadow-sm">
-                  {vaultConflictCount}
-                </span>
-              )}
-            </button>
-          )}
-
+          {/* Primary Action Capsule (New Chat, Voice, Overflow ⋮) */}
           <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800/80 rounded-full px-2 py-1 shadow-xs">
             
             {/* New Chat Button */}
@@ -393,7 +397,55 @@ export const Header: React.FC<HeaderProps> = ({
 
               {/* Overflow Options Popover Menu */}
               {isMoreMenuOpen && (
-                <div className="absolute top-9 right-0 w-48 max-h-[min(80dvh,32rem)] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-1.5 z-50 animate-in fade-in duration-150">
+                <div className="absolute top-9 right-0 w-56 max-h-[min(80dvh,32rem)] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-1.5 z-50 animate-in fade-in duration-150">
+                  
+                  {/* Mobile-Only Quick Settings Group */}
+                  <div className="md:hidden space-y-1 pb-1 mb-1 border-b border-slate-200 dark:border-slate-800">
+                    <div className="text-[10px] font-bold text-slate-400 dark:text-slate-500 px-2.5 py-1 uppercase tracking-wider">
+                      Thinking & Intelligence
+                    </div>
+
+                    {onThinkingLevelChange && (
+                      <div className="px-2.5 py-1 flex items-center justify-between text-xs">
+                        <span className="text-slate-600 dark:text-slate-400 font-medium">Thinking Depth:</span>
+                        <ThinkingLevelSelector
+                          value={thinkingLevel}
+                          onChange={onThinkingLevelChange}
+                          compact={true}
+                        />
+                      </div>
+                    )}
+
+                    {soulTuning && onSelectThinkingMode && (
+                      <div className="px-2.5 py-1 flex items-center justify-between text-xs">
+                        <span className="text-slate-600 dark:text-slate-400 font-medium">Thinking Mode:</span>
+                        <ThinkingModeSelector
+                          soulTuning={soulTuning}
+                          onSelectPreset={onSelectThinkingMode}
+                          onOpenSettings={onOpenSettingsModal}
+                        />
+                      </div>
+                    )}
+
+                    {onOpenKnowledgeVault && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onOpenKnowledgeVault();
+                          setIsMoreMenuOpen(false);
+                        }}
+                        className="w-full text-left px-2.5 py-1.5 rounded-xl text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 transition"
+                      >
+                        {vaultConflictCount > 0 ? (
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                        )}
+                        <span>Integrity Auditor {vaultConflictCount > 0 ? `(${vaultConflictCount} conflict)` : ''}</span>
+                      </button>
+                    )}
+                  </div>
+
                   {onToggleSearch && (
                     <button
                       type="button"

@@ -360,16 +360,22 @@ export default function App() {
 
           // Restore or select active thread
           let targetId = activeThreadId;
-          if (!targetId || !data.threads.some((t: ChatThread) => t.id === targetId)) {
+          const isThreadInServerList = Boolean(targetId && data.threads.some((t: ChatThread) => t.id === targetId));
+          const isNewUnsavedThread = Boolean(targetId && messages.length === 0 && !isThreadInServerList);
+
+          if (!targetId || (!isThreadInServerList && !isNewUnsavedThread)) {
             if (data.threads.length > 0) {
               targetId = data.threads[0].id;
             }
           }
 
-          if (targetId) {
+          if (targetId && !isNewUnsavedThread) {
             setActiveThreadId(targetId);
             syncSettingsToServer({ activeThreadId: targetId });
             await loadThreadMessages(targetId);
+          } else if (targetId && isNewUnsavedThread) {
+            setActiveThreadId(targetId);
+            syncSettingsToServer({ activeThreadId: targetId });
           }
         }
       }
@@ -377,6 +383,7 @@ export default function App() {
       console.warn('Failed to load threads from server:', err);
     }
   };
+
 
   // Load messages for a specific conversation thread from Neon DB
   const loadThreadMessages = async (threadId: string) => {
