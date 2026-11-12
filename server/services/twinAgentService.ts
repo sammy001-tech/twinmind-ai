@@ -10,6 +10,14 @@ import { calibrationService } from './calibrationService.ts';
 import { modelCatalogService } from './modelCatalogService.ts';
 import { historicalAwarenessService } from './historicalAwarenessService.ts';
 import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, resolveBoundedIntegerSetting, resolveResearchSearchDepth } from '../utils/researchEvidence.ts';
+import {
+  isVisionCapableModel,
+  validateImageAttachment,
+  buildVisionSpecialistPrompt,
+  formatVisualEvidenceForContext,
+  type VisualEvidencePackage,
+  type ImageAttachment,
+} from './visionCapabilityService.ts';
 
 const Type = {
   OBJECT: 'OBJECT',
@@ -373,6 +381,159 @@ class TwinAgentService {
       },
     });
   }
+
+  /**
+   * Background Vision Specialist Worker.
+   * Invoked when the primary model does not support native vision, or when secondary visual extraction is needed.
+   * Extracts verified, structured visual facts without hallucinatory fabrications.
+   */
+  public async executeVisionSpecialistPrePass(
+    image: ImageAttachment,
+    userPrompt: string,
+    keys?: { gemini?: string; groq?: string; mistral?: string },
+    signal?: AbortSignal
+  ): Promise<VisualEvidencePackage> {
+    const s = settingsManager.getSettings();
+    const effectiveKeys = {
+      gemini: this.resolveUsableCredential(process.env.GEMINI_API_KEY, s.customGeminiKey, keys?.gemini),
+      groq: this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, keys?.groq),
+      mistral: this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, keys?.mistral),
+    };
+
+    const specialist = await modelCatalogService.resolveVisionSpecialist(effectiveKeys);
+    if (!specialist) {
+      return {
+        status: 'unavailable',
+        errorCode: 'NO_VISION_SPECIALIST_AVAILABLE',
+        errorMessage: 'No vision-capable model provider is currently configured or reachable.',
+      };
+    }
+
+    const taskPrompt = buildVisionSpecialistPrompt(userPrompt);
+
+    try {
+      if (specialist.provider === 'gemini') {
+        const geminiClient = new GoogleGenAI({
+          apiKey: specialist.key,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build-twinagent-vision' } },
+        });
+
+        const contents = [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: image.mimeType || 'image/jpeg',
+                  data: image.data,
+                },
+              },
+              { text: taskPrompt },
+            ],
+          },
+        ];
+
+        const res = await callWithBoundedRetry(
+          () =>
+            geminiClient.models.generateContent({
+              model: specialist.model,
+              contents,
+              config: { temperature: 0.2 },
+            }),
+          { operationName: `VisionSpecialist(${specialist.provider}:${specialist.model})`, signal, maxRetries: 2 }
+        );
+
+        const text = res.text?.trim() || '';
+        if (!text) {
+          return {
+            status: 'failed',
+            specialistProvider: specialist.provider,
+            specialistModel: specialist.model,
+            errorCode: 'EMPTY_VISION_OUTPUT',
+            errorMessage: 'Vision specialist returned an empty extraction.',
+          };
+        }
+
+        return {
+          status: 'success',
+          specialistProvider: specialist.provider,
+          specialistModel: specialist.model,
+          rawAnalysis: text,
+        };
+      }
+
+      // OpenAI-compatible vision completion (e.g. Mistral Pixtral or Groq Vision)
+      const endpoint = specialist.provider === 'groq'
+        ? 'https://api.groq.com/openai/v1/chat/completions'
+        : 'https://api.mistral.ai/v1/chat/completions';
+
+      const res = await callWithBoundedRetry(
+        async () => {
+          const r = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${specialist.key}`,
+            },
+            body: JSON.stringify({
+              model: specialist.model,
+              messages: [
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: taskPrompt },
+                    {
+                      type: 'image_url',
+                      image_url: {
+                        url: `data:${image.mimeType || 'image/jpeg'};base64,${image.data}`,
+                      },
+                    },
+                  ],
+                },
+              ],
+              temperature: 0.2,
+            }),
+            signal,
+          });
+
+          if (!r.ok) {
+            const errBody = await r.text().catch(() => '');
+            throw new Error(`${specialist.provider} vision API error (${r.status}): ${errBody}`);
+          }
+          return await r.json();
+        },
+        { operationName: `VisionSpecialist(${specialist.provider}:${specialist.model})`, signal, maxRetries: 2 }
+      );
+
+      const content = res.choices?.[0]?.message?.content?.trim() || '';
+      if (!content) {
+        return {
+          status: 'failed',
+          specialistProvider: specialist.provider,
+          specialistModel: specialist.model,
+          errorCode: 'EMPTY_VISION_OUTPUT',
+          errorMessage: 'Vision specialist returned an empty extraction.',
+        };
+      }
+
+      return {
+        status: 'success',
+        specialistProvider: specialist.provider,
+        specialistModel: specialist.model,
+        rawAnalysis: content,
+      };
+    } catch (err: unknown) {
+      console.warn(`[TwinAgent] Vision specialist failed (${specialist.provider}:${specialist.model}):`, err);
+      return {
+        status: 'failed',
+        specialistProvider: specialist.provider,
+        specialistModel: specialist.model,
+        errorCode: 'VISION_SPECIALIST_EXECUTION_FAILED',
+        errorMessage: err instanceof Error ? err.message : 'Vision specialist execution failed.',
+      };
+    }
+  }
+
 
   /**
    * Multi-provider completion method that respects user settings and overrides.
@@ -1145,9 +1306,45 @@ Respond in valid JSON:
       console.warn('[TwinAgent] Retrieval warning:', kErr);
     }
 
-    // Build Master System Prompt with Recalled Context, Soul Tuning, Dynamic Thinking Level & Safety Directives
+    // =========================================================================
+    // MULTIMODAL INTELLIGENCE GATEWAY & VISION ROUTER
+    // =========================================================================
+    let activeModelSupportsVision = isVisionCapableModel(provider as any, model);
+    let visualEvidence: VisualEvidencePackage | null = null;
+    let validatedImage: ImageAttachment | null = null;
+
+    if (options.imageData?.data) {
+      const validation = validateImageAttachment(options.imageData);
+      if (validation.valid && validation.attachment) {
+        validatedImage = validation.attachment;
+
+        // If the active model is text-only (e.g. Groq/Mistral non-vision model), invoke Background Vision Specialist
+        if (!activeModelSupportsVision) {
+          visualEvidence = await this.executeVisionSpecialistPrePass(
+            validatedImage,
+            userPrompt,
+            { gemini: options.customGeminiKey, groq: customGroqKey, mistral: customMistralKey },
+            options.signal
+          );
+        }
+      } else if (!validation.valid) {
+        visualEvidence = {
+          status: 'failed',
+          errorCode: 'IMAGE_VALIDATION_FAILED',
+          errorMessage: validation.error || 'Attached image failed MIME or size validation.',
+        };
+      }
+    }
+
+    // Build Master System Prompt with Recalled Context, Soul Tuning, Dynamic Thinking Level & Visual Evidence
     const currentSettings = settingsManager.getSettings();
     const resolvedThinkingLevel = options.thinkingLevel || currentSettings.thinkingLevel || 'low';
+    
+    // Inject structured visual evidence into the prompt context if a specialist pre-pass was executed
+    const effectiveLearnedContext = visualEvidence
+      ? `${learnedContext}\n${formatVisualEvidenceForContext(visualEvidence)}`
+      : learnedContext;
+
     const systemInstruction = buildSystemPrompt({
       channel,
       userName,
@@ -1157,12 +1354,13 @@ Respond in valid JSON:
       selectedVoice,
       recalledKnowledge: recalledKnowledge as any,
       activeThreadTitle,
-      learnedContext,
+      learnedContext: effectiveLearnedContext,
       calibrationContext,
       historicalContext,
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: resolvedThinkingLevel,
     });
+
 
     const toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
     const maxAgentToolCalls = resolveBoundedIntegerSetting(
@@ -1537,11 +1735,24 @@ Respond in valid JSON:
         throw new Error('GROQ_API_KEY is not configured for Groq provider. Please provide your key in Settings.');
       }
 
+      const groqUserContent = (activeModelSupportsVision && validatedImage)
+        ? [
+            { type: 'text', text: userPrompt || 'Please inspect and analyze this attached image.' },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${validatedImage.mimeType};base64,${validatedImage.data}`,
+              },
+            },
+          ]
+        : userPrompt;
+
       const groqMessages: Array<any> = [
         { role: 'system', content: systemInstruction },
         ...conversationHistory.map((m) => ({ role: m.role, content: m.content })),
-        { role: 'user', content: userPrompt },
+        { role: 'user', content: groqUserContent },
       ];
+
 
       let round = 0;
       const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
@@ -1669,11 +1880,24 @@ Respond in valid JSON:
         throw new Error('MISTRAL_API_KEY is not configured for Mistral provider. Please provide your key in Settings.');
       }
 
+      const mistralUserContent = (activeModelSupportsVision && validatedImage)
+        ? [
+            { type: 'text', text: userPrompt || 'Please inspect and analyze this attached image.' },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${validatedImage.mimeType};base64,${validatedImage.data}`,
+              },
+            },
+          ]
+        : userPrompt;
+
       const mistralMessages: Array<any> = [
         { role: 'system', content: systemInstruction },
         ...conversationHistory.map((m) => ({ role: m.role, content: m.content })),
-        { role: 'user', content: userPrompt },
+        { role: 'user', content: mistralUserContent },
       ];
+
 
       let round = 0;
       const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);

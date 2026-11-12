@@ -317,6 +317,60 @@ class ModelCatalogService {
 
     return { gemini, groq, mistral };
   }
+
+  /**
+   * Dynamically resolves a live vision-capable specialist model.
+   * Priority: Gemini multimodal (reliable native vision) -> Mistral vision/Pixtral -> Groq vision.
+   */
+  public async resolveVisionSpecialist(
+    keys?: { gemini?: string; groq?: string; mistral?: string }
+  ): Promise<{ provider: ProviderId; model: string; key: string } | null> {
+    // 1. Try Gemini first if credential exists
+    const geminiKey = this.normalizeKey(keys?.gemini || process.env.GEMINI_API_KEY);
+    if (geminiKey) {
+      try {
+        const geminiModels = await this.getLiveGeminiModels(geminiKey);
+        // Find first chat-capable model that is not an embedding
+        const visionModel = geminiModels.find((m) => !m.id.includes('embedding') && !m.id.includes('aqa'));
+        if (visionModel) {
+          return { provider: 'gemini', model: visionModel.id, key: geminiKey };
+        }
+      } catch (err) {
+        console.warn('[ModelCatalogService] Gemini vision discovery warning:', err);
+      }
+    }
+
+    // 2. Try Mistral vision models (e.g. Pixtral or Mistral vision)
+    const mistralKey = this.normalizeKey(keys?.mistral || process.env.MISTRAL_API_KEY);
+    if (mistralKey) {
+      try {
+        const mistralModels = await this.getLiveMistralModels(mistralKey);
+        const visionModel = mistralModels.find((m) => /pixtral|vision/i.test(m.id));
+        if (visionModel) {
+          return { provider: 'mistral', model: visionModel.id, key: mistralKey };
+        }
+      } catch (err) {
+        console.warn('[ModelCatalogService] Mistral vision discovery warning:', err);
+      }
+    }
+
+    // 3. Try Groq vision models (e.g. Llama-3.2 vision or Qwen vision)
+    const groqKey = this.normalizeKey(keys?.groq || process.env.GROQ_API_KEY);
+    if (groqKey) {
+      try {
+        const groqModels = await this.getLiveGroqModels(groqKey);
+        const visionModel = groqModels.find((m) => /vision|vl|qwen.*(?:vl|vision)/i.test(m.id));
+        if (visionModel) {
+          return { provider: 'groq', model: visionModel.id, key: groqKey };
+        }
+      } catch (err) {
+        console.warn('[ModelCatalogService] Groq vision discovery warning:', err);
+      }
+    }
+
+    return null;
+  }
 }
+
 
 export const modelCatalogService = new ModelCatalogService();

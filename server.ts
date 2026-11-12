@@ -2659,7 +2659,42 @@ app.get('/api/historical-awareness', async (_req: Request, res: Response) => {
   }
 });
 
+// Direct Document Parsing for Chat Analysis (PDF, Markdown, Text, JSON, CSV)
+app.post('/api/documents/parse', async (req: Request, res: Response) => {
+  try {
+    const { filename, contentBase64, textContent, mimeType } = req.body || {};
+
+    if (!filename || typeof filename !== 'string') {
+      res.status(400).json({ success: false, error: 'FILENAME_REQUIRED: filename string is required' });
+      return;
+    }
+
+    let buffer: Buffer;
+    if (typeof contentBase64 === 'string' && contentBase64.length > 0) {
+      buffer = Buffer.from(contentBase64, 'base64');
+    } else if (typeof textContent === 'string' && textContent.length > 0) {
+      buffer = Buffer.from(textContent, 'utf-8');
+    } else {
+      res.status(400).json({ success: false, error: 'CONTENT_REQUIRED: Either contentBase64 or textContent must be provided' });
+      return;
+    }
+
+    const parsed = await parseDocumentBuffer(filename, buffer, mimeType);
+    res.json({
+      success: true,
+      title: parsed.title,
+      content: parsed.content,
+      format: parsed.format,
+      charCount: parsed.content.length,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ success: false, error: message });
+  }
+});
+
 // Document File Ingestion (PDF, Markdown, Text, JSON, CSV) with intelligent chunking & pgvector embedding
+
 app.post('/api/knowledge/ingest/file', async (req: Request, res: Response) => {
   try {
     const { filename, contentBase64, textContent, mimeType, category = 'reference', tags = [] } = req.body || {};

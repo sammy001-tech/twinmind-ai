@@ -17,7 +17,10 @@ import {
   Brain,
   Check,
   RefreshCw,
+  FileText,
+  Loader2,
 } from 'lucide-react';
+
 
 interface ChatInputProps {
   onSendMessage: (
@@ -63,6 +66,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     name: string;
     previewUrl: string;
   } | null>(null);
+  const [attachedDocument, setAttachedDocument] = useState<{
+    name: string;
+    format: string;
+    content: string;
+    charCount: number;
+  } | null>(null);
+  const [isParsingDocument, setIsParsingDocument] = useState(false);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -152,14 +164,23 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   const handleSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if ((!text.trim() && !selectedImage) || isLoading) return;
-    
-    const sendContent = text.trim() || (selectedImage ? `Please analyze this uploaded photo/image (${selectedImage.name}):` : '');
+    if ((!text.trim() && !selectedImage && !attachedDocument) || isLoading || isParsingDocument) return;
+
+    let sendContent = text.trim();
+    if (attachedDocument) {
+      const docHeader = `[ATTACHED DOCUMENT: ${attachedDocument.name} (${attachedDocument.format.toUpperCase()}, ${attachedDocument.charCount.toLocaleString()} chars)]\n${attachedDocument.content}\n[END ATTACHED DOCUMENT]`;
+      sendContent = sendContent ? `${sendContent}\n\n${docHeader}` : `Please analyze this attached document (${attachedDocument.name}):\n\n${docHeader}`;
+    } else if (selectedImage && !sendContent) {
+      sendContent = `Please analyze this uploaded photo/image (${selectedImage.name}):`;
+    }
+
     const imagePayload = selectedImage ? { mimeType: selectedImage.mimeType, data: selectedImage.data, name: selectedImage.name } : undefined;
 
     onSendMessage(sendContent, requestVoiceNote, undefined, undefined, swarmMode, imagePayload);
     setText('');
     setSelectedImage(null);
+    setAttachedDocument(null);
+    setDocumentError(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -182,6 +203,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     const files = e.target.files;
     if (!files || files.length === 0) return;
     const file = files[0];
+    setDocumentError(null);
 
     if (file.type.startsWith('image/')) {
       const reader = new FileReader();
@@ -196,27 +218,72 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         });
       };
       reader.readAsDataURL(file);
+    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+      // Parse PDF via the server document parsing service
+      setIsParsingDocument(true);
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const resultStr = reader.result as string;
+          const base64Data = resultStr.split(',')[1];
+          const res = await fetch('/api/documents/parse', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: file.name,
+              contentBase64: base64Data,
+              mimeType: 'application/pdf',
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || 'Failed to parse PDF file');
+          }
+          setAttachedDocument({
+            name: file.name,
+            format: data.format || 'pdf',
+            content: data.content,
+            charCount: data.charCount || data.content.length,
+          });
+        } catch (err: unknown) {
+          setDocumentError(err instanceof Error ? err.message : 'Could not read PDF');
+        } finally {
+          setIsParsingDocument(false);
+        }
+      };
+      reader.readAsDataURL(file);
     } else {
+      // Markdown, CSV, JSON, code, or plaintext
       const reader = new FileReader();
       reader.onload = () => {
         const content = reader.result as string;
-        setText((prev) => (prev ? `${prev}\n\n[Attached File: ${file.name}]\n${content.slice(0, 500)}` : `Analyze this file content:\n\nFilename: ${file.name}\n${content.slice(0, 1000)}`));
+        setAttachedDocument({
+          name: file.name,
+          format: file.name.split('.').pop() || 'text',
+          content,
+          charCount: content.length,
+        });
       };
       reader.readAsText(file);
     }
     setIsToolMenuOpen(false);
+    // Reset file input value so selecting the same file again triggers onChange
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   return (
     <div className="w-full shrink-0 max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 relative z-20">
-      {/* Hidden File Input supporting photos, images, and text documents */}
+      {/* Hidden File Input supporting PDF, photos, images, and text documents */}
       <input
         type="file"
         ref={fileInputRef}
         onChange={handleFileUpload}
         className="hidden"
-        accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.txt,.md,.json,.csv,.js,.ts,.tsx,.py"
+        accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.json,.csv,.js,.ts,.tsx,.py"
       />
+
 
       {/* Recording Overlay Bar */}
       {isRecording && (
@@ -254,9 +321,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
               <img src={selectedImage.previewUrl} alt="Preview" className="w-8 h-8 rounded-lg object-cover border border-amber-500/50" />
               <div className="flex flex-col">
                 <span className="font-semibold truncate max-w-[160px] text-xs">{selectedImage.name}</span>
-                <span className="text-[10px] text-amber-500 font-medium">Photo Attached (Gemini Vision Ready)</span>
+                <span className="text-[10px] text-amber-500 font-medium">Photo Attached (Multimodal Vision Ready)</span>
               </div>
             </div>
+
             <button
               type="button"
               onClick={() => setSelectedImage(null)}
@@ -267,6 +335,53 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             </button>
           </div>
         )}
+
+        {/* Attached Document Preview Chip */}
+        {attachedDocument && (
+          <div className="pt-2.5 px-3.5 flex items-center justify-between">
+            <div className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs">
+              <FileText className="w-5 h-5 text-indigo-500 shrink-0" />
+              <div className="flex flex-col">
+                <span className="font-semibold truncate max-w-[200px] text-xs">{attachedDocument.name}</span>
+                <span className="text-[10px] text-indigo-500 dark:text-indigo-400 font-medium">
+                  {attachedDocument.format.toUpperCase()} Document Attached ({attachedDocument.charCount.toLocaleString()} chars)
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setAttachedDocument(null)}
+              className="text-slate-400 hover:text-red-500 p-1 rounded-lg transition"
+              title="Remove attached document"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Document Parsing Progress Indicator */}
+        {isParsingDocument && (
+          <div className="pt-2.5 px-3.5 flex items-center gap-2 text-xs text-indigo-500 dark:text-indigo-400">
+            <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+            <span>Reading and extracting document text...</span>
+          </div>
+        )}
+
+        {/* Document Parsing Error Banner */}
+        {documentError && (
+          <div className="pt-2.5 px-3.5 flex items-center justify-between text-xs text-rose-500">
+            <span>{documentError}</span>
+            <button
+              type="button"
+              onClick={() => setDocumentError(null)}
+              className="text-slate-400 hover:text-rose-500 p-0.5"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
 
         {/* Active Mode Badge Chip above text input */}
         {swarmMode && (
@@ -434,14 +549,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {/* Circular Amber Send Button */}
             <button
               type="submit"
-              disabled={(!text.trim() && !selectedImage) || isLoading}
+              disabled={(!text.trim() && !selectedImage && !attachedDocument) || isLoading || isParsingDocument}
               className={`w-9 h-9 rounded-full flex items-center justify-center transition shadow-lg ${
-                (text.trim() || selectedImage) && !isLoading
+                (text.trim() || selectedImage || attachedDocument) && !isLoading && !isParsingDocument
                   ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold active:scale-95 shadow-amber-500/20'
                   : 'bg-slate-100 text-slate-400 border border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700/50 cursor-not-allowed'
               }`}
               title="Send message"
             >
+
               {isLoading ? (
                 <Square className="w-3.5 h-3.5 fill-slate-950 animate-pulse" />
               ) : (
