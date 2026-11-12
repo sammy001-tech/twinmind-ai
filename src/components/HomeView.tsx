@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Brain,
   MessageSquare,
   Target,
   Database,
@@ -8,18 +7,22 @@ import {
   Send,
   Edit3,
   ArrowRight,
-  ShieldAlert,
-  Lightbulb,
-  CheckCircle2,
   Sparkles,
-  Layers,
   ExternalLink,
   Plus,
   Users,
   RefreshCw,
+  Compass,
+  Bell,
+  Play,
+  Trash2,
+  Clock,
+  CheckCircle2,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
-import { ChatThread, PromptTemplate } from '../types/index.ts';
+import { ChatThread, LearningJourney, PromptTemplate, ScheduledCheckin } from '../types/index.ts';
 
 interface HomeViewProps {
   brandName?: string;
@@ -36,6 +39,7 @@ interface HomeViewProps {
   messageCount: number;
   threads?: ChatThread[];
   onSelectThread?: (threadId: string) => void;
+  onStartJourneyThread?: (journeyId: number, journeyTitle: string) => void | Promise<void>;
   onOpenThreadDrawer?: () => void;
   onOpenTelegramModal?: () => void;
   customPrompts?: PromptTemplate[];
@@ -47,7 +51,6 @@ interface HomeViewProps {
 export const HomeView: React.FC<HomeViewProps> = ({
   brandName = 'TwinMind AI',
   displayName,
-  userName,
   onOpenNicknameModal,
   activeProvider,
   activeModel,
@@ -58,6 +61,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
   messageCount = 0,
   threads = [],
   onSelectThread,
+  onStartJourneyThread,
   onOpenThreadDrawer,
   onOpenTelegramModal,
   customPrompts = [],
@@ -77,6 +81,60 @@ export const HomeView: React.FC<HomeViewProps> = ({
     botUsername: string | null;
     botFirstName: string | null;
   } | null>(null);
+
+  // Learning Journeys state
+  const [journeys, setJourneys] = useState<LearningJourney[]>([]);
+  const [journeysError, setJourneysError] = useState<string | null>(null);
+  const [showNewJourneyForm, setShowNewJourneyForm] = useState(false);
+  const [journeyTitle, setJourneyTitle] = useState('');
+  const [journeyNextStep, setJourneyNextStep] = useState('');
+  const [journeyDescription, setJourneyDescription] = useState('');
+  const [isSavingJourney, setIsSavingJourney] = useState(false);
+  const [editingJourneyId, setEditingJourneyId] = useState<number | null>(null);
+  const [editJourneyNextStep, setEditJourneyNextStep] = useState('');
+  const [editJourneyStatus, setEditJourneyStatus] = useState<'active' | 'paused' | 'completed'>('active');
+
+  // Scheduled Check-Ins state
+  const [checkins, setCheckins] = useState<ScheduledCheckin[]>([]);
+  const [checkinsError, setCheckinsError] = useState<string | null>(null);
+  const [showNewCheckinForm, setShowNewCheckinForm] = useState(false);
+  const [checkinTitle, setCheckinTitle] = useState('');
+  const [checkinPrompt, setCheckinPrompt] = useState('');
+  const [checkinChannel, setCheckinChannel] = useState<'telegram' | 'whatsapp'>('telegram');
+  const [checkinDelayMinutes, setCheckinDelayMinutes] = useState('60');
+  const [isSavingCheckin, setIsSavingCheckin] = useState(false);
+  const [triggeringCheckinId, setTriggeringCheckinId] = useState<number | null>(null);
+  const [checkinActionNotice, setCheckinActionNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const fetchJourneys = useCallback(async () => {
+    try {
+      const res = await fetch('/api/journeys');
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        setJourneysError(data?.error || `Learning Journeys unavailable (HTTP ${res.status}).`);
+        return;
+      }
+      setJourneys(Array.isArray(data.journeys) ? data.journeys : []);
+      setJourneysError(null);
+    } catch (err: unknown) {
+      setJourneysError(err instanceof Error ? err.message : 'Unable to reach Learning Journeys API.');
+    }
+  }, []);
+
+  const fetchCheckins = useCallback(async () => {
+    try {
+      const res = await fetch('/api/checkins');
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        setCheckinsError(data?.error || `Scheduled Check-Ins unavailable (HTTP ${res.status}).`);
+        return;
+      }
+      setCheckins(Array.isArray(data.checkins) ? data.checkins : []);
+      setCheckinsError(null);
+    } catch (err: unknown) {
+      setCheckinsError(err instanceof Error ? err.message : 'Unable to reach Scheduled Check-Ins API.');
+    }
+  }, []);
 
   useEffect(() => {
     fetch('/api/knowledge/status')
@@ -105,7 +163,153 @@ export const HomeView: React.FC<HomeViewProps> = ({
         }
       })
       .catch((err) => console.warn('Could not fetch telegram status:', err));
-  }, []);
+
+    void fetchJourneys();
+    void fetchCheckins();
+  }, [fetchJourneys, fetchCheckins]);
+
+  const handleCreateJourney = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!journeyTitle.trim()) return;
+    setIsSavingJourney(true);
+    setJourneysError(null);
+    try {
+      const res = await fetch('/api/journeys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: journeyTitle.trim(),
+          next_step: journeyNextStep.trim(),
+          description: journeyDescription.trim(),
+          status: 'active',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to create Learning Journey.');
+      }
+      setJourneyTitle('');
+      setJourneyNextStep('');
+      setJourneyDescription('');
+      setShowNewJourneyForm(false);
+      await fetchJourneys();
+    } catch (err: unknown) {
+      setJourneysError(err instanceof Error ? err.message : 'Failed to create Learning Journey.');
+    } finally {
+      setIsSavingJourney(false);
+    }
+  };
+
+  const handleSaveJourneyEdit = async (id: number) => {
+    try {
+      const res = await fetch(`/api/journeys/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          next_step: editJourneyNextStep.trim(),
+          status: editJourneyStatus,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to update Learning Journey.');
+      }
+      setEditingJourneyId(null);
+      await fetchJourneys();
+    } catch (err: unknown) {
+      setJourneysError(err instanceof Error ? err.message : 'Failed to update Learning Journey.');
+    }
+  };
+
+  const handleDeleteJourney = async (id: number) => {
+    try {
+      const res = await fetch(`/api/journeys/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setJourneys((prev) => prev.filter((j) => j.id !== id));
+      }
+    } catch (err: unknown) {
+      setJourneysError(err instanceof Error ? err.message : 'Failed to delete Learning Journey.');
+    }
+  };
+
+  const handleCreateCheckin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!checkinTitle.trim() || !checkinPrompt.trim()) return;
+    setIsSavingCheckin(true);
+    setCheckinsError(null);
+    setCheckinActionNotice(null);
+    try {
+      const res = await fetch('/api/checkins', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: checkinTitle.trim(),
+          prompt: checkinPrompt.trim(),
+          channel: checkinChannel,
+          delayMinutes: Number(checkinDelayMinutes),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to schedule check-in.');
+      }
+      setCheckinTitle('');
+      setCheckinPrompt('');
+      setCheckinDelayMinutes('60');
+      setShowNewCheckinForm(false);
+      await fetchCheckins();
+    } catch (err: unknown) {
+      setCheckinsError(err instanceof Error ? err.message : 'Failed to schedule check-in.');
+    } finally {
+      setIsSavingCheckin(false);
+    }
+  };
+
+  const handleTriggerCheckin = async (id: number) => {
+    setTriggeringCheckinId(id);
+    setCheckinActionNotice(null);
+    try {
+      const res = await fetch(`/api/checkins/${id}/trigger`, { method: 'POST' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        setCheckinActionNotice({
+          type: 'error',
+          text: data?.error || `Check-in delivery failed (HTTP ${res.status}).`,
+        });
+      } else {
+        setCheckinActionNotice({
+          type: 'success',
+          text: `Check-in delivered via ${data.checkin?.channel || 'channel'}.`,
+        });
+      }
+      await fetchCheckins();
+    } catch (err: unknown) {
+      setCheckinActionNotice({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Trigger failed.',
+      });
+    } finally {
+      setTriggeringCheckinId(null);
+    }
+  };
+
+  const handleCancelOrDeleteCheckin = async (c: ScheduledCheckin) => {
+    try {
+      if (c.status === 'pending') {
+        const res = await fetch(`/api/checkins/${c.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+        if (res.ok) await fetchCheckins();
+      } else {
+        const res = await fetch(`/api/checkins/${c.id}`, { method: 'DELETE' });
+        if (res.ok) setCheckins((prev) => prev.filter((item) => item.id !== c.id));
+      }
+    } catch (err: unknown) {
+      setCheckinsError(err instanceof Error ? err.message : 'Action failed.');
+    }
+  };
 
   const avatarLetter =
     brandName?.toLowerCase().includes('twin')
@@ -185,6 +389,375 @@ export const HomeView: React.FC<HomeViewProps> = ({
             <span>Multi-Agent Debate</span>
           </button>
         </div>
+      </div>
+
+      {/* Learning Journeys & Continuity Workspaces */}
+      <div className="rounded-2xl bg-white dark:bg-slate-900/85 border border-slate-200 dark:border-slate-800 p-4 sm:p-5 shadow-md space-y-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Compass className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
+            <h2 className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white">
+              Learning Journeys &amp; Continuity
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowNewJourneyForm((v) => !v)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-300 border border-indigo-500/30 text-[11px] font-semibold transition"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>{showNewJourneyForm ? 'Close' : 'New Journey'}</span>
+          </button>
+        </div>
+
+        {journeysError && (
+          <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-300">
+            {journeysError}
+          </div>
+        )}
+
+        {showNewJourneyForm && (
+          <form onSubmit={handleCreateJourney} className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2.5">
+            <input
+              type="text"
+              value={journeyTitle}
+              onChange={(e) => setJourneyTitle(e.target.value)}
+              placeholder="Journey title (e.g., Forex Price Action & Risk Mastery)"
+              className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+              required
+            />
+            <input
+              type="text"
+              value={journeyNextStep}
+              onChange={(e) => setJourneyNextStep(e.target.value)}
+              placeholder="Where you left off / Next lesson or step..."
+              className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+            />
+            <textarea
+              value={journeyDescription}
+              onChange={(e) => setJourneyDescription(e.target.value)}
+              rows={2}
+              placeholder="Optional goal or syllabus notes..."
+              className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowNewJourneyForm(false)}
+                className="px-2.5 py-1 rounded-lg text-xs text-slate-500"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSavingJourney || !journeyTitle.trim()}
+                className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold disabled:opacity-50"
+              >
+                {isSavingJourney ? 'Saving...' : 'Create Journey'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {journeys.length === 0 ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            No learning journeys created yet. Group related study or project threads together with a tracked next step.
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {journeys.map((journey) => (
+              <div
+                key={journey.id}
+                className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-2 flex flex-col justify-between"
+              >
+                <div className="space-y-1.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-xs font-bold text-slate-900 dark:text-white leading-snug">
+                      {journey.title}
+                    </h3>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase shrink-0 border ${
+                        journey.status === 'active'
+                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25'
+                          : journey.status === 'paused'
+                            ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25'
+                            : 'bg-slate-500/10 text-slate-500 border-slate-500/25'
+                      }`}
+                    >
+                      {journey.status}
+                    </span>
+                  </div>
+
+                  {editingJourneyId === journey.id ? (
+                    <div className="space-y-1.5 pt-1">
+                      <input
+                        type="text"
+                        value={editJourneyNextStep}
+                        onChange={(e) => setEditJourneyNextStep(e.target.value)}
+                        placeholder="Next step..."
+                        className="w-full px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[11px]"
+                      />
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={editJourneyStatus}
+                          onChange={(e) => setEditJourneyStatus(e.target.value as any)}
+                          className="px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[11px]"
+                        >
+                          <option value="active">active</option>
+                          <option value="paused">paused</option>
+                          <option value="completed">completed</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => { void handleSaveJourneyEdit(journey.id); }}
+                          className="px-2 py-1 rounded bg-indigo-600 text-white text-[11px] font-semibold"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingJourneyId(null)}
+                          className="px-2 py-1 rounded bg-slate-200 dark:bg-slate-800 text-[11px]"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      {journey.next_step && (
+                        <p className="text-[11px] text-indigo-700 dark:text-indigo-300 font-medium">
+                          Next: {journey.next_step}
+                        </p>
+                      )}
+                      {journey.last_message_preview && (
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2">
+                          Last turn: {journey.last_message_preview}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-200/70 dark:border-slate-800/70">
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    {journey.thread_count} thread(s)
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingJourneyId(journey.id);
+                        setEditJourneyNextStep(journey.next_step || '');
+                        setEditJourneyStatus(journey.status);
+                      }}
+                      className="p-1 rounded text-slate-400 hover:text-indigo-500"
+                      title="Edit next step or status"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { void handleDeleteJourney(journey.id); }}
+                      className="p-1 rounded text-slate-400 hover:text-red-500"
+                      title="Delete journey"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (journey.latest_thread_id && onSelectThread) {
+                          onSelectThread(journey.latest_thread_id);
+                        } else if (onStartJourneyThread) {
+                          void onStartJourneyThread(journey.id, journey.title);
+                        } else {
+                          onNavigateTab('chat');
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold transition"
+                    >
+                      <span>{journey.latest_thread_id ? 'Continue' : 'Start Thread'}</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Proactive Scheduled Check-Ins (Telegram / WhatsApp) */}
+      <div className="rounded-2xl bg-white dark:bg-slate-900/85 border border-slate-200 dark:border-slate-800 p-4 sm:p-5 shadow-md space-y-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Bell className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+            <h2 className="text-xs sm:text-sm font-semibold text-slate-900 dark:text-white">
+              Scheduled Follow-Ups &amp; Check-Ins
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowNewCheckinForm((v) => !v)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 text-[11px] font-semibold transition"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>{showNewCheckinForm ? 'Close' : 'Schedule Check-In'}</span>
+          </button>
+        </div>
+
+        {checkinsError && (
+          <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-300">
+            {checkinsError}
+          </div>
+        )}
+
+        {checkinActionNotice && (
+          <div
+            className={`p-2.5 rounded-xl text-xs border flex items-center justify-between gap-2 ${
+              checkinActionNotice.type === 'success'
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                : 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-300'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {checkinActionNotice.type === 'success'
+                ? <CheckCircle2 className="w-4 h-4 shrink-0" />
+                : <AlertTriangle className="w-4 h-4 shrink-0" />}
+              <span>{checkinActionNotice.text}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCheckinActionNotice(null)}
+              className="p-0.5 rounded hover:bg-black/10"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {showNewCheckinForm && (
+          <form onSubmit={handleCreateCheckin} className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input
+                type="text"
+                value={checkinTitle}
+                onChange={(e) => setCheckinTitle(e.target.value)}
+                placeholder="Reminder title..."
+                className="sm:col-span-2 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                required
+              />
+              <select
+                value={checkinChannel}
+                onChange={(e) => setCheckinChannel(e.target.value as 'telegram' | 'whatsapp')}
+                className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+              >
+                <option value="telegram">Telegram</option>
+                <option value="whatsapp">WhatsApp</option>
+              </select>
+            </div>
+            <textarea
+              value={checkinPrompt}
+              onChange={(e) => setCheckinPrompt(e.target.value)}
+              rows={2}
+              placeholder="Check-in message or question to deliver..."
+              className="w-full px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+              required
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                <span>Send in (minutes):</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={43200}
+                  value={checkinDelayMinutes}
+                  onChange={(e) => setCheckinDelayMinutes(e.target.value)}
+                  className="w-20 px-2 py-1 rounded bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs font-mono"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={isSavingCheckin || !checkinTitle.trim() || !checkinPrompt.trim()}
+                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold disabled:opacity-50"
+              >
+                {isSavingCheckin ? 'Scheduling...' : 'Save Check-In'}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {checkins.length === 0 ? (
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            No scheduled check-ins. Schedule reminders here or ask TwinMind in chat to follow up with you on Telegram or WhatsApp.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {checkins.slice(0, 6).map((c) => (
+              <div
+                key={c.id}
+                className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2"
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs font-semibold text-slate-900 dark:text-white">{c.title}</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 uppercase font-semibold">
+                      {c.channel}
+                    </span>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.2 rounded font-semibold uppercase ${
+                        c.status === 'sent'
+                          ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                          : c.status === 'failed'
+                            ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                            : c.status === 'cancelled'
+                              ? 'bg-slate-500/15 text-slate-500'
+                              : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {c.status}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">{c.prompt}</p>
+                  <p className="text-[10px] text-slate-400 font-mono">
+                    Due: {new Date(c.due_at).toLocaleString()}
+                    {c.sent_at ? ` · Sent: ${new Date(c.sent_at).toLocaleString()}` : ''}
+                  </p>
+                  {c.last_error && (
+                    <p className="text-[10px] text-rose-600 dark:text-rose-400 break-words">
+                      Error: {c.last_error}
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-1 shrink-0">
+                  {(c.status === 'pending' || c.status === 'failed') && (
+                    <button
+                      type="button"
+                      onClick={() => { void handleTriggerCheckin(c.id); }}
+                      disabled={triggeringCheckinId === c.id}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-xs font-medium transition disabled:opacity-50"
+                      title="Send now via configured channel"
+                    >
+                      <Play className="w-3 h-3" />
+                      <span>{triggeringCheckinId === c.id ? 'Sending...' : 'Send Now'}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { void handleCancelOrDeleteCheckin(c); }}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-500"
+                    title={c.status === 'pending' ? 'Cancel check-in' : 'Delete check-in'}
+                  >
+                    {c.status === 'pending' ? <X className="w-3.5 h-3.5" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Active Multi-Model Brain Engine Card */}

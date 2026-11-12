@@ -120,7 +120,7 @@ interface ChatMessageProps {
   onEditAndRegenerate?: (messageId: string, newContent: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onRetryMessage?: (messageId: string) => void;
-  onOpenKnowledgeVault?: () => void;
+  onOpenKnowledgeVault?: (docId?: string | number) => void;
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
   hasMultipleInGroup?: boolean;
@@ -411,6 +411,13 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           <LiveResearchActivityFeed activities={message.researchActivity} />
         )}
 
+        {!isUser && message.autonomousMemory && !isEditing && (
+          <AutonomousMemoryBadge
+            memoryEvent={message.autonomousMemory}
+            onOpenVault={onOpenKnowledgeVault}
+          />
+        )}
+
         {message.imageData && !isEditing && (
           <div className="mb-2">
             <img
@@ -503,12 +510,6 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
-        {message.autonomousMemory && !isEditing && (
-          <AutonomousMemoryBadge
-            memoryEvent={message.autonomousMemory}
-            onOpenVault={onOpenKnowledgeVault}
-          />
-        )}
 
         {isUser && message.processingStatus === 'processing' && isLastInGroup && !isEditing && (channel === 'whatsapp' || channel === 'telegram') && (
           <div className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`} role="status" aria-live="polite">
@@ -787,7 +788,7 @@ interface GroupedChatMessageListProps {
   onEditAndRegenerate?: (messageId: string, newContent: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onRetryMessage?: (messageId: string) => void;
-  onOpenKnowledgeVault?: () => void;
+  onOpenKnowledgeVault?: (docId?: string | number) => void;
   searchQuery?: string;
   autoPlayVoice?: boolean;
   voiceSpeed?: number;

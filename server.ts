@@ -17,7 +17,6 @@ import { swarmSessionRegistry } from './server/utils/swarmResourceManager.ts';
 import { twilioService } from './server/services/twilioService.ts';
 import { contradictionDetectorService } from './server/services/contradictionDetectorService.ts';
 import { communicationStyleService } from './server/services/communicationStyleService.ts';
-import { autonomousMemoryService } from './server/services/autonomousMemoryService.ts';
 import { jobQueueService } from './server/services/jobQueueService.ts';
 import { whatsAppWorker } from './server/services/whatsappWorker.ts';
 import { calibrationService } from './server/services/calibrationService.ts';
@@ -36,6 +35,9 @@ import {
   ingestDocumentChunks,
   fetchAndIngestWebPage,
 } from './server/services/documentIngestionService.ts';
+import { scanDuplicateVaultDocuments } from './server/services/vaultMemoryUpdateService.ts';
+import { scheduledCheckinService, validateScheduledCheckinInput } from './server/services/scheduledCheckinService.ts';
+import { buildArtifactPreview } from './server/services/artifactPreviewService.ts';
 import type { AutonomousMemoryEvent } from './src/types/index.ts';
 
 
@@ -232,6 +234,49 @@ app.get('/api/artifacts/:filename/access', async (req: Request, res: Response) =
       error: code === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
         ? 'Artifact download signing is not configured.'
         : 'The database-backed artifact store is unavailable.',
+    });
+  }
+});
+
+// Return structured in-app preview data (Markdown, CSV table, multi-sheet XLSX, or PDF URL)
+app.get('/api/artifacts/:filename/preview', async (req: Request, res: Response) => {
+  const fileName = req.params.filename || '';
+  if (!fileName || fileName !== path.basename(fileName) || fileName === '.' || fileName === '..') {
+    res.status(400).json({ success: false, code: 'INVALID_ARTIFACT_NAME', error: 'Invalid artifact file name.' });
+    return;
+  }
+  if (!ownerAuthService.isAuthenticated(req)) {
+    res.status(401).json({ success: false, code: 'ARTIFACT_ACCESS_REQUIRED', error: 'Owner authentication is required.' });
+    return;
+  }
+
+  try {
+    const artifact = await neonDb.getArtifactContent(fileName);
+    if (!artifact) {
+      res.status(404).json({
+        success: false,
+        code: 'ARTIFACT_NOT_FOUND',
+        error: 'The artifact record or content was not found in the active Neon database.',
+      });
+      return;
+    }
+
+    const inlineUrl = artifactAccessService.createSignedPath(fileName);
+    const preview = await buildArtifactPreview(artifact, inlineUrl);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ success: true, preview });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Artifact preview failed.';
+    if (message.startsWith('ARTIFACT_PREVIEW_EMPTY_WORKBOOK')) {
+      res.status(422).json({ success: false, code: 'ARTIFACT_PREVIEW_EMPTY_WORKBOOK', error: message });
+      return;
+    }
+    res.status(503).json({
+      success: false,
+      code: message === 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+        ? 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
+        : 'ARTIFACT_PREVIEW_UNAVAILABLE',
+      error: message,
     });
   }
 });
@@ -918,18 +963,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       if (!res.writableEnded) abortController.abort();
     });
 
-    // Evaluate if incoming user statement updates an existing Vault record or creates a new one
+    // Routine chat messages are preserved purely in conversation history without automatically creating memory vault documents.
     let autonomousMemoryEvent: AutonomousMemoryEvent | null = null;
-    if (queryUserMsg && queryUserMsg.content) {
-      try {
-        autonomousMemoryEvent = await autonomousMemoryService.evaluateAndPersist(queryUserMsg.content, {
-          customGeminiKey: customGeminiKey || currentSettings.customGeminiKey,
-          signal: abortController.signal,
-        });
-      } catch (memErr) {
-        console.warn('[AutonomousMemory] Persistence warning:', memErr);
-      }
-    }
 
     // Analyze user communication style & tone to tune persona resonance
     let communicationStyleDirective = '';
@@ -951,7 +986,14 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       console.warn('Historical awareness recall warning in chat:', hErr);
     }
 
-    // Build system prompt with explicit User Context & recalled pgvector knowledge
+    const pinnedDocs = neonDb.isDatabaseConnected()
+      ? await neonDb.getThreadPinnedDocs(effectiveThreadId).catch((err) => {
+          console.warn('Thread pinned docs lookup warning:', err);
+          return [];
+        })
+      : [];
+
+    // Build system prompt with explicit User Context, pinned docs, & recalled pgvector knowledge
     const systemInstruction = buildSystemPrompt({
       channel,
       userName: effectiveUserName,
@@ -960,6 +1002,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       activeProvider: targetProvider,
       selectedVoice: effectiveVoice,
       recalledKnowledge,
+      pinnedDocs,
       activeThreadTitle: effectiveThreadTitle,
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: effectiveThinkingLevel,
@@ -1117,27 +1160,26 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       }
 
       // Pass only validated artifacts to the client via SSE for immediate display
-      if (artifacts.length > 0) {
+      if (artifacts.length > 0 && !res.writableEnded) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
 
-      const chunkSize = 28;
-      for (let i = 0; i < fullReply.length; i += chunkSize) {
-        const slice = fullReply.slice(i, i + chunkSize);
-        res.write(`data: ${JSON.stringify({ text: slice })}\n\n`);
-        // Add a small delay for the "screaming" (streaming) effect
-        await new Promise((resolve) => setTimeout(resolve, 15));
+      if (!res.writableEnded && fullReply) {
+        res.write(`data: ${JSON.stringify({ text: fullReply })}\n\n`);
       }
 
       // Store artifacts for the save step
       (req as any)._artifacts = artifacts;
     } else {
-      // Autonomous execution via multi-provider TwinAgentService (Gemini, Groq, Mistral)
+      // Autonomous execution via multi-provider TwinAgentService (Gemini, Groq, Mistral) with live provider streaming
+      let streamedLive = false;
       const turnResult = await twinAgentService.executeTurn({
         userPrompt: lastUserQuery,
         imageData: lastImageData,
         audioData: lastAudioData,
         channel: (channel as any) || 'web',
+        threadId: effectiveThreadId,
+        pinnedDocs,
         conversationHistory,
         userName: effectiveUserName,
         nickname: effectiveNickname,
@@ -1151,16 +1193,33 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         signal: abortController.signal,
         providerOverride: targetProvider as any,
         modelOverride: targetModel,
+        onTextChunk: (delta) => {
+          if (!res.writableEnded && delta) {
+            streamedLive = true;
+            fullReply += delta;
+            res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
+          }
+        },
         onToolStart: (toolName, args, toolId) => {
           res.write(`data: ${JSON.stringify({ toolEvent: { type: 'start', toolId, toolName, args } })}\n\n`);
         },
         onToolComplete: (toolName, result, toolId) => {
           res.write(`data: ${JSON.stringify({ toolEvent: { type: 'complete', toolId, toolName, result } })}\n\n`);
+          if (
+            (toolName === 'updateMemoryVault' || toolName === 'manageActiveRules') &&
+            result &&
+            typeof result === 'object' &&
+            (result as any).status === 'success' &&
+            (result as any).memoryEvent
+          ) {
+            autonomousMemoryEvent = (result as any).memoryEvent as AutonomousMemoryEvent;
+            res.write(`data: ${JSON.stringify({ autonomousMemory: autonomousMemoryEvent })}\n\n`);
+          }
         },
       });
 
       clearInterval(heartbeatTimer);
-      fullReply = turnResult.reply;
+      fullReply = turnResult.reply || fullReply;
 
       // Only surface generated files that passed real format and saved-file validation.
       const artifactToolResults = turnResult.toolsExecuted.filter((tool) => tool.toolName === 'generateArtifact');
@@ -1202,20 +1261,23 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       if (artifactFailures.length > 0) {
         const details = [...new Set(artifactFailures)].join('; ');
-        fullReply = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+        const failureNotice = 'One or more requested files could not be generated, saved, and validated. Only verified artifacts are attached; failed outputs have no download link.\n\nDetails: ' + details;
+        if (streamedLive && !res.writableEnded) {
+          const delta = `\n\n⚠️ ${failureNotice}`;
+          fullReply = `${fullReply}${delta}`;
+          res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
+        } else {
+          fullReply = failureNotice;
+        }
       }
 
       // Pass only validated artifacts to the client via SSE
-      if (artifacts.length > 0) {
+      if (artifacts.length > 0 && !res.writableEnded) {
         res.write(`data: ${JSON.stringify({ meta: { artifacts } })}\n\n`);
       }
 
-      const chunkSize = 24;
-      for (let i = 0; i < fullReply.length; i += chunkSize) {
-        const slice = fullReply.slice(i, i + chunkSize);
-        res.write(`data: ${JSON.stringify({ text: slice })}\n\n`);
-        // Add a small delay for the "screaming" (streaming) effect
-        await new Promise((resolve) => setTimeout(resolve, 12));
+      if (!streamedLive && !res.writableEnded && fullReply) {
+        res.write(`data: ${JSON.stringify({ text: fullReply })}\n\n`);
       }
 
       // Store artifacts for saving
@@ -2507,10 +2569,66 @@ app.post('/api/knowledge', async (req: Request, res: Response) => {
   }
 });
 
+app.patch('/api/knowledge/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { title, content, category, tags } = req.body || {};
+
+    const patch: { title?: string; content?: string; category?: string; tags?: string[] } = {};
+    if (title !== undefined) {
+      if (typeof title !== 'string' || !title.trim()) {
+        res.status(400).json({ success: false, error: 'Title must be a non-empty string' });
+        return;
+      }
+      patch.title = title.trim();
+    }
+    if (content !== undefined) {
+      if (typeof content !== 'string' || !content.trim()) {
+        res.status(400).json({ success: false, error: 'Content must be a non-empty string' });
+        return;
+      }
+      patch.content = content.trim();
+    }
+    if (category !== undefined) {
+      if (typeof category !== 'string' || !category.trim()) {
+        res.status(400).json({ success: false, error: 'Category must be a non-empty string' });
+        return;
+      }
+      patch.category = category.trim().toLowerCase().replace(/\s+/g, '_');
+    }
+    if (tags !== undefined) {
+      if (!Array.isArray(tags)) {
+        res.status(400).json({ success: false, error: 'Tags must be an array of strings' });
+        return;
+      }
+      patch.tags = tags.map((t) => String(t).trim()).filter(Boolean);
+    }
+
+    if (Object.keys(patch).length === 0) {
+      res.status(400).json({ success: false, error: 'At least one field (title, content, category, tags) is required' });
+      return;
+    }
+
+    const updated = await knowledgeService.updateDocument(id, patch);
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Document not found or database unavailable' });
+      return;
+    }
+
+    res.json({ success: true, id, updated: true });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to update knowledge document' });
+  }
+});
+
 app.delete('/api/knowledge/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    await knowledgeService.deleteDocument(id);
+    const deleted = await knowledgeService.deleteDocument(id);
+    if (!deleted) {
+      res.status(404).json({ success: false, error: 'Document not found or database unavailable' });
+      return;
+    }
     res.json({ success: true, message: 'Document deleted successfully' });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to delete knowledge document' });
@@ -2615,6 +2733,526 @@ app.post('/api/knowledge/conflicts/resolve', async (req: Request, res: Response)
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to resolve belief conflict' });
   }
+});
+
+// Vault Duplicate & Near-Duplicate Scanner and Merge
+app.get('/api/knowledge/duplicates', async (_req: Request, res: Response) => {
+  try {
+    const docs = await knowledgeService.listDocuments();
+    const clusters = scanDuplicateVaultDocuments(docs);
+    res.json({ success: true, clusters });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to scan Vault duplicates' });
+  }
+});
+
+app.post('/api/knowledge/duplicates/merge', async (req: Request, res: Response) => {
+  try {
+    const { primaryId, duplicateIds } = req.body || {};
+    if (!primaryId || !Array.isArray(duplicateIds) || duplicateIds.length === 0) {
+      res.status(400).json({ success: false, error: 'primaryId and non-empty duplicateIds array are required.' });
+      return;
+    }
+
+    const docs = await knowledgeService.listDocuments();
+    const primary = docs.find((d) => String(d.id) === String(primaryId));
+    if (!primary) {
+      res.status(404).json({ success: false, error: 'Primary Vault document not found.' });
+      return;
+    }
+
+    const seenLines = new Set(
+      primary.content
+        .split('\n')
+        .map((line) => line.trim().toLowerCase())
+        .filter(Boolean)
+    );
+    const mergedLines = [primary.content.trim()];
+    const mergedTagSet = new Set<string>(Array.isArray(primary.tags) ? primary.tags : []);
+    const deletedIds: Array<string | number> = [];
+    const errors: string[] = [];
+
+    for (const rawDupId of duplicateIds) {
+      if (String(rawDupId) === String(primary.id)) continue;
+      const dup = docs.find((d) => String(d.id) === String(rawDupId));
+      if (!dup) {
+        errors.push(`Duplicate ${String(rawDupId)} not found.`);
+        continue;
+      }
+
+      for (const line of dup.content.split('\n')) {
+        const trimmed = line.trim();
+        const norm = trimmed.toLowerCase();
+        if (trimmed && !seenLines.has(norm)) {
+          seenLines.add(norm);
+          mergedLines.push(trimmed);
+        }
+      }
+      if (Array.isArray(dup.tags)) {
+        dup.tags.forEach((t) => {
+          if (t) mergedTagSet.add(t);
+        });
+      }
+      deletedIds.push(dup.id);
+    }
+
+    const updated = await knowledgeService.updateDocument(primary.id, {
+      content: mergedLines.join('\n\n'),
+      tags: Array.from(mergedTagSet),
+    });
+
+    if (!updated) {
+      res.status(503).json({ success: false, error: 'Failed to save merged primary document to database.' });
+      return;
+    }
+
+    const actuallyDeleted: Array<string | number> = [];
+    for (const dupId of deletedIds) {
+      const ok = await knowledgeService.deleteDocument(dupId);
+      if (ok) actuallyDeleted.push(dupId);
+      else errors.push(`Merged primary updated, but failed to delete duplicate ${String(dupId)}.`);
+    }
+
+    res.json({ success: true, primaryId: primary.id, deletedIds: actuallyDeleted, errors });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to merge duplicate Vault records' });
+  }
+});
+
+// Unified Active Rules (persona_memories) Governance Endpoints
+const ALLOWED_PERSONA_CATEGORIES = new Set(['preference', 'opinion', 'correction', 'feedback']);
+
+app.get('/api/persona-memories', async (_req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  try {
+    const memories = await neonDb.getPersonaMemories(100);
+    res.json({ success: true, memories });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to load persona memories' });
+  }
+});
+
+app.post('/api/persona-memories', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const category = typeof req.body?.category === 'string' ? req.body.category.trim().toLowerCase() : '';
+  const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+  const rawPriority = req.body?.priority !== undefined ? Number(req.body.priority) : 2;
+  const priority = Number.isSafeInteger(rawPriority) && rawPriority >= 1 && rawPriority <= 10 ? rawPriority : 2;
+
+  if (!ALLOWED_PERSONA_CATEGORIES.has(category)) {
+    res.status(400).json({ success: false, error: 'category must be preference, opinion, correction, or feedback.' });
+    return;
+  }
+  if (!content) {
+    res.status(400).json({ success: false, error: 'content is required.' });
+    return;
+  }
+
+  try {
+    const id = await neonDb.savePersonaMemory({ category, content, priority, metadata: { source: 'owner_ui' } });
+    if (!id) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Failed to save active rule to database.' });
+      return;
+    }
+    res.status(201).json({ success: true, id });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to create active rule' });
+  }
+});
+
+app.patch('/api/persona-memories/:id', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric rule id is required.' });
+    return;
+  }
+
+  const patch: { category?: string; content?: string; priority?: number } = {};
+  if (req.body?.category !== undefined) {
+    const cat = String(req.body.category).trim().toLowerCase();
+    if (!ALLOWED_PERSONA_CATEGORIES.has(cat)) {
+      res.status(400).json({ success: false, error: 'category must be preference, opinion, correction, or feedback.' });
+      return;
+    }
+    patch.category = cat;
+  }
+  if (req.body?.content !== undefined) {
+    const text = String(req.body.content).trim();
+    if (!text) {
+      res.status(400).json({ success: false, error: 'content cannot be empty.' });
+      return;
+    }
+    patch.content = text;
+  }
+  if (req.body?.priority !== undefined) {
+    const p = Number(req.body.priority);
+    if (!Number.isSafeInteger(p) || p < 1 || p > 10) {
+      res.status(400).json({ success: false, error: 'priority must be an integer between 1 and 10.' });
+      return;
+    }
+    patch.priority = p;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    res.status(400).json({ success: false, error: 'At least one field (category, content, priority) is required.' });
+    return;
+  }
+
+  const updated = await neonDb.updatePersonaMemory(id, patch);
+  if (!updated) {
+    res.status(404).json({ success: false, error: 'Active rule not found.' });
+    return;
+  }
+  res.json({ success: true, id });
+});
+
+app.delete('/api/persona-memories/:id', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric rule id is required.' });
+    return;
+  }
+  const deleted = await neonDb.deletePersonaMemory(id);
+  if (!deleted) {
+    res.status(404).json({ success: false, error: 'Active rule not found.' });
+    return;
+  }
+  res.json({ success: true, id });
+});
+
+// Thread-Pinned Reference Documents Endpoints
+app.get('/api/threads/:id/docs', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const threadId = req.params.id?.trim();
+  if (!threadId) {
+    res.status(400).json({ success: false, error: 'Thread ID is required.' });
+    return;
+  }
+  try {
+    const docs = await neonDb.getThreadPinnedDocs(threadId);
+    res.json({ success: true, docs });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to load thread pinned docs' });
+  }
+});
+
+app.post('/api/threads/:id/docs', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const threadId = req.params.id?.trim();
+  if (!threadId) {
+    res.status(400).json({ success: false, error: 'Thread ID is required.' });
+    return;
+  }
+
+  try {
+    let fileName = typeof req.body?.fileName === 'string'
+      ? req.body.fileName.trim()
+      : (typeof req.body?.filename === 'string' ? req.body.filename.trim() : '');
+    let format = typeof req.body?.format === 'string' ? req.body.format.trim() : 'text';
+    let content = typeof req.body?.content === 'string' ? req.body.content : '';
+
+    if (!content && typeof req.body?.contentBase64 === 'string' && fileName) {
+      const parsed = await parseDocumentBuffer(
+        fileName,
+        Buffer.from(req.body.contentBase64, 'base64'),
+        typeof req.body?.mimeType === 'string' ? req.body.mimeType : undefined
+      );
+      fileName = parsed.title || fileName;
+      format = parsed.format;
+      content = parsed.content;
+    }
+
+    if (!fileName || !content.trim()) {
+      res.status(400).json({ success: false, error: 'fileName and non-empty content are required to pin a document.' });
+      return;
+    }
+
+    const doc = await neonDb.addThreadPinnedDoc({
+      threadId,
+      threadTitle: typeof req.body?.threadTitle === 'string' ? req.body.threadTitle : undefined,
+      channel: req.body?.channel === 'telegram' || req.body?.channel === 'whatsapp' ? req.body.channel : 'web',
+      fileName,
+      format,
+      content: content.trim(),
+    });
+    if (!doc) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Failed to pin document to thread.' });
+      return;
+    }
+    res.status(201).json({ success: true, doc });
+  } catch (err: unknown) {
+    res.status(400).json({ success: false, error: err instanceof Error ? err.message : 'Failed to pin document' });
+  }
+});
+
+app.delete('/api/threads/:id/docs/:docId', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const threadId = req.params.id?.trim();
+  const docId = Number(req.params.docId);
+  if (!threadId || !Number.isSafeInteger(docId) || docId < 1) {
+    res.status(400).json({ success: false, error: 'Valid thread ID and numeric docId are required.' });
+    return;
+  }
+  const removed = await neonDb.deleteThreadPinnedDoc(threadId, docId);
+  if (!removed) {
+    res.status(404).json({ success: false, error: 'Pinned document not found in this thread.' });
+    return;
+  }
+  res.json({ success: true, docId });
+});
+
+// Learning Journeys Workspace Endpoints
+app.get('/api/journeys', async (_req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  try {
+    const journeys = await neonDb.listJourneys();
+    res.json({ success: true, journeys });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to list learning journeys' });
+  }
+});
+
+app.post('/api/journeys', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  if (!title) {
+    res.status(400).json({ success: false, error: 'Journey title is required.' });
+    return;
+  }
+  const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
+  const nextStep = typeof req.body?.next_step === 'string'
+    ? req.body.next_step.trim()
+    : (typeof req.body?.nextStep === 'string' ? req.body.nextStep.trim() : '');
+  const rawStatus = req.body?.status;
+  const status = rawStatus === 'paused' || rawStatus === 'completed' ? rawStatus : 'active';
+
+  try {
+    const journey = await neonDb.createJourney({ title, description, next_step: nextStep, status });
+    if (!journey) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Failed to persist learning journey.' });
+      return;
+    }
+    res.status(201).json({ success: true, journey });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to create learning journey' });
+  }
+});
+
+app.patch('/api/journeys/:id', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric journey id is required.' });
+    return;
+  }
+  const patch: { title?: string; description?: string; next_step?: string; status?: 'active' | 'paused' | 'completed' } = {};
+  if (req.body?.title !== undefined) {
+    const title = String(req.body.title).trim();
+    if (!title) {
+      res.status(400).json({ success: false, error: 'title cannot be empty.' });
+      return;
+    }
+    patch.title = title;
+  }
+  if (req.body?.description !== undefined) patch.description = String(req.body.description).trim();
+  const nextStepRaw = req.body?.next_step !== undefined ? req.body.next_step : req.body?.nextStep;
+  if (nextStepRaw !== undefined) patch.next_step = String(nextStepRaw).trim();
+  if (req.body?.status !== undefined) {
+    if (req.body.status !== 'active' && req.body.status !== 'paused' && req.body.status !== 'completed') {
+      res.status(400).json({ success: false, error: 'status must be active, paused, or completed.' });
+      return;
+    }
+    patch.status = req.body.status;
+  }
+
+  const updated = await neonDb.updateJourney(id, patch);
+  if (!updated) {
+    res.status(404).json({ success: false, error: 'Learning journey not found.' });
+    return;
+  }
+  res.json({ success: true, id });
+});
+
+app.delete('/api/journeys/:id', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric journey id is required.' });
+    return;
+  }
+  const deleted = await neonDb.deleteJourney(id);
+  if (!deleted) {
+    res.status(404).json({ success: false, error: 'Learning journey not found.' });
+    return;
+  }
+  res.json({ success: true, id });
+});
+
+app.put('/api/threads/:id/journey', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const threadId = req.params.id?.trim();
+  if (!threadId) {
+    res.status(400).json({ success: false, error: 'Thread ID is required.' });
+    return;
+  }
+  const rawJourneyId = req.body?.journeyId;
+  const journeyId = rawJourneyId === null || rawJourneyId === undefined || rawJourneyId === ''
+    ? null
+    : Number(rawJourneyId);
+  if (journeyId !== null && (!Number.isSafeInteger(journeyId) || journeyId < 1)) {
+    res.status(400).json({ success: false, error: 'journeyId must be null or a valid positive integer.' });
+    return;
+  }
+  const assigned = await neonDb.assignThreadToJourney(
+    threadId,
+    journeyId,
+    typeof req.body?.threadTitle === 'string' ? req.body.threadTitle : undefined
+  );
+  if (!assigned) {
+    res.status(503).json({ success: false, error: 'Failed to assign thread to learning journey.' });
+    return;
+  }
+  res.json({ success: true, threadId, journeyId });
+});
+
+// Durable Scheduled Check-Ins Endpoints (Telegram / WhatsApp)
+app.get('/api/checkins', async (_req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  try {
+    const checkins = await neonDb.listScheduledCheckins(50);
+    res.json({ success: true, checkins });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to list scheduled check-ins' });
+  }
+});
+
+app.post('/api/checkins', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const validation = validateScheduledCheckinInput(req.body || {});
+  if (validation.valid === false) {
+    res.status(400).json({ success: false, code: validation.code, error: validation.error });
+    return;
+  }
+  try {
+    const checkin = await neonDb.createScheduledCheckin(validation.value);
+    if (!checkin) {
+      res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Failed to save scheduled check-in.' });
+      return;
+    }
+    res.status(201).json({ success: true, checkin });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to create scheduled check-in' });
+  }
+});
+
+app.post('/api/checkins/:id/trigger', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric check-in id is required.' });
+    return;
+  }
+  const item = await neonDb.getScheduledCheckinById(id);
+  if (!item) {
+    res.status(404).json({ success: false, error: 'Scheduled check-in not found.' });
+    return;
+  }
+  const outcome = await scheduledCheckinService.dispatchCheckin(item);
+  const updated = await neonDb.getScheduledCheckinById(id);
+  res.status(outcome.success ? 200 : 502).json({
+    success: outcome.success,
+    status: outcome.status,
+    deliverySid: outcome.deliverySid || null,
+    error: outcome.error || null,
+    checkin: updated || item,
+  });
+});
+
+app.patch('/api/checkins/:id', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric check-in id is required.' });
+    return;
+  }
+  if (req.body?.status === 'cancelled') {
+    const ok = await neonDb.completeScheduledCheckin(id, { status: 'cancelled', error: null });
+    if (!ok) {
+      res.status(404).json({ success: false, error: 'Scheduled check-in not found.' });
+      return;
+    }
+    res.json({ success: true, id, status: 'cancelled' });
+    return;
+  }
+  res.status(400).json({ success: false, error: 'Only status: "cancelled" is supported for patching check-ins.' });
+});
+
+app.delete('/api/checkins/:id', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, error: 'Valid numeric check-in id is required.' });
+    return;
+  }
+  const deleted = await neonDb.deleteScheduledCheckin(id);
+  if (!deleted) {
+    res.status(404).json({ success: false, error: 'Scheduled check-in not found.' });
+    return;
+  }
+  res.json({ success: true, id });
 });
 
 // Communication Style & Emotional Tone Analysis Endpoint
@@ -3232,8 +3870,9 @@ if (isProduction) {
 
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`HTTP server listening on 0.0.0.0:${PORT}`);
-  // Start background WhatsApp job worker and lease recovery daemon
+  // Start background WhatsApp job worker and durable scheduled check-ins poller
   whatsAppWorker.startWorker();
+  scheduledCheckinService.startScheduler(30_000);
 
   // Start proactive calibration monitor (Checks every 4 hours)
   calibrationService.monitorOverdueExperiments().catch(err => console.error('Initial calibration check error:', err));

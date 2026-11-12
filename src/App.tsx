@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel, HistoricalInteractionMetadata, CommunicationStyleAnalysis } from './types/index.ts';
+import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel, HistoricalInteractionMetadata, CommunicationStyleAnalysis, ThreadPinnedDoc } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
 import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
@@ -148,10 +148,16 @@ export default function App() {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isTelegramModalOpen, setIsTelegramModalOpen] = useState(false);
   const [isKnowledgeModalOpen, setIsKnowledgeModalOpen] = useState(false);
+  const [focusedKnowledgeDocId, setFocusedKnowledgeDocId] = useState<string | number | null>(null);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isCustomPromptModalOpen, setIsCustomPromptModalOpen] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isStyleWidgetOpen, setIsStyleWidgetOpen] = useState(false);
+
+  const handleOpenKnowledgeVault = (docId?: string | number) => {
+    setFocusedKnowledgeDocId(docId !== undefined && docId !== null && docId !== '' ? docId : null);
+    setActiveTab('knowledge');
+  };
 
   // In-Chat Search & Filtering State
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -159,9 +165,14 @@ export default function App() {
   const [searchMatchIndex, setSearchMatchIndex] = useState(0);
   const [filterOnlyMatches, setFilterOnlyMatches] = useState(false);
 
-  // Voice Note Playback Preferences
+  // Voice Note Playback Preferences & Hands-Free Voice Conversation Mode
   const [autoPlayVoice, setAutoPlayVoice] = useState<boolean>(false);
   const [voiceSpeed, setVoiceSpeed] = useState<number>(1);
+  const [voiceConversationMode, setVoiceConversationMode] = useState<boolean>(false);
+
+  // Thread-Level Pinned Reference Documents
+  const [pinnedDocs, setPinnedDocs] = useState<ThreadPinnedDoc[]>([]);
+  const [isPinningDoc, setIsPinningDoc] = useState<boolean>(false);
 
   const handleAutoPlayVoiceChange = (val: boolean) => {
     setAutoPlayVoice(val);
@@ -385,6 +396,20 @@ export default function App() {
   };
 
 
+  const loadThreadPinnedDocs = async (threadId: string) => {
+    try {
+      const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}/docs`);
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && Array.isArray(data.docs)) {
+        setPinnedDocs(data.docs);
+      } else {
+        setPinnedDocs([]);
+      }
+    } catch {
+      setPinnedDocs([]);
+    }
+  };
+
   // Load messages for a specific conversation thread from Neon DB
   const loadThreadMessages = async (threadId: string) => {
     try {
@@ -420,6 +445,7 @@ export default function App() {
           }
           setActiveThreadId(threadId);
           syncSettingsToServer({ activeThreadId: threadId });
+          void loadThreadPinnedDocs(threadId);
         }
       }
     } catch (err) {
@@ -441,7 +467,93 @@ export default function App() {
     setActiveThreadId(newId);
     syncSettingsToServer({ activeThreadId: newId });
     setMessages([]);
+    setPinnedDocs([]);
     setActiveTab('chat');
+  };
+
+  const handlePinDocToCurrentThread = async (doc: { fileName: string; format: string; content: string }) => {
+    const targetThreadId = activeThreadId || `thread-${Date.now()}`;
+    if (!activeThreadId) {
+      setActiveThreadId(targetThreadId);
+      syncSettingsToServer({ activeThreadId: targetThreadId });
+    }
+    setIsPinningDoc(true);
+    try {
+      const currentTitle = threads.find((t) => t.id === targetThreadId)?.title || doc.fileName;
+      const res = await fetch(`/api/threads/${encodeURIComponent(targetThreadId)}/docs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName: doc.fileName,
+          format: doc.format,
+          content: doc.content,
+          threadTitle: currentTitle,
+          channel,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.success !== true || !data?.doc) {
+        const message = typeof data?.error === 'string' ? data.error : 'Failed to pin document to thread.';
+        setErrorMessage(message);
+        throw new Error(message);
+      }
+      setPinnedDocs((prev) => [data.doc, ...prev.filter((d) => d.id !== data.doc.id)]);
+      fetch('/api/threads')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.threads) setThreads(d.threads);
+        })
+        .catch(() => {});
+    } finally {
+      setIsPinningDoc(false);
+    }
+  };
+
+  const handleUnpinDocFromCurrentThread = async (docId: number) => {
+    if (!activeThreadId) return;
+    try {
+      const res = await fetch(
+        `/api/threads/${encodeURIComponent(activeThreadId)}/docs/${encodeURIComponent(String(docId))}`,
+        { method: 'DELETE' }
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.success !== true) {
+        setErrorMessage(typeof data?.error === 'string' ? data.error : 'Failed to unpin document from thread.');
+        return;
+      }
+      setPinnedDocs((prev) => prev.filter((doc) => doc.id !== docId));
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to unpin document from thread.');
+    }
+  };
+
+  const handleStartJourneyThread = async (journeyId: number, journeyTitle: string) => {
+    const newId = `thread-${Date.now()}`;
+    pendingThreadRestoreRef.current = newId;
+    isFollowingLatestRef.current = true;
+    jumpToLatestInProgressRef.current = false;
+    setShowScrollToLatest(false);
+    setActiveThreadId(newId);
+    syncSettingsToServer({ activeThreadId: newId });
+    setMessages([]);
+    setPinnedDocs([]);
+    setActiveTab('chat');
+
+    try {
+      const res = await fetch(`/api/threads/${encodeURIComponent(newId)}/journey`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ journeyId, threadTitle: journeyTitle }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || data?.success !== true) {
+        setErrorMessage(typeof data?.error === 'string' ? data.error : 'Failed to link new thread to journey.');
+        return;
+      }
+      await loadThreads();
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to link new thread to journey.');
+    }
   };
 
   const handleRenameThread = async (threadId: string, newTitle: string) => {
@@ -1239,8 +1351,9 @@ export default function App() {
         }
       }
 
-      // If user requested audio auto-generation, synthesize speech via Gemini TTS
-      if (requestAudio && accumulatedContent) {
+      // If user requested audio auto-generation or hands-free voice conversation mode is active, synthesize speech via TTS
+      const shouldSynthesizeAudio = Boolean(requestAudio || voiceConversationMode);
+      if (shouldSynthesizeAudio && accumulatedContent) {
         handleGenerateAudio(assistantId, accumulatedContent);
       }
     } catch (err: unknown) {
@@ -1284,6 +1397,7 @@ export default function App() {
       );
     } catch (err: unknown) {
       console.error('Audio generation failed:', err);
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to generate voice note.');
       setMessages((prev) =>
         prev.map((m) => (m.id === messageId ? { ...m, isGeneratingAudio: false } : m))
       );
@@ -1421,7 +1535,7 @@ export default function App() {
         historicalMetadata={historicalMetadata}
         styleAnalysis={styleAnalysis}
         vaultConflictCount={vaultConflictCount}
-        onOpenKnowledgeVault={() => setActiveTab('knowledge')}
+        onOpenKnowledgeVault={() => handleOpenKnowledgeVault()}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
@@ -1467,6 +1581,7 @@ export default function App() {
             messageCount={messages.length}
             threads={threads}
             onSelectThread={handleSelectThread}
+            onStartJourneyThread={handleStartJourneyThread}
             onOpenThreadDrawer={() => {
               loadThreads();
               setIsThreadDrawerOpen(true);
@@ -1557,9 +1672,9 @@ export default function App() {
                     onEditAndRegenerate={handleEditAndRegenerate}
                     onDeleteMessage={handleDeleteMessage}
                     onRetryMessage={handleRetryMessage}
-                    onOpenKnowledgeVault={() => setActiveTab('knowledge')}
+                    onOpenKnowledgeVault={handleOpenKnowledgeVault}
                     searchQuery={searchQuery}
-                    autoPlayVoice={autoPlayVoice}
+                    autoPlayVoice={autoPlayVoice || voiceConversationMode}
                     voiceSpeed={voiceSpeed}
                     onVoiceSpeedChange={handleVoiceSpeedChange}
                     isDark={isDark}
@@ -1601,10 +1716,16 @@ export default function App() {
               channel={channel}
               promptTemplates={promptTemplates}
               onRefreshPrompts={() => fetchPrompts(true)}
-              onOpenKnowledgeVault={() => setActiveTab('knowledge')}
+              onOpenKnowledgeVault={() => handleOpenKnowledgeVault()}
               onOpenDecisionAnalyzer={() => setActiveTab('advice')}
               thinkingLevel={thinkingLevel}
               onThinkingLevelChange={handleThinkingLevelChange}
+              pinnedDocs={pinnedDocs}
+              onPinAttachedDoc={handlePinDocToCurrentThread}
+              onUnpinDoc={handleUnpinDocFromCurrentThread}
+              isPinningDoc={isPinningDoc}
+              voiceConversationMode={voiceConversationMode}
+              onToggleVoiceConversationMode={() => setVoiceConversationMode((prev) => !prev)}
             />
           </div>
         )}
@@ -1640,8 +1761,13 @@ export default function App() {
           <KnowledgeModal
             isOpen={true}
             isEmbedded={true}
-            onClose={() => setActiveTab('home')}
+            focusedDocId={focusedKnowledgeDocId}
+            onClose={() => {
+              setFocusedKnowledgeDocId(null);
+              setActiveTab('home');
+            }}
             onInsertToChat={(text) => {
+              setFocusedKnowledgeDocId(null);
               setActiveTab('chat');
               handleSendMessage(text);
             }}
@@ -1697,7 +1823,14 @@ export default function App() {
       {/* Mobile-First Categorized Bottom Navigation */}
       <BottomNav
         activeTab={activeTab}
-        onTabChange={(tab) => setActiveTab(tab)}
+        onTabChange={(tab) => {
+          if (tab !== 'knowledge') {
+            setFocusedKnowledgeDocId(null);
+          } else {
+            setFocusedKnowledgeDocId(null);
+          }
+          setActiveTab(tab);
+        }}
       />
 
       {/* Nickname / Name Modal */}

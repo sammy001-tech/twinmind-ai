@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { KnowledgeItem, BeliefConflict } from '../types/index.ts';
+import {
+  KnowledgeItem,
+  BeliefConflict,
+  PersonaMemoryRecord,
+  VaultDuplicateCluster,
+} from '../types/index.ts';
 import { KnowledgeGraphView } from './KnowledgeGraphView.tsx';
 import { BeliefConflictCard } from './BeliefConflictCard.tsx';
 import {
@@ -17,7 +22,6 @@ import {
   Loader2,
   RefreshCw,
   SlidersHorizontal,
-  FolderPlus,
   Compass,
   FileText,
   Globe,
@@ -25,9 +29,11 @@ import {
   FileUp,
   Link2,
   Check,
-  ExternalLink,
   Network,
   Milestone,
+  Pencil,
+  Shield,
+  Layers,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { BeliefEvolutionTimeline } from './BeliefEvolutionTimeline.tsx';
@@ -38,6 +44,7 @@ interface KnowledgeModalProps {
   onInsertToChat?: (text: string) => void;
   onOpenPromptCreator?: () => void;
   isEmbedded?: boolean;
+  focusedDocId?: string | number | null;
 }
 
 // Deterministic color palette for dynamic category badges
@@ -76,14 +83,37 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   onInsertToChat,
   onOpenPromptCreator,
   isEmbedded = false,
+  focusedDocId = null,
 }) => {
-  const [activeTab, setActiveTab] = useState<'browse' | 'graph' | 'conflicts' | 'evolution' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
+  const [activeTab, setActiveTab] = useState<'browse' | 'rules' | 'graph' | 'conflicts' | 'evolution' | 'add' | 'import_file' | 'import_url' | 'telemetry'>('browse');
   const [documents, setDocuments] = useState<KnowledgeItem[]>([]);
   const [categories, setCategories] = useState<Array<{ category: string; count: number }>>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [vaultConflicts, setVaultConflicts] = useState<BeliefConflict[]>([]);
   const [isScanningConflicts, setIsScanningConflicts] = useState(false);
   const [conflictScanMessage, setConflictScanMessage] = useState<string | null>(null);
+
+  // Active Rules (persona_memories) state
+  const [rules, setRules] = useState<PersonaMemoryRecord[]>([]);
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [newRuleCategory, setNewRuleCategory] = useState<'preference' | 'correction' | 'feedback' | 'opinion'>('preference');
+  const [newRuleContent, setNewRuleContent] = useState('');
+  const [newRulePriority, setNewRulePriority] = useState(2);
+  const [isCreatingRule, setIsCreatingRule] = useState(false);
+  const [editingRuleId, setEditingRuleId] = useState<number | null>(null);
+  const [editRuleCategory, setEditRuleCategory] = useState('preference');
+  const [editRuleContent, setEditRuleContent] = useState('');
+  const [editRulePriority, setEditRulePriority] = useState(2);
+  const [isSavingRule, setIsSavingRule] = useState(false);
+
+  // Duplicate Audit state
+  const [duplicateClusters, setDuplicateClusters] = useState<VaultDuplicateCluster[]>([]);
+  const [isScanningDuplicates, setIsScanningDuplicates] = useState(false);
+  const [showDuplicatesPanel, setShowDuplicatesPanel] = useState(false);
+  const [duplicatesFeedback, setDuplicatesFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [mergingClusterId, setMergingClusterId] = useState<string | number | null>(null);
+  const [confirmDeleteDocId, setConfirmDeleteDocId] = useState<string | number | null>(null);
 
   const handleScanConflicts = async () => {
     setIsScanningConflicts(true);
@@ -131,6 +161,15 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [tagsInput, setTagsInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Inline Edit Document state
+  const [editingDocId, setEditingDocId] = useState<string | number | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editContent, setEditContent] = useState('');
+  const [editCategory, setEditCategory] = useState('personal_note');
+  const [editTags, setEditTags] = useState('');
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   // File Ingestion state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -306,16 +345,216 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
     }
   };
 
+  const fetchRules = async () => {
+    setRulesLoading(true);
+    setRulesError(null);
+    try {
+      const res = await fetch('/api/persona-memories');
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Failed to load active rules (HTTP ${res.status}).`);
+      }
+      setRules(Array.isArray(data.memories) ? data.memories : []);
+    } catch (err: unknown) {
+      setRulesError(err instanceof Error ? err.message : 'Unable to load active persona rules.');
+    } finally {
+      setRulesLoading(false);
+    }
+  };
+
+  const handleScanDuplicates = async () => {
+    setIsScanningDuplicates(true);
+    setShowDuplicatesPanel(true);
+    setDuplicatesFeedback(null);
+    try {
+      const res = await fetch('/api/knowledge/duplicates');
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to scan Vault for duplicate records.');
+      }
+      setDuplicateClusters(Array.isArray(data.clusters) ? data.clusters : []);
+    } catch (err: unknown) {
+      setDuplicatesFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Duplicate scan failed.',
+      });
+    } finally {
+      setIsScanningDuplicates(false);
+    }
+  };
+
+  const handleMergeDuplicateCluster = async (cluster: VaultDuplicateCluster) => {
+    setMergingClusterId(cluster.primaryId);
+    setDuplicatesFeedback(null);
+    try {
+      const res = await fetch('/api/knowledge/duplicates/merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          primaryId: cluster.primaryId,
+          duplicateIds: cluster.matches.map((m) => m.id),
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to merge duplicate cluster.');
+      }
+      setDuplicatesFeedback({
+        type: 'success',
+        text: `Merged ${data.deletedIds?.length || 0} duplicate record(s) into "${cluster.primaryTitle}".`,
+      });
+      await Promise.all([fetchDocuments(), fetchCategories(), fetchStatus(), handleScanDuplicates()]);
+    } catch (err: unknown) {
+      setDuplicatesFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Merge failed.',
+      });
+    } finally {
+      setMergingClusterId(null);
+    }
+  };
+
+  const handleCreateRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRuleContent.trim()) {
+      setRulesError('Rule content cannot be empty.');
+      return;
+    }
+    setIsCreatingRule(true);
+    setRulesError(null);
+    try {
+      const res = await fetch('/api/persona-memories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: newRuleCategory,
+          content: newRuleContent.trim(),
+          priority: newRulePriority,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to save active rule.');
+      }
+      setNewRuleContent('');
+      await fetchRules();
+    } catch (err: unknown) {
+      setRulesError(err instanceof Error ? err.message : 'Failed to create rule.');
+    } finally {
+      setIsCreatingRule(false);
+    }
+  };
+
+  const handleStartEditRule = (rule: PersonaMemoryRecord) => {
+    setEditingRuleId(rule.id);
+    setEditRuleCategory(rule.category);
+    setEditRuleContent(rule.content);
+    setEditRulePriority(rule.priority);
+    setRulesError(null);
+  };
+
+  const handleSaveEditRule = async (id: number) => {
+    if (!editRuleContent.trim()) {
+      setRulesError('Rule content cannot be empty.');
+      return;
+    }
+    setIsSavingRule(true);
+    setRulesError(null);
+    try {
+      const res = await fetch(`/api/persona-memories/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: editRuleCategory,
+          content: editRuleContent.trim(),
+          priority: editRulePriority,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to update rule.');
+      }
+      setEditingRuleId(null);
+      await fetchRules();
+    } catch (err: unknown) {
+      setRulesError(err instanceof Error ? err.message : 'Failed to save rule update.');
+    } finally {
+      setIsSavingRule(false);
+    }
+  };
+
+  const handleDeleteRule = async (id: number) => {
+    setRulesError(null);
+    try {
+      const res = await fetch(`/api/persona-memories/${id}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to delete rule.');
+      }
+      setRules((prev) => prev.filter((r) => r.id !== id));
+    } catch (err: unknown) {
+      setRulesError(err instanceof Error ? err.message : 'Failed to delete rule.');
+    }
+  };
+
   useEffect(() => {
     if (isOpen) {
       fetchDocuments();
       fetchCategories();
       fetchStatus();
+      fetchRules();
       setSearchResults(null);
       setSearchQuery('');
       setFeedback(null);
     }
   }, [isOpen, selectedCategory]);
+
+  const focusedRuleId = (() => {
+    if (focusedDocId === null || focusedDocId === undefined) return null;
+    const raw = String(focusedDocId);
+    if (!raw.startsWith('rule-')) return null;
+    const parsed = Number(raw.slice(5));
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  })();
+
+  // When opened directly from a "Memory updated" or "Active rule updated" indicator, switch to the exact tab & highlight
+  useEffect(() => {
+    if (!isOpen || focusedDocId === null || focusedDocId === undefined || focusedDocId === '') return;
+    const raw = String(focusedDocId);
+    if (raw === 'rules' || raw.startsWith('rule-')) {
+      setActiveTab('rules');
+      return;
+    }
+    setActiveTab('browse');
+    setSelectedCategory('all');
+    setSearchResults(null);
+    setSearchQuery('');
+  }, [isOpen, focusedDocId]);
+
+  useEffect(() => {
+    if (!isOpen || focusedDocId === null || focusedDocId === undefined || focusedDocId === '') return;
+    const raw = String(focusedDocId);
+    if (raw === 'rules' || raw.startsWith('rule-')) {
+      if (rulesLoading || !focusedRuleId) return;
+      const ruleEl = document.getElementById(`vault-rule-${focusedRuleId}`);
+      if (ruleEl) {
+        const timer = setTimeout(() => {
+          ruleEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
+        return () => clearTimeout(timer);
+      }
+      return;
+    }
+
+    if (isLoading) return;
+    const target = document.getElementById(`vault-doc-${raw}`);
+    if (target) {
+      const timer = setTimeout(() => {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 80);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen, isLoading, rulesLoading, documents, rules, focusedDocId, focusedRuleId]);
 
   const handleSemanticSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -402,11 +641,91 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
     }
   };
 
+  const handleStartEdit = (doc: KnowledgeItem) => {
+    setEditingDocId(doc.id);
+    setEditTitle(doc.title);
+    setEditContent(doc.content);
+    setEditCategory(doc.category || 'personal_note');
+    setEditTags(Array.isArray(doc.tags) ? doc.tags.join(', ') : '');
+    setEditError(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingDocId(null);
+    setEditError(null);
+  };
+
+  const handleSaveEdit = async (docId: string | number) => {
+    if (!editTitle.trim() || !editContent.trim()) {
+      setEditError('Title and content cannot be empty.');
+      return;
+    }
+
+    setIsSavingEdit(true);
+    setEditError(null);
+
+    try {
+      const splitTags = editTags
+        .split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
+
+      const res = await fetch(`/api/knowledge/${encodeURIComponent(String(docId))}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: editTitle.trim(),
+          content: editContent.trim(),
+          category: editCategory.trim().toLowerCase().replace(/\s+/g, '_') || 'personal_note',
+          tags: splitTags,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to save changes to Memory Vault.');
+      }
+
+      setEditingDocId(null);
+      await fetchDocuments();
+      await fetchCategories();
+      await fetchStatus();
+      if (searchResults) {
+        setSearchResults((prev) =>
+          prev
+            ? prev.map((d) =>
+                String(d.id) === String(docId)
+                  ? {
+                      ...d,
+                      title: editTitle.trim(),
+                      content: editContent.trim(),
+                      category: editCategory.trim().toLowerCase().replace(/\s+/g, '_') || 'personal_note',
+                      tags: splitTags,
+                    }
+                  : d
+              )
+            : null
+        );
+      }
+    } catch (err: unknown) {
+      setEditError(err instanceof Error ? err.message : 'Failed to update note.');
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
   const handleDeleteDocument = async (id: string | number) => {
-    if (!confirm('Are you sure you want to delete this document from your knowledge vault?')) return;
+    if (String(confirmDeleteDocId) !== String(id)) {
+      setConfirmDeleteDocId(id);
+      return;
+    }
     try {
       const res = await fetch(`/api/knowledge/${id}`, { method: 'DELETE' });
       if (res.ok) {
+        setConfirmDeleteDocId(null);
+        if (String(editingDocId) === String(id)) {
+          setEditingDocId(null);
+        }
         fetchDocuments();
         fetchCategories();
         fetchStatus();
@@ -436,8 +755,8 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   );
 
   return (
-    <div className={isEmbedded ? "w-full" : "fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in duration-150"}>
-      <div className={`w-full ${isEmbedded ? "max-w-full" : "max-w-3xl max-h-[90vh]"} bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden`}>
+    <div className={isEmbedded ? "w-full h-full flex flex-col min-h-0" : "fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in duration-150"}>
+      <div className={`w-full ${isEmbedded ? "max-w-full flex-1 h-full min-h-0 rounded-none border-0 shadow-none" : "max-w-3xl max-h-[90vh] rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl"} bg-white dark:bg-slate-900 flex flex-col overflow-hidden`}>
         {/* Header */}
         <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0 bg-slate-50/50 dark:bg-slate-900/50">
           <div className="flex items-center gap-3">
@@ -493,6 +812,21 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
               }`}
             >
               Vault ({documents.length})
+            </button>
+            <button
+              onClick={() => {
+                setActiveTab('rules');
+                void fetchRules();
+              }}
+              className={`px-2.5 py-1 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
+                activeTab === 'rules'
+                  ? 'bg-emerald-600 text-white font-bold shadow-xs'
+                  : 'text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10'
+              }`}
+              title="Active Behavioral Rules & Persona Preferences"
+            >
+              <Shield className="w-3 h-3" />
+              <span>Active Rules ({rules.length})</span>
             </button>
             <button
               onClick={() => setActiveTab('graph')}
@@ -604,7 +938,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-4 sm:p-5 overflow-y-auto flex-1">
+        <div className={`p-4 sm:p-5 overflow-y-auto flex-1 min-h-0 ${isEmbedded ? 'pb-24' : ''}`}>
           {activeTab === 'browse' && (
             <div className="space-y-4">
             {/* Semantic Search Box */}
@@ -701,19 +1035,124 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                     <span>New Category</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      fetchDocuments();
-                      fetchCategories();
-                    }}
-                    className="ml-auto text-slate-400 hover:text-slate-900 dark:hover:text-white p-1"
-                    title="Refresh list"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                  </button>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => { void handleScanDuplicates(); }}
+                      disabled={isScanningDuplicates}
+                      className="px-2 py-0.5 rounded-lg text-[11px] bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition flex items-center gap-1 disabled:opacity-50"
+                      title="Scan Vault for duplicate or near-duplicate memories"
+                    >
+                      <Layers className={`w-3 h-3 ${isScanningDuplicates ? 'animate-spin' : ''}`} />
+                      <span>{isScanningDuplicates ? 'Scanning...' : 'Find Duplicates'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        fetchDocuments();
+                        fetchCategories();
+                      }}
+                      className="text-slate-400 hover:text-slate-900 dark:hover:text-white p-1"
+                      title="Refresh list"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
                 </div>
               </form>
+
+              {/* Duplicate & Near-Duplicate Vault Audit Panel */}
+              {showDuplicatesPanel && (
+                <div className="p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/20 border border-amber-300/70 dark:border-amber-700/40 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                      <h4 className="text-xs font-bold text-slate-900 dark:text-white">
+                        Vault Duplicate &amp; Overlap Audit
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowDuplicatesPanel(false)}
+                      className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                      aria-label="Close duplicate audit panel"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  {duplicatesFeedback && (
+                    <div
+                      className={`p-2 rounded-lg text-[11px] border ${
+                        duplicatesFeedback.type === 'success'
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
+                      }`}
+                    >
+                      {duplicatesFeedback.text}
+                    </div>
+                  )}
+
+                  {isScanningDuplicates ? (
+                    <div className="py-4 flex items-center gap-2 text-xs text-slate-500">
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                      <span>Computing token overlap across Vault notes...</span>
+                    </div>
+                  ) : duplicateClusters.length === 0 ? (
+                    <p className="text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+                      No duplicate or overlapping Vault memories found.
+                    </p>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {duplicateClusters.map((cluster) => (
+                        <div
+                          key={String(cluster.primaryId)}
+                          className="p-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-2"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <span className="text-[10px] uppercase tracking-wider font-bold text-emerald-600 dark:text-emerald-400">
+                                Primary Note
+                              </span>
+                              <h5 className="text-xs font-semibold text-slate-900 dark:text-white">
+                                {cluster.primaryTitle}
+                              </h5>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { void handleMergeDuplicateCluster(cluster); }}
+                              disabled={mergingClusterId !== null}
+                              className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-[11px] transition disabled:opacity-50"
+                            >
+                              {String(mergingClusterId) === String(cluster.primaryId)
+                                ? 'Merging...'
+                                : `Merge ${cluster.matches.length} into Primary`}
+                            </button>
+                          </div>
+
+                          <div className="space-y-1.5 pl-2 border-l-2 border-amber-400/50">
+                            {cluster.matches.map((match) => (
+                              <div key={String(match.id)} className="flex items-start justify-between gap-2 text-[11px]">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-semibold text-slate-800 dark:text-slate-200">{match.title}</span>
+                                    <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-700 dark:text-amber-300 font-mono text-[10px]">
+                                      {Math.round(match.similarityScore * 100)}% overlap
+                                    </span>
+                                  </div>
+                                  <p className="text-slate-500 dark:text-slate-400 truncate max-w-md">
+                                    {match.contentPreview}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Search Active Indicator */}
               {searchResults !== null && (
@@ -734,7 +1173,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
               )}
 
               {/* Document List */}
-              <div className="space-y-2.5 max-h-[50vh] overflow-y-auto pr-1">
+              <div className={isEmbedded ? "space-y-2.5" : "space-y-2.5 max-h-[50vh] overflow-y-auto pr-1"}>
                 {isLoading ? (
                   <div className="p-8 text-center space-y-2 text-slate-400 text-xs">
                     <Loader2 className="w-5 h-5 animate-spin mx-auto text-emerald-500 dark:text-emerald-400" />
@@ -759,78 +1198,388 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                 ) : (
                   displayList.map((doc) => {
                     const color = getCategoryColor(doc.category);
+                    const isFocused =
+                      focusedDocId !== null &&
+                      focusedDocId !== undefined &&
+                      String(doc.id) === String(focusedDocId);
+                    const isEditingThisDoc = String(editingDocId) === String(doc.id);
                     return (
                       <div
+                        id={`vault-doc-${String(doc.id)}`}
                         key={doc.id}
-                        className="p-3.5 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700 transition space-y-2 group shadow-xs"
+                        className={`p-3.5 rounded-xl border transition space-y-2 group shadow-xs ${
+                          isFocused
+                            ? 'bg-emerald-50/80 dark:bg-emerald-950/35 border-emerald-500/70 ring-2 ring-emerald-500/50'
+                            : 'bg-slate-50/90 dark:bg-slate-950/70 border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700'
+                        }`}
                       >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="space-y-0.5">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <h4 className="font-semibold text-slate-900 dark:text-white text-xs sm:text-sm">
-                                {doc.title}
-                              </h4>
-                              {doc.similarity !== undefined && (
-                                <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold">
-                                  {Math.round(doc.similarity * 100)}% match
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 flex-wrap">
-                              <span className={`capitalize px-1.5 py-0.2 rounded ${color.bg} ${color.text} ${color.border} border font-medium`}>
-                                {doc.category.replace(/_/g, ' ')}
+                        {isEditingThisDoc ? (
+                          <div className="space-y-2.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                                Editing Memory
                               </span>
-                              {doc.createdAt && (
-                                <span>{new Date(doc.createdAt).toLocaleDateString()}</span>
-                              )}
-                              <span className="text-emerald-400/80 font-mono">
-                                vector(768)
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition">
-                            {onInsertToChat && (
                               <button
-                                onClick={() => onInsertToChat(doc.content)}
-                                className="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-medium transition"
-                                title="Insert into chat box"
+                                type="button"
+                                onClick={handleCancelEdit}
+                                className="p-1 rounded text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                aria-label="Cancel editing"
                               >
-                                Insert
+                                <X className="w-3.5 h-3.5" />
                               </button>
-                            )}
-                            <button
-                              onClick={() => handleDeleteDocument(doc.id)}
-                              className="p-1 rounded text-slate-400 hover:text-red-500 dark:hover:text-red-400 transition"
-                              title="Delete note"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
+                            </div>
 
-                        <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-h-48 overflow-y-auto font-sans">
-                          {renderFormattedMarkdown(doc.content)}
-                        </div>
+                            <input
+                              type="text"
+                              value={editTitle}
+                              onChange={(e) => setEditTitle(e.target.value)}
+                              placeholder="Document title"
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                            />
 
-                        {doc.tags && doc.tags.length > 0 && (
-                          <div className="flex flex-wrap gap-1 pt-1">
-                            {doc.tags.map((tag, tIdx) => (
-                              <span
-                                key={tIdx}
-                                className="text-[10px] px-1.5 py-0.2 rounded bg-slate-200/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 flex items-center gap-0.5"
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <select
+                                value={editCategory}
+                                onChange={(e) => setEditCategory(e.target.value)}
+                                className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 focus:outline-none"
                               >
-                                <Tag className="w-2.5 h-2.5" />
-                                <span>{tag}</span>
-                              </span>
-                            ))}
+                                {uniqueCategoryNames.map((cat) => (
+                                  <option key={cat} value={cat}>
+                                    {cat.replace(/_/g, ' ')}
+                                  </option>
+                                ))}
+                              </select>
+                              <input
+                                type="text"
+                                value={editTags}
+                                onChange={(e) => setEditTags(e.target.value)}
+                                placeholder="Tags (comma-separated)"
+                                className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-200 focus:outline-none"
+                              />
+                            </div>
+
+                            <textarea
+                              value={editContent}
+                              onChange={(e) => setEditContent(e.target.value)}
+                              rows={5}
+                              placeholder="Memory content..."
+                              className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                            />
+
+                            {editError && (
+                              <div className="p-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[11px] text-red-600 dark:text-red-400">
+                                {editError}
+                              </div>
+                            )}
+
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={handleCancelEdit}
+                                disabled={isSavingEdit}
+                                className="px-2.5 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium transition"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSaveEdit(doc.id)}
+                                disabled={isSavingEdit}
+                                className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center gap-1 disabled:opacity-50"
+                              >
+                                {isSavingEdit ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                                <span>{isSavingEdit ? 'Saving...' : 'Save Changes'}</span>
+                              </button>
+                            </div>
                           </div>
+                        ) : (
+                          <>
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="space-y-0.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h4 className="font-semibold text-slate-900 dark:text-white text-xs sm:text-sm">
+                                    {doc.title}
+                                  </h4>
+                                  {isFocused && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold">
+                                      Updated memory
+                                    </span>
+                                  )}
+                                  {doc.similarity !== undefined && (
+                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold">
+                                      {Math.round(doc.similarity * 100)}% match
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 flex-wrap">
+                                  <span className={`capitalize px-1.5 py-0.2 rounded ${color.bg} ${color.text} ${color.border} border font-medium`}>
+                                    {doc.category.replace(/_/g, ' ')}
+                                  </span>
+                                  {doc.createdAt && (
+                                    <span>{new Date(doc.createdAt).toLocaleDateString()}</span>
+                                  )}
+                                  <span className="text-emerald-400/80 font-mono">
+                                    vector(768)
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1 opacity-80 group-hover:opacity-100 transition">
+                                {onInsertToChat && (
+                                  <button
+                                    onClick={() => onInsertToChat(doc.content)}
+                                    className="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-medium transition"
+                                    title="Insert into chat box"
+                                  >
+                                    Insert
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEdit(doc)}
+                                  className="p-1 rounded text-slate-400 hover:text-indigo-500 dark:hover:text-indigo-400 transition"
+                                  title="Edit note"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </button>
+                                {String(confirmDeleteDocId) === String(doc.id) ? (
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteDocument(doc.id)}
+                                      className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-bold hover:bg-red-500"
+                                    >
+                                      Confirm Delete
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteDocId(null)}
+                                      className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-slate-800 text-[10px] text-slate-600 dark:text-slate-300"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteDocument(doc.id)}
+                                    className="p-1 rounded text-slate-400 hover:text-red-500 dark:hover:text-red-400 transition"
+                                    title="Delete note"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className={`text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-sans ${isFocused ? '' : 'max-h-48 overflow-y-auto'}`}>
+                              {renderFormattedMarkdown(doc.content)}
+                            </div>
+
+                            {doc.tags && doc.tags.length > 0 && (
+                              <div className="flex flex-wrap gap-1 pt-1">
+                                {doc.tags.map((tag, tIdx) => (
+                                  <span
+                                    key={tIdx}
+                                    className="text-[10px] px-1.5 py-0.2 rounded bg-slate-200/60 dark:bg-slate-800/60 text-slate-600 dark:text-slate-400 flex items-center gap-0.5"
+                                  >
+                                    <Tag className="w-2.5 h-2.5" />
+                                    <span>{tag}</span>
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     );
                   })
                 )}
               </div>
+            </div>
+          )}
+
+          {activeTab === 'rules' && (
+            <div className="space-y-4 max-w-2xl mx-auto">
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <h4 className="font-bold text-xs text-slate-900 dark:text-white">
+                      Active Behavioral Rules &amp; Persona Directives
+                    </h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => { void fetchRules(); }}
+                    className="text-xs text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${rulesLoading ? 'animate-spin' : ''}`} />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                  These persistent rules, corrections, and preferences are injected directly into TwinMind&apos;s operating context across Web, Telegram, and WhatsApp.
+                </p>
+              </div>
+
+              {rulesError && (
+                <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-600 dark:text-rose-300 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{rulesError}</span>
+                </div>
+              )}
+
+              {/* Create Active Rule Form */}
+              <form onSubmit={handleCreateRule} className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <select
+                    value={newRuleCategory}
+                    onChange={(e) => setNewRuleCategory(e.target.value as any)}
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200"
+                  >
+                    <option value="preference">preference</option>
+                    <option value="correction">correction</option>
+                    <option value="feedback">feedback</option>
+                    <option value="opinion">opinion</option>
+                  </select>
+                  <select
+                    value={newRulePriority}
+                    onChange={(e) => setNewRulePriority(Number(e.target.value))}
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200"
+                  >
+                    {[1, 2, 3, 4, 5].map((p) => (
+                      <option key={p} value={p}>Priority {p} {p === 5 ? '(Highest)' : p === 1 ? '(Lowest)' : ''}</option>
+                    ))}
+                  </select>
+                </div>
+                <textarea
+                  value={newRuleContent}
+                  onChange={(e) => setNewRuleContent(e.target.value)}
+                  rows={2}
+                  placeholder="Add an active rule or preference (e.g., 'Always include concrete code examples when explaining architecture')..."
+                  className="w-full px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={isCreatingRule || !newRuleContent.trim()}
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {isCreatingRule ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                    <span>Add Active Rule</span>
+                  </button>
+                </div>
+              </form>
+
+              {rulesLoading ? (
+                <div className="py-8 text-center text-xs text-slate-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto text-emerald-500 mb-2" />
+                  Loading active persona rules...
+                </div>
+              ) : rules.length === 0 ? (
+                <div className="p-6 rounded-xl border border-dashed border-slate-300 dark:border-slate-800 text-center text-xs text-slate-500">
+                  No active rules stored yet. Add one above or ask TwinMind to remember a preference.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {rules.map((rule) => (
+                    <div
+                      key={rule.id}
+                      id={`vault-rule-${rule.id}`}
+                      className={`p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/70 border space-y-2 transition ${
+                        focusedRuleId === rule.id
+                          ? 'border-emerald-500 ring-2 ring-emerald-500/40'
+                          : 'border-slate-200 dark:border-slate-800'
+                      }`}
+                    >
+                      {editingRuleId === rule.id ? (
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <select
+                              value={editRuleCategory}
+                              onChange={(e) => setEditRuleCategory(e.target.value)}
+                              className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                            >
+                              <option value="preference">preference</option>
+                              <option value="correction">correction</option>
+                              <option value="feedback">feedback</option>
+                              <option value="opinion">opinion</option>
+                            </select>
+                            <select
+                              value={editRulePriority}
+                              onChange={(e) => setEditRulePriority(Number(e.target.value))}
+                              className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                            >
+                              {[1, 2, 3, 4, 5].map((p) => (
+                                <option key={p} value={p}>Priority {p}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <textarea
+                            value={editRuleContent}
+                            onChange={(e) => setEditRuleContent(e.target.value)}
+                            rows={3}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                          />
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setEditingRuleId(null)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-slate-800 text-xs"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { void handleSaveEditRule(rule.id); }}
+                              disabled={isSavingRule}
+                              className="px-3 py-1 rounded-lg bg-emerald-600 text-white text-xs font-semibold disabled:opacity-50"
+                            >
+                              {isSavingRule ? 'Saving...' : 'Save Rule'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 text-[10px]">
+                              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold uppercase">
+                                {rule.category}
+                              </span>
+                              <span className="text-slate-500 font-mono">Priority {rule.priority}</span>
+                              {rule.created_at && (
+                                <span className="text-slate-400">{new Date(rule.created_at).toLocaleDateString()}</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditRule(rule)}
+                                className="p-1 rounded text-slate-400 hover:text-indigo-500"
+                                title="Edit rule"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { void handleDeleteRule(rule.id); }}
+                                className="p-1 rounded text-slate-400 hover:text-red-500"
+                                title="Delete rule"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                          <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed whitespace-pre-wrap">
+                            {rule.content}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

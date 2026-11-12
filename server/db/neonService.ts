@@ -58,10 +58,54 @@ export interface ChatThreadRecord {
   id: string;
   title: string;
   channel: string;
+  journey_id?: number | null;
+  journey_title?: string | null;
   created_at: string;
   updated_at: string;
   message_count?: number;
   last_message?: string;
+}
+
+export interface ThreadPinnedDocRecord {
+  id: number;
+  thread_id: string;
+  file_name: string;
+  format: string;
+  content: string;
+  char_count: number;
+  created_at: string;
+}
+
+export interface LearningJourneyRecord {
+  id: number;
+  title: string;
+  description: string;
+  next_step: string;
+  status: 'active' | 'paused' | 'completed';
+  thread_count: number;
+  latest_thread_id: string | null;
+  latest_thread_title: string | null;
+  latest_thread_updated_at: string | null;
+  last_message_preview: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduledCheckinRecord {
+  id: number;
+  title: string;
+  prompt: string;
+  channel: 'telegram' | 'whatsapp';
+  due_at: string;
+  status: 'pending' | 'processing' | 'sent' | 'failed' | 'cancelled';
+  thread_id: string | null;
+  journey_id: number | null;
+  decision_id: number | null;
+  last_error: string | null;
+  delivery_sid: string | null;
+  sent_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type StoredArtifactType = 'pdf' | 'md' | 'csv' | 'xlsx';
@@ -117,6 +161,10 @@ class NeonDatabaseService {
       void this.ensureConnected();
     }, this.reconnectIntervalMs);
     this.reconnectTimer.unref?.();
+  }
+
+  public isDatabaseConnected(): boolean {
+    return this.isConnected && Boolean(this.pool);
   }
 
   /**
@@ -560,6 +608,48 @@ class NeonDatabaseService {
         CREATE TRIGGER decisions_immutable_verdict
           BEFORE UPDATE ON decisions
           FOR EACH ROW EXECUTE FUNCTION prevent_original_decision_mutation();
+
+        CREATE TABLE IF NOT EXISTS learning_journeys (
+          id SERIAL PRIMARY KEY,
+          title VARCHAR(255) NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          next_step TEXT NOT NULL DEFAULT '',
+          status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'completed')),
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS journey_id INTEGER REFERENCES learning_journeys(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS idx_chat_threads_journey ON chat_threads(journey_id);
+
+        CREATE TABLE IF NOT EXISTS thread_pinned_docs (
+          id SERIAL PRIMARY KEY,
+          thread_id VARCHAR(64) NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+          file_name VARCHAR(255) NOT NULL,
+          format VARCHAR(32) NOT NULL DEFAULT 'text',
+          content TEXT NOT NULL,
+          char_count INTEGER NOT NULL CHECK (char_count >= 0),
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_thread_pinned_docs_thread ON thread_pinned_docs(thread_id, created_at ASC);
+
+        CREATE TABLE IF NOT EXISTS scheduled_checkins (
+          id SERIAL PRIMARY KEY,
+          title VARCHAR(255) NOT NULL,
+          prompt TEXT NOT NULL,
+          channel VARCHAR(32) NOT NULL CHECK (channel IN ('telegram', 'whatsapp')),
+          due_at TIMESTAMP WITH TIME ZONE NOT NULL,
+          status VARCHAR(24) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'sent', 'failed', 'cancelled')),
+          thread_id VARCHAR(64) REFERENCES chat_threads(id) ON DELETE SET NULL,
+          journey_id INTEGER REFERENCES learning_journeys(id) ON DELETE SET NULL,
+          decision_id INTEGER REFERENCES decisions(id) ON DELETE SET NULL,
+          last_error TEXT,
+          delivery_sid VARCHAR(128),
+          sent_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_checkins_due ON scheduled_checkins(status, due_at ASC);
       `);
 
       // Initialize pgvector extension for Neon vector knowledge search
@@ -1025,10 +1115,11 @@ class NeonDatabaseService {
     if (this.pool && this.isConnected) {
       try {
         let query = `
-          SELECT t.id, t.title, t.channel, t.created_at, t.updated_at,
+          SELECT t.id, t.title, t.channel, t.journey_id, j.title AS journey_title, t.created_at, t.updated_at,
                  COUNT(c.id) AS message_count,
                  (SELECT content FROM conversations WHERE session_id = t.id ORDER BY created_at DESC LIMIT 1) AS last_message
           FROM chat_threads t
+          LEFT JOIN learning_journeys j ON j.id = t.journey_id
           LEFT JOIN conversations c ON c.session_id = t.id
         `;
         const params: unknown[] = [];
@@ -1036,7 +1127,7 @@ class NeonDatabaseService {
           query += ` WHERE t.channel = $1`;
           params.push(channel);
         }
-        query += ` GROUP BY t.id, t.title, t.channel, t.created_at, t.updated_at ORDER BY t.updated_at DESC`;
+        query += ` GROUP BY t.id, t.title, t.channel, t.journey_id, j.title, t.created_at, t.updated_at ORDER BY t.updated_at DESC`;
 
         const res = await this.pool.query(query, params);
         if (res.rows.length > 0) {
@@ -1044,6 +1135,8 @@ class NeonDatabaseService {
             id: r.id,
             title: r.title,
             channel: r.channel,
+            journey_id: r.journey_id !== null && r.journey_id !== undefined ? Number(r.journey_id) : null,
+            journey_title: r.journey_title || null,
             created_at: r.created_at,
             updated_at: r.updated_at,
             message_count: parseInt(r.message_count || '0', 10),
@@ -2266,8 +2359,8 @@ class NeonDatabaseService {
     if (!this.pool || !this.isConnected) return false;
 
     try {
-      await this.pool.query('DELETE FROM twin_knowledge WHERE id = $1', [id]);
-      return true;
+      const res = await this.pool.query('DELETE FROM twin_knowledge WHERE id = $1', [id]);
+      return (res.rowCount || 0) > 0;
     } catch (err) {
       console.error('[NeonDB] Error deleting knowledge document:', err);
       return false;
@@ -2308,11 +2401,11 @@ class NeonDatabaseService {
         updates.push(`embedding = $${params.length}::vector`);
       }
 
-      await this.pool.query(
+      const res = await this.pool.query(
         `UPDATE twin_knowledge SET ${updates.join(', ')} WHERE id = $1`,
         params
       );
-      return true;
+      return (res.rowCount || 0) > 0;
     } catch (err) {
       console.error('[NeonDB] Error updating knowledge document:', err);
       return false;
@@ -2555,6 +2648,450 @@ class NeonDatabaseService {
       return false;
     }
   }
+  /**
+   * Update a specific persona memory
+   */
+  public async updatePersonaMemory(
+    id: number,
+    patch: { category?: string; content?: string; priority?: number }
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const sets: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+      const params: unknown[] = [id];
+      if (patch.category !== undefined) {
+        params.push(patch.category);
+        sets.push(`category = $${params.length}`);
+      }
+      if (patch.content !== undefined) {
+        params.push(patch.content);
+        sets.push(`content = $${params.length}`);
+      }
+      if (patch.priority !== undefined) {
+        params.push(patch.priority);
+        sets.push(`priority = $${params.length}`);
+      }
+      if (sets.length === 1) return false;
+      const res = await this.pool.query(
+        `UPDATE persona_memories SET ${sets.join(', ')} WHERE id = $1`,
+        params
+      );
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating persona memory:', err);
+      return false;
+    }
+  }
+
+  // ==========================================
+  // Thread-Pinned Reference Documents
+  // ==========================================
+
+  public async getThreadPinnedDocs(threadId: string): Promise<ThreadPinnedDocRecord[]> {
+    if (!this.pool || !this.isConnected || !threadId.trim()) return [];
+    try {
+      const res = await this.pool.query(
+        `SELECT id, thread_id, file_name, format, content, char_count, created_at
+         FROM thread_pinned_docs
+         WHERE thread_id = $1
+         ORDER BY created_at ASC, id ASC`,
+        [threadId.trim()]
+      );
+      return res.rows.map((r) => ({
+        id: Number(r.id),
+        thread_id: String(r.thread_id),
+        file_name: String(r.file_name),
+        format: String(r.format),
+        content: String(r.content),
+        char_count: Number(r.char_count),
+        created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+      }));
+    } catch (err) {
+      console.error('[NeonDB] Error fetching thread pinned docs:', err);
+      return [];
+    }
+  }
+
+  public async addThreadPinnedDoc(doc: {
+    threadId: string;
+    threadTitle?: string;
+    channel?: string;
+    fileName: string;
+    format: string;
+    content: string;
+  }): Promise<ThreadPinnedDocRecord | null> {
+    if (!this.pool || !this.isConnected) return null;
+    const threadId = doc.threadId.trim();
+    const fileName = doc.fileName.trim();
+    const format = doc.format.trim() || 'text';
+    const content = doc.content;
+    if (!threadId || !fileName || !content.trim()) return null;
+
+    try {
+      await this.pool.query(
+        `INSERT INTO chat_threads (id, title, channel, updated_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO NOTHING`,
+        [threadId, (doc.threadTitle || fileName).slice(0, 48), doc.channel || 'web']
+      );
+
+      const res = await this.pool.query(
+        `INSERT INTO thread_pinned_docs (thread_id, file_name, format, content, char_count)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, thread_id, file_name, format, content, char_count, created_at`,
+        [threadId, fileName.slice(0, 255), format.slice(0, 32), content, content.length]
+      );
+      const r = res.rows[0];
+      if (!r) return null;
+      return {
+        id: Number(r.id),
+        thread_id: String(r.thread_id),
+        file_name: String(r.file_name),
+        format: String(r.format),
+        content: String(r.content),
+        char_count: Number(r.char_count),
+        created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+      };
+    } catch (err) {
+      console.error('[NeonDB] Error pinning doc to thread:', err);
+      return null;
+    }
+  }
+
+  public async deleteThreadPinnedDoc(threadId: string, docId: number): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const res = await this.pool.query(
+        `DELETE FROM thread_pinned_docs WHERE id = $1 AND thread_id = $2`,
+        [docId, threadId.trim()]
+      );
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error deleting thread pinned doc:', err);
+      return false;
+    }
+  }
+
+  // ==========================================
+  // Learning Journeys & Continuity Tracking
+  // ==========================================
+
+  public async listJourneys(): Promise<LearningJourneyRecord[]> {
+    if (!this.pool || !this.isConnected) return [];
+    try {
+      const res = await this.pool.query(`
+        SELECT
+          j.id,
+          j.title,
+          j.description,
+          j.next_step,
+          j.status,
+          j.created_at,
+          j.updated_at,
+          COALESCE(stats.thread_count, 0)::int AS thread_count,
+          latest.id AS latest_thread_id,
+          latest.title AS latest_thread_title,
+          latest.updated_at AS latest_thread_updated_at,
+          last_msg.content AS last_message_preview
+        FROM learning_journeys j
+        LEFT JOIN (
+          SELECT journey_id, COUNT(*)::int AS thread_count
+          FROM chat_threads
+          WHERE journey_id IS NOT NULL
+          GROUP BY journey_id
+        ) stats ON stats.journey_id = j.id
+        LEFT JOIN LATERAL (
+          SELECT id, title, updated_at
+          FROM chat_threads
+          WHERE journey_id = j.id
+          ORDER BY updated_at DESC
+          LIMIT 1
+        ) latest ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT content
+          FROM conversations
+          WHERE session_id = latest.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) last_msg ON latest.id IS NOT NULL
+        ORDER BY COALESCE(latest.updated_at, j.updated_at) DESC, j.id DESC
+      `);
+      return res.rows.map((r) => ({
+        id: Number(r.id),
+        title: String(r.title),
+        description: String(r.description || ''),
+        next_step: String(r.next_step || ''),
+        status: (r.status === 'paused' || r.status === 'completed' ? r.status : 'active'),
+        thread_count: Number(r.thread_count || 0),
+        latest_thread_id: r.latest_thread_id ? String(r.latest_thread_id) : null,
+        latest_thread_title: r.latest_thread_title ? String(r.latest_thread_title) : null,
+        latest_thread_updated_at: r.latest_thread_updated_at
+          ? (r.latest_thread_updated_at instanceof Date ? r.latest_thread_updated_at.toISOString() : String(r.latest_thread_updated_at))
+          : null,
+        last_message_preview: r.last_message_preview ? String(r.last_message_preview).slice(0, 180) : null,
+        created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+        updated_at: r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at),
+      }));
+    } catch (err) {
+      console.error('[NeonDB] Error listing learning journeys:', err);
+      return [];
+    }
+  }
+
+  public async createJourney(input: {
+    title: string;
+    description?: string;
+    next_step?: string;
+    status?: 'active' | 'paused' | 'completed';
+  }): Promise<LearningJourneyRecord | null> {
+    if (!this.pool || !this.isConnected) return null;
+    try {
+      const status = input.status === 'paused' || input.status === 'completed' ? input.status : 'active';
+      const res = await this.pool.query(
+        `INSERT INTO learning_journeys (title, description, next_step, status)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        [
+          input.title.trim().slice(0, 255),
+          (input.description || '').trim(),
+          (input.next_step || '').trim(),
+          status,
+        ]
+      );
+      const r = res.rows[0];
+      if (!r) return null;
+      return {
+        id: Number(r.id),
+        title: String(r.title),
+        description: String(r.description || ''),
+        next_step: String(r.next_step || ''),
+        status,
+        thread_count: 0,
+        latest_thread_id: null,
+        latest_thread_title: null,
+        latest_thread_updated_at: null,
+        last_message_preview: null,
+        created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+        updated_at: r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at),
+      };
+    } catch (err) {
+      console.error('[NeonDB] Error creating journey:', err);
+      return null;
+    }
+  }
+
+  public async updateJourney(
+    id: number,
+    patch: { title?: string; description?: string; next_step?: string; status?: 'active' | 'paused' | 'completed' }
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const sets: string[] = ['updated_at = CURRENT_TIMESTAMP'];
+      const params: unknown[] = [id];
+      if (patch.title !== undefined) {
+        params.push(patch.title.trim().slice(0, 255));
+        sets.push(`title = $${params.length}`);
+      }
+      if (patch.description !== undefined) {
+        params.push(patch.description.trim());
+        sets.push(`description = $${params.length}`);
+      }
+      if (patch.next_step !== undefined) {
+        params.push(patch.next_step.trim());
+        sets.push(`next_step = $${params.length}`);
+      }
+      if (patch.status !== undefined) {
+        params.push(patch.status);
+        sets.push(`status = $${params.length}`);
+      }
+      if (sets.length === 1) return false;
+      const res = await this.pool.query(
+        `UPDATE learning_journeys SET ${sets.join(', ')} WHERE id = $1`,
+        params
+      );
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating journey:', err);
+      return false;
+    }
+  }
+
+  public async deleteJourney(id: number): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const res = await this.pool.query('DELETE FROM learning_journeys WHERE id = $1', [id]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error deleting journey:', err);
+      return false;
+    }
+  }
+
+  public async assignThreadToJourney(
+    threadId: string,
+    journeyId: number | null,
+    threadTitle?: string
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !threadId.trim()) return false;
+    try {
+      await this.pool.query(
+        `INSERT INTO chat_threads (id, title, channel, journey_id, updated_at)
+         VALUES ($1, $2, 'web', $3, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET journey_id = $3, updated_at = CURRENT_TIMESTAMP`,
+        [threadId.trim(), (threadTitle || 'Learning Session').slice(0, 48), journeyId]
+      );
+      if (journeyId !== null) {
+        await this.pool.query(
+          'UPDATE learning_journeys SET updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+          [journeyId]
+        );
+      }
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error assigning thread to journey:', err);
+      return false;
+    }
+  }
+
+  // ==========================================
+  // Durable Scheduled Check-Ins
+  // ==========================================
+
+  private mapCheckinRow(r: Record<string, unknown>): ScheduledCheckinRecord {
+    return {
+      id: Number(r.id),
+      title: String(r.title),
+      prompt: String(r.prompt),
+      channel: r.channel === 'whatsapp' ? 'whatsapp' : 'telegram',
+      due_at: r.due_at instanceof Date ? r.due_at.toISOString() : String(r.due_at),
+      status: (['pending', 'processing', 'sent', 'failed', 'cancelled'].includes(String(r.status))
+        ? String(r.status)
+        : 'pending') as ScheduledCheckinRecord['status'],
+      thread_id: r.thread_id ? String(r.thread_id) : null,
+      journey_id: r.journey_id !== null && r.journey_id !== undefined ? Number(r.journey_id) : null,
+      decision_id: r.decision_id !== null && r.decision_id !== undefined ? Number(r.decision_id) : null,
+      last_error: r.last_error ? String(r.last_error) : null,
+      delivery_sid: r.delivery_sid ? String(r.delivery_sid) : null,
+      sent_at: r.sent_at ? (r.sent_at instanceof Date ? r.sent_at.toISOString() : String(r.sent_at)) : null,
+      created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+      updated_at: r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at),
+    };
+  }
+
+  public async createScheduledCheckin(input: {
+    title: string;
+    prompt: string;
+    channel: 'telegram' | 'whatsapp';
+    dueAt: string;
+    threadId?: string | null;
+    journeyId?: number | null;
+    decisionId?: number | null;
+  }): Promise<ScheduledCheckinRecord | null> {
+    if (!this.pool || !this.isConnected) return null;
+    try {
+      const res = await this.pool.query(
+        `INSERT INTO scheduled_checkins (title, prompt, channel, due_at, status, thread_id, journey_id, decision_id)
+         VALUES ($1, $2, $3, $4::timestamptz, 'pending', $5, $6, $7)
+         RETURNING *`,
+        [
+          input.title.trim().slice(0, 255),
+          input.prompt.trim(),
+          input.channel,
+          input.dueAt,
+          input.threadId || null,
+          input.journeyId || null,
+          input.decisionId || null,
+        ]
+      );
+      return res.rows[0] ? this.mapCheckinRow(res.rows[0]) : null;
+    } catch (err) {
+      console.error('[NeonDB] Error creating scheduled check-in:', err);
+      return null;
+    }
+  }
+
+  public async listScheduledCheckins(limit = 50): Promise<ScheduledCheckinRecord[]> {
+    if (!this.pool || !this.isConnected) return [];
+    try {
+      const res = await this.pool.query(
+        `SELECT * FROM scheduled_checkins ORDER BY due_at ASC, id DESC LIMIT $1`,
+        [limit]
+      );
+      return res.rows.map((r) => this.mapCheckinRow(r));
+    } catch (err) {
+      console.error('[NeonDB] Error listing scheduled check-ins:', err);
+      return [];
+    }
+  }
+
+  public async getScheduledCheckinById(id: number): Promise<ScheduledCheckinRecord | null> {
+    if (!this.pool || !this.isConnected) return null;
+    try {
+      const res = await this.pool.query('SELECT * FROM scheduled_checkins WHERE id = $1 LIMIT 1', [id]);
+      return res.rows[0] ? this.mapCheckinRow(res.rows[0]) : null;
+    } catch (err) {
+      console.error('[NeonDB] Error fetching scheduled check-in:', err);
+      return null;
+    }
+  }
+
+  public async claimDueCheckins(limit = 5): Promise<ScheduledCheckinRecord[]> {
+    if (!this.pool || !this.isConnected) return [];
+    try {
+      const res = await this.pool.query(
+        `UPDATE scheduled_checkins
+         SET status = 'processing', updated_at = CURRENT_TIMESTAMP
+         WHERE id IN (
+           SELECT id FROM scheduled_checkins
+           WHERE status = 'pending' AND due_at <= CURRENT_TIMESTAMP
+           ORDER BY due_at ASC
+           LIMIT $1
+           FOR UPDATE SKIP LOCKED
+         )
+         RETURNING *`,
+        [limit]
+      );
+      return res.rows.map((r) => this.mapCheckinRow(r));
+    } catch (err) {
+      console.error('[NeonDB] Error claiming due check-ins:', err);
+      return [];
+    }
+  }
+
+  public async completeScheduledCheckin(
+    id: number,
+    outcome: { status: 'sent' | 'failed' | 'cancelled'; deliverySid?: string | null; error?: string | null }
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const res = await this.pool.query(
+        `UPDATE scheduled_checkins
+         SET status = $2,
+             delivery_sid = COALESCE($3, delivery_sid),
+             last_error = $4,
+             sent_at = CASE WHEN $2 = 'sent' THEN CURRENT_TIMESTAMP ELSE sent_at END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [id, outcome.status, outcome.deliverySid || null, outcome.error || null]
+      );
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error updating scheduled check-in status:', err);
+      return false;
+    }
+  }
+
+  public async deleteScheduledCheckin(id: number): Promise<boolean> {
+    if (!this.pool || !this.isConnected) return false;
+    try {
+      const res = await this.pool.query('DELETE FROM scheduled_checkins WHERE id = $1', [id]);
+      return (res.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[NeonDB] Error deleting scheduled check-in:', err);
+      return false;
+    }
+  }
+
   /**
    * Search messages across all threads using text matching.
    */

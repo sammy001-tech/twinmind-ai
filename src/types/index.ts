@@ -67,7 +67,9 @@ export interface ChatMessage {
 
 export interface AutonomousMemoryEvent {
   id: string;
-  action: 'update_existing' | 'create_new';
+  action: 'update_existing' | 'create_new' | 'remove_rule' | 'delete_doc';
+  target?: 'vault' | 'rule';
+  ruleId?: number;
   docId: number | string;
   docTitle: string;
   category: string;
@@ -162,6 +164,8 @@ export interface ChatThread {
   id: string;
   title: string;
   channel?: ChannelType;
+  journey_id?: number | null;
+  journey_title?: string | null;
   created_at?: string;
   updated_at?: string;
   message_count?: number;
@@ -326,4 +330,96 @@ export interface HistoricalInteractionMetadata {
   totalThreads: number;
 }
 
+export interface ThreadPinnedDoc {
+  id: number;
+  thread_id: string;
+  file_name: string;
+  format: string;
+  content: string;
+  char_count: number;
+  created_at: string;
+}
+
+export interface PersonaMemoryRecord {
+  id: number;
+  category: 'preference' | 'opinion' | 'correction' | 'feedback' | string;
+  content: string;
+  priority: number;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface LearningJourney {
+  id: number;
+  title: string;
+  description: string;
+  next_step: string;
+  status: 'active' | 'paused' | 'completed';
+  thread_count: number;
+  latest_thread_id: string | null;
+  latest_thread_title: string | null;
+  latest_thread_updated_at: string | null;
+  last_message_preview: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduledCheckin {
+  id: number;
+  title: string;
+  prompt: string;
+  channel: 'telegram' | 'whatsapp';
+  due_at: string;
+  status: 'pending' | 'processing' | 'sent' | 'failed' | 'cancelled';
+  thread_id?: string | null;
+  journey_id?: number | null;
+  decision_id?: number | null;
+  last_error?: string | null;
+  delivery_sid?: string | null;
+  sent_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VaultDuplicateMatch {
+  id: number | string;
+  title: string;
+  category: string;
+  contentPreview: string;
+  similarityScore: number;
+  sharedTokens: string[];
+}
+
+export interface VaultDuplicateCluster {
+  primaryId: number | string;
+  primaryTitle: string;
+  primaryCategory: string;
+  primaryContentPreview: string;
+  matches: VaultDuplicateMatch[];
+}
+
+export interface ArtifactPreviewSheet {
+  name: string;
+  headers: string[];
+  rows: string[][];
+  totalRows: number;
+  truncated: boolean;
+}
+
+export interface ArtifactPreviewData {
+  fileName: string;
+  displayName: string;
+  type: 'pdf' | 'md' | 'csv' | 'xlsx';
+  mimeType: string;
+  sizeBytes: number;
+  previewKind: 'markdown' | 'table' | 'workbook' | 'pdf';
+  markdownText?: string;
+  headers?: string[];
+  rows?: string[][];
+  totalRows?: number;
+  truncated?: boolean;
+  sheets?: ArtifactPreviewSheet[];
+  inlineUrl?: string;
+}
 

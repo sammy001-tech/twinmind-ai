@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Download,
   ExternalLink,
+  Eye,
   FileSpreadsheet,
   FileText,
   FileCode2,
@@ -10,6 +11,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import type { GeneratedArtifact } from '../types/index.ts';
+import { ArtifactPreviewModal } from './ArtifactPreviewModal.tsx';
 
 interface ArtifactCardProps {
   artifact: GeneratedArtifact;
@@ -61,6 +63,7 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
   );
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
   const refreshDownloadUrl = useCallback(async (signal?: AbortSignal) => {
     if (!artifact.name || artifact.name.includes('/') || artifact.name.includes('\\')) {
@@ -123,6 +126,7 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
   const displayName = artifact.displayName || artifact.name;
   const hasVerifiedMetadata = artifact.validationStatus === 'validated';
   const sizeLabel = typeof artifact.sizeBytes === 'number' ? formatFileSize(artifact.sizeBytes) : '';
+  const supportsPreview = ['pdf', 'md', 'markdown', 'csv', 'xlsx', 'excel'].includes(artifact.type.toLowerCase());
 
   return (
     <section
@@ -167,6 +171,16 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
             <Download className="h-4 w-4" aria-hidden="true" />
             Download file
           </a>
+          {supportsPreview && (
+            <button
+              type="button"
+              onClick={() => setIsPreviewOpen(true)}
+              className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+            >
+              <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+              Preview
+            </button>
+          )}
           {['pdf', 'md', 'markdown', 'csv'].includes(artifact.type.toLowerCase()) && (
             <a
               href={safeUrl}
@@ -205,6 +219,13 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
           </div>
         </div>
       )}
+
+      <ArtifactPreviewModal
+        isOpen={isPreviewOpen}
+        onClose={() => setIsPreviewOpen(false)}
+        artifact={artifact}
+        downloadUrl={safeUrl}
+      />
     </section>
   );
 };

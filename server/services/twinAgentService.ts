@@ -3,12 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
 import { knowledgeService } from '../db/knowledgeService.ts';
-import { callWithBoundedRetry, waitWithAbort } from '../utils/retryHelper.ts';
+import { callWithBoundedRetry, isDefaultTransientError, waitWithAbort } from '../utils/retryHelper.ts';
 import { buildSystemPrompt } from '../../src/prompt/masterPrompt.ts';
-import { memoryService } from './memoryService.ts';
+import { memoryService, executeManageActiveRules } from './memoryService.ts';
 import { calibrationService } from './calibrationService.ts';
 import { modelCatalogService } from './modelCatalogService.ts';
 import { historicalAwarenessService } from './historicalAwarenessService.ts';
+import { executeVaultMemoryUpdate } from './vaultMemoryUpdateService.ts';
 import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, resolveBoundedIntegerSetting, resolveResearchSearchDepth } from '../utils/researchEvidence.ts';
 import {
   isVisionCapableModel,
@@ -151,6 +152,111 @@ export const GEMINI_TWIN_TOOLS: any[] = [
     parameters: {
       type: Type.OBJECT,
       properties: {},
+    },
+  },
+  {
+    name: 'updateMemoryVault',
+    description:
+      'Update an existing Memory Vault record in-place, save a new concise rule if absent, or remove/forget a specific rule or record ONLY when the user explicitly establishes/revises a permanent ongoing rule, asks to forget/remove a rule, or explicitly asks to save/update Vault memory. NEVER invoke for normal questions, greetings, casual chat, or uploaded PDFs/documents unless explicitly asked.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        topic: {
+          type: Type.STRING,
+          description: 'Concise title or subject of the memory record (e.g. "Forex Training Journey" or "Learning Journey Rules")',
+        },
+        targetTitle: {
+          type: Type.STRING,
+          description: 'Optional exact or partial title of an existing Vault record to update or remove from',
+        },
+        memoryEntry: {
+          type: Type.STRING,
+          description: 'Clean, concise synthesized rule, preference, update, or rule to remove (never raw message dumps or attachment headers)',
+        },
+        mode: {
+          type: Type.STRING,
+          description: 'Use "update_or_create" (default), "update_only", "remove_rule" (remove a specific rule from a record), or "retire_doc" (delete an entire record)',
+        },
+        category: {
+          type: Type.STRING,
+          description: 'Vault category: "personal_note", "decision_framework", "project_brief", "philosophy", or "reference"',
+        },
+        tier: {
+          type: Type.STRING,
+          description: 'Stance tier: "workflow", "preference", or "architectural"',
+        },
+      },
+      required: ['topic', 'memoryEntry'],
+    },
+  },
+  {
+    name: 'scheduleCheckIn',
+    description:
+      'Schedule a durable outbound proactive check-in reminder delivered via Telegram or WhatsApp at a future time. Use ONLY when the user explicitly asks for a reminder, follow-up, or scheduled check-in. Requires channel ("telegram" or "whatsapp") and either delayMinutes or an ISO dueAt timestamp.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        title: {
+          type: Type.STRING,
+          description: 'Concise check-in title (e.g. "Lesson 2 Forex Chart Check-In")',
+        },
+        prompt: {
+          type: Type.STRING,
+          description: 'The reminder/check-in message text to send when due',
+        },
+        channel: {
+          type: Type.STRING,
+          description: 'Delivery channel: "telegram" or "whatsapp"',
+        },
+        delayMinutes: {
+          type: Type.NUMBER,
+          description: 'Optional delay in minutes from now (between 1 and 43200)',
+        },
+        dueAt: {
+          type: Type.STRING,
+          description: 'Optional ISO-8601 future timestamp (used if delayMinutes is omitted)',
+        },
+        journeyId: {
+          type: Type.NUMBER,
+          description: 'Optional numeric Learning Journey ID if tied to a journey',
+        },
+      },
+      required: ['title', 'prompt', 'channel'],
+    },
+  },
+  {
+    name: 'manageActiveRules',
+    description:
+      'Add, update in-place, delete, or list cross-conversation behavioral Active Rules (preferences, corrections, opinions, style feedback stored in persona_memories). Use when the user establishes, revises, or retracts a personal behavior/style rule across chats.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        action: {
+          type: Type.STRING,
+          description: 'Operation: "update" (update an existing rule in-place), "add", "delete", or "list"',
+        },
+        ruleId: {
+          type: Type.NUMBER,
+          description: 'Exact numeric Rule ID from [Rule #id] when updating or deleting an existing rule',
+        },
+        matchText: {
+          type: Type.STRING,
+          description: 'Optional phrase matching an existing rule if ruleId is unknown',
+        },
+        category: {
+          type: Type.STRING,
+          description: 'Category: "preference", "correction", "opinion", or "feedback"',
+        },
+        content: {
+          type: Type.STRING,
+          description: 'Concise 3rd-person standing rule text (required for "add" or "update")',
+        },
+        priority: {
+          type: Type.NUMBER,
+          description: 'Optional priority 1 (lowest) to 5 (highest)',
+        },
+      },
+      required: ['action'],
     },
   },
 ];
@@ -305,6 +411,120 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'updateMemoryVault',
+      description:
+        'Update an existing Memory Vault record in-place, save a new concise rule if absent, or remove/forget a specific rule or record ONLY when the user explicitly establishes/revises a permanent ongoing rule, asks to forget/remove a rule, or explicitly asks to save/update Vault memory. NEVER invoke for normal questions, greetings, casual chat, or uploaded PDFs/documents unless explicitly asked.',
+      parameters: {
+        type: 'object',
+        properties: {
+          topic: {
+            type: 'string',
+            description: 'Concise title or subject of the memory record (e.g. "Forex Training Journey" or "Learning Journey Rules")',
+          },
+          targetTitle: {
+            type: 'string',
+            description: 'Optional exact or partial title of an existing Vault record to update or remove from',
+          },
+          memoryEntry: {
+            type: 'string',
+            description: 'Clean, concise synthesized rule, preference, update, or rule to remove (never raw message dumps or attachment headers)',
+          },
+          mode: {
+            type: 'string',
+            description: 'Use "update_or_create" (default), "update_only", "remove_rule" (remove a specific rule from a record), or "retire_doc" (delete an entire record)',
+          },
+          category: {
+            type: 'string',
+            description: 'Vault category: "personal_note", "decision_framework", "project_brief", "philosophy", or "reference"',
+          },
+          tier: {
+            type: 'string',
+            description: 'Stance tier: "workflow", "preference", or "architectural"',
+          },
+        },
+        required: ['topic', 'memoryEntry'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'scheduleCheckIn',
+      description:
+        'Schedule a durable outbound proactive check-in reminder delivered via Telegram or WhatsApp at a future time. Use ONLY when the user explicitly asks for a reminder, follow-up, or scheduled check-in. Requires channel ("telegram" or "whatsapp") and either delayMinutes or an ISO dueAt timestamp.',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: {
+            type: 'string',
+            description: 'Concise check-in title (e.g. "Lesson 2 Forex Chart Check-In")',
+          },
+          prompt: {
+            type: 'string',
+            description: 'The reminder/check-in message text to send when due',
+          },
+          channel: {
+            type: 'string',
+            description: 'Delivery channel: "telegram" or "whatsapp"',
+          },
+          delayMinutes: {
+            type: 'number',
+            description: 'Optional delay in minutes from now (between 1 and 43200)',
+          },
+          dueAt: {
+            type: 'string',
+            description: 'Optional ISO-8601 future timestamp (used if delayMinutes is omitted)',
+          },
+          journeyId: {
+            type: 'number',
+            description: 'Optional numeric Learning Journey ID if tied to a journey',
+          },
+        },
+        required: ['title', 'prompt', 'channel'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'manageActiveRules',
+      description:
+        'Add, update in-place, delete, or list cross-conversation behavioral Active Rules (preferences, corrections, opinions, style feedback stored in persona_memories). Use when the user establishes, revises, or retracts a personal behavior/style rule across chats.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            description: 'Operation: "update" (update an existing rule in-place), "add", "delete", or "list"',
+          },
+          ruleId: {
+            type: 'number',
+            description: 'Exact numeric Rule ID from [Rule #id] when updating or deleting an existing rule',
+          },
+          matchText: {
+            type: 'string',
+            description: 'Optional phrase matching an existing rule if ruleId is unknown',
+          },
+          category: {
+            type: 'string',
+            description: 'Category: "preference", "correction", "opinion", or "feedback"',
+          },
+          content: {
+            type: 'string',
+            description: 'Concise 3rd-person standing rule text (required for "add" or "update")',
+          },
+          priority: {
+            type: 'number',
+            description: 'Optional priority 1 (lowest) to 5 (highest)',
+          },
+        },
+        required: ['action'],
+      },
+    },
+  },
 ];
 
 export interface TwinAgentTurnOptions {
@@ -331,7 +551,10 @@ export interface TwinAgentTurnOptions {
   providerOverride?: 'gemini' | 'groq' | 'mistral' | string;
   modelOverride?: string;
   thinkingLevel?: 'low' | 'medium' | 'high';
+  threadId?: string;
+  pinnedDocs?: Array<{ file_name: string; format: string; content: string; char_count?: number }>;
   signal?: AbortSignal;
+  onTextChunk?: (chunk: string) => void;
   onToolStart?: (toolName: string, args: Record<string, unknown>, toolId: string) => void;
   onToolComplete?: (toolName: string, result: unknown, toolId: string) => void;
 }
@@ -349,6 +572,160 @@ export interface TwinAgentTurnResult {
   provider: string;
   model: string;
   suggestedActions?: SuggestedAction[];
+}
+
+export interface OpenAiStreamToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface OpenAiSseAccumulationState {
+  content: string;
+  toolCallsByIndex: Map<number, { id: string; name: string; arguments: string }>;
+  done: boolean;
+}
+
+export function createOpenAiSseState(): OpenAiSseAccumulationState {
+  return {
+    content: '',
+    toolCallsByIndex: new Map(),
+    done: false,
+  };
+}
+
+/**
+ * Pure OpenAI-compatible SSE line processor supporting Groq and Mistral streaming responses.
+ * Accumulates assistant text deltas and fragmented tool_calls arguments without fabricating chunks.
+ */
+export function processOpenAiSseLine(
+  rawLine: string,
+  state: OpenAiSseAccumulationState,
+  onTextDelta?: (delta: string) => void
+): void {
+  const trimmed = rawLine.trim();
+  if (!trimmed || !trimmed.startsWith('data:')) return;
+  const payloadStr = trimmed.slice(5).trim();
+  if (!payloadStr) return;
+  if (payloadStr === '[DONE]') {
+    state.done = true;
+    return;
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(payloadStr);
+  } catch {
+    return;
+  }
+
+  if (parsed?.error) {
+    const msg = typeof parsed.error === 'string'
+      ? parsed.error
+      : (parsed.error?.message || JSON.stringify(parsed.error));
+    throw new Error(`Provider stream error: ${msg}`);
+  }
+
+  const choice = parsed?.choices?.[0];
+  if (!choice) return;
+
+  const delta = choice.delta;
+  if (delta) {
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
+      state.content += delta.content;
+      onTextDelta?.(delta.content);
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        const idx = typeof tc.index === 'number' ? tc.index : 0;
+        const existing = state.toolCallsByIndex.get(idx) || {
+          id: tc.id || `call_${idx}`,
+          name: '',
+          arguments: '',
+        };
+        if (typeof tc.id === 'string' && tc.id) existing.id = tc.id;
+        if (typeof tc.function?.name === 'string' && tc.function.name) existing.name += tc.function.name;
+        if (typeof tc.function?.arguments === 'string' && tc.function.arguments) existing.arguments += tc.function.arguments;
+        state.toolCallsByIndex.set(idx, existing);
+      }
+    }
+  } else if (choice.message) {
+    if (typeof choice.message.content === 'string' && choice.message.content.length > 0 && !state.content) {
+      state.content = choice.message.content;
+      onTextDelta?.(choice.message.content);
+    }
+    if (Array.isArray(choice.message.tool_calls) && state.toolCallsByIndex.size === 0) {
+      choice.message.tool_calls.forEach((tc: any, idx: number) => {
+        state.toolCallsByIndex.set(idx, {
+          id: tc.id || `call_${idx}`,
+          name: tc.function?.name || '',
+          arguments: tc.function?.arguments || '',
+        });
+      });
+    }
+  }
+}
+
+export function finalizeOpenAiSseState(state: OpenAiSseAccumulationState): {
+  role: 'assistant';
+  content: string;
+  tool_calls?: OpenAiStreamToolCall[];
+} {
+  const toolCalls: OpenAiStreamToolCall[] = [...state.toolCallsByIndex.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, tc]) => ({
+      id: tc.id,
+      type: 'function' as const,
+      function: {
+        name: tc.name,
+        arguments: tc.arguments,
+      },
+    }))
+    .filter((tc) => Boolean(tc.function.name));
+
+  return {
+    role: 'assistant',
+    content: state.content,
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  };
+}
+
+export async function readOpenAiCompatibleStream(
+  body: ReadableStream<Uint8Array> | null,
+  onTextDelta?: (delta: string) => void
+): Promise<{
+  role: 'assistant';
+  content: string;
+  tool_calls?: OpenAiStreamToolCall[];
+}> {
+  if (!body) {
+    throw new Error('PROVIDER_STREAM_UNAVAILABLE: streaming response had no readable body.');
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const state = createOpenAiSseState();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      processOpenAiSseLine(line, state, onTextDelta);
+    }
+  }
+
+  if (buffer.trim()) {
+    processOpenAiSseLine(buffer, state, onTextDelta);
+  }
+
+  return finalizeOpenAiSseState(state);
 }
 
 class TwinAgentService {
@@ -1359,6 +1736,7 @@ Respond in valid JSON:
       historicalContext,
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: resolvedThinkingLevel,
+      pinnedDocs: options.pinnedDocs,
     });
 
 
@@ -1447,6 +1825,24 @@ Respond in valid JSON:
         result = await historicalAwarenessService.searchConversationHistory(String(args.query || ''));
       } else if (name === 'recallDecisionsAndTasks') {
         result = await historicalAwarenessService.recallDecisionsAndTasks();
+      } else if (name === 'updateMemoryVault') {
+        result = await executeVaultMemoryUpdate({
+          topic: args.topic,
+          targetTitle: args.targetTitle,
+          memoryEntry: args.memoryEntry,
+          mode: args.mode,
+          category: args.category,
+          tier: args.tier,
+        });
+      } else if (name === 'manageActiveRules') {
+        result = await executeManageActiveRules({
+          action: args.action,
+          ruleId: args.ruleId,
+          matchText: args.matchText,
+          category: args.category,
+          content: args.content,
+          priority: args.priority,
+        });
       } else if (name === 'generateArtifact') {
         const { specialistSwarmService } = await import('./specialistSwarmService.ts');
 
@@ -1493,6 +1889,35 @@ Respond in valid JSON:
           args.content,
           fileNameStem + '.' + targetType
         );
+      } else if (name === 'scheduleCheckIn') {
+        const { validateScheduledCheckinInput } = await import('./scheduledCheckinService.ts');
+        const validated = validateScheduledCheckinInput({
+          title: args.title,
+          prompt: args.prompt,
+          channel: args.channel,
+          delayMinutes: args.delayMinutes,
+          dueAt: args.dueAt,
+          threadId: options.threadId || undefined,
+          journeyId: args.journeyId,
+        });
+        if ('code' in validated) {
+          result = { status: 'error', code: validated.code, error: validated.error };
+        } else {
+          const created = await neonDb.createScheduledCheckin(validated.value);
+          if (!created) {
+            result = {
+              status: 'error',
+              code: 'PERSISTENCE_FAILED',
+              error: 'Unable to persist scheduled check-in to Neon PostgreSQL. Verify database connectivity.',
+            };
+          } else {
+            result = {
+              status: 'success',
+              checkin: created,
+              message: `Scheduled ${created.channel} check-in "${created.title}" for ${created.due_at}.`,
+            };
+          }
+        }
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };
       }
@@ -1575,23 +2000,112 @@ Respond in valid JSON:
           ? ThinkingLevel.MEDIUM
           : ThinkingLevel.LOW;
 
-      const callGeminiWithDynamicThinking = async (
-        generateCall: (useThinking: boolean) => Promise<any>,
+      const runGeminiRound = async (
+        roundContents: Array<any>,
+        useTools: boolean,
         operationName: string
-      ) => {
+      ): Promise<{
+        text: string;
+        functionCalls: Array<{ name?: string; args?: Record<string, unknown>; id?: string }>;
+        modelContent: { role: 'model'; parts: any[] } | null;
+      }> => {
+        const executeAttempt = async (useThinking: boolean) => {
+          const config: any = {
+            systemInstruction,
+            temperature: 0.7,
+            ...(useTools ? { tools: [{ functionDeclarations: GEMINI_TWIN_TOOLS }] } : {}),
+            ...(useThinking ? { thinkingConfig: { thinkingLevel: geminiThinkingLevel } } : {}),
+          };
+
+          if (options.onTextChunk) {
+            let emittedAnyChunk = false;
+            try {
+              const stream = await geminiClient.models.generateContentStream({
+                model,
+                contents: roundContents,
+                config,
+              });
+              let textAcc = '';
+              const partsAcc: any[] = [];
+              const callsAcc: Array<{ name?: string; args?: Record<string, unknown>; id?: string }> = [];
+
+              for await (const chunk of stream) {
+                const candidateParts = chunk.candidates?.[0]?.content?.parts;
+                if (Array.isArray(candidateParts) && candidateParts.length > 0) {
+                  for (const part of candidateParts) {
+                    partsAcc.push(part);
+                    if (typeof (part as any).text === 'string' && !(part as any).thought && (part as any).text.length > 0) {
+                      const delta = (part as any).text;
+                      textAcc += delta;
+                      emittedAnyChunk = true;
+                      options.onTextChunk(delta);
+                    }
+                    if ((part as any).functionCall) {
+                      callsAcc.push((part as any).functionCall);
+                    }
+                  }
+                } else {
+                  const chunkText = typeof chunk.text === 'string' ? chunk.text : '';
+                  if (chunkText) {
+                    textAcc += chunkText;
+                    emittedAnyChunk = true;
+                    options.onTextChunk(chunkText);
+                    partsAcc.push({ text: chunkText });
+                  }
+                  if (Array.isArray(chunk.functionCalls) && chunk.functionCalls.length > 0) {
+                    for (const fc of chunk.functionCalls) {
+                      callsAcc.push(fc as any);
+                      partsAcc.push({ functionCall: fc });
+                    }
+                  }
+                }
+              }
+
+              return {
+                text: textAcc,
+                functionCalls: callsAcc,
+                modelContent: partsAcc.length > 0 ? { role: 'model' as const, parts: partsAcc } : null,
+              };
+            } catch (streamErr) {
+              if (emittedAnyChunk) {
+                // Attach marker so retry helper doesn't duplicate already-streamed tokens
+                (streamErr as any).__streamAlreadyEmitted = true;
+              }
+              throw streamErr;
+            }
+          }
+
+          const response = await geminiClient.models.generateContent({
+            model,
+            contents: roundContents,
+            config,
+          });
+          return {
+            text: response.text || '',
+            functionCalls: (response.functionCalls || []) as Array<{ name?: string; args?: Record<string, unknown>; id?: string }>,
+            modelContent: (response.candidates?.[0]?.content as { role: 'model'; parts: any[] } | undefined) || null,
+          };
+        };
+
         try {
           return await callWithBoundedRetry(
-            () => generateCall(true),
-            { operationName, signal: options.signal }
+            () => executeAttempt(true),
+            {
+              operationName,
+              signal: options.signal,
+              isTransient: (err) => !(err as any)?.__streamAlreadyEmitted && isDefaultTransientError(err),
+            }
           );
         } catch (err: any) {
           const errMsg = String(err?.message || '');
-          // If the model rejects thinkingConfig dynamically at runtime, execute cleanly without it.
-          // Zero hardcoded model names.
-          if (/thinking(config|level)|unsupported\s+field|unknown\s+field|invalidargument/i.test(errMsg)) {
+          if (!err?.__streamAlreadyEmitted && /thinking(config|level)|unsupported\s+field|unknown\s+field|invalidargument/i.test(errMsg)) {
             return await callWithBoundedRetry(
-              () => generateCall(false),
-              { operationName: `${operationName}_noThinking`, signal: options.signal }
+              () => executeAttempt(false),
+              {
+                operationName: `${operationName}_noThinking`,
+                signal: options.signal,
+                isTransient: (innerErr) => !(innerErr as any)?.__streamAlreadyEmitted && isDefaultTransientError(innerErr),
+              }
             );
           }
           throw err;
@@ -1601,40 +2115,22 @@ Respond in valid JSON:
       while (round < MAX_ROUNDS) {
         round++;
 
-        const response = await callGeminiWithDynamicThinking(
-          (useThinking) => {
-            const config: any = {
-              systemInstruction,
-              temperature: 0.7,
-              tools: [{ functionDeclarations: GEMINI_TWIN_TOOLS }],
-            };
-            if (useThinking) {
-              config.thinkingConfig = { thinkingLevel: geminiThinkingLevel };
-            }
-            return geminiClient.models.generateContent({
-              model,
-              contents,
-              config,
-            });
-          },
-          `GeminiAgentRound(${round})`
-        );
-
+        const response = await runGeminiRound(contents, true, `GeminiAgentRound(${round})`);
         const functionCalls = response.functionCalls;
 
         // If no tool call was requested by the model, we have our final synthesized response!
         if (!functionCalls || functionCalls.length === 0) {
-          const finalReply = response.text?.trim() || '';
+          const finalReply = response.text.trim();
           if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Gemini returned no final reply');
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
-          
+
           // Background Memory Extraction (Autonomous Learning)
           memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
             provider,
             model,
             userName: nickname || userName,
           }).catch(() => {});
-          
+
           return {
             reply: finalReply,
             toolsExecuted,
@@ -1658,8 +2154,8 @@ Respond in valid JSON:
         const executedTools = await Promise.all(executionPromises);
 
         // Append the model's call turn to history
-        if (response.candidates?.[0]?.content) {
-          contents.push(response.candidates[0].content);
+        if (response.modelContent) {
+          contents.push(response.modelContent);
         }
 
         // Append the tool responses turn to history
@@ -1676,36 +2172,24 @@ Respond in valid JSON:
         });
       }
 
-      // If budget reached (3 rounds), perform final direct synthesis
-      const finalSynthesis = await callGeminiWithDynamicThinking(
-        (useThinking) => {
-          const config: any = {
-            systemInstruction,
-            temperature: 0.7,
-          };
-          if (useThinking) {
-            config.thinkingConfig = { thinkingLevel: geminiThinkingLevel };
-          }
-          return geminiClient.models.generateContent({
-            model,
-            contents: [
-              ...contents,
+      // If budget reached, perform final direct synthesis (streaming if requested)
+      const finalSynthesis = await runGeminiRound(
+        [
+          ...contents,
+          {
+            role: 'user',
+            parts: [
               {
-                role: 'user',
-                parts: [
-                  {
-                    text: 'Execution budget reached (3 tool rounds completed). Synthesize your comprehensive final response using all gathered evidence and analysis above.',
-                  },
-                ],
+                text: `Execution budget reached (${MAX_ROUNDS} tool rounds completed). Synthesize your comprehensive final response using all gathered evidence and analysis above.`,
               },
             ],
-            config,
-          });
-        },
+          },
+        ],
+        false,
         'GeminiBudgetFinalSynthesis'
       );
 
-      const finalReply = finalSynthesis.text?.trim() || '';
+      const finalReply = finalSynthesis.text.trim();
       if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Gemini final synthesis returned no reply');
       const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
 
@@ -1727,15 +2211,20 @@ Respond in valid JSON:
     }
 
     // =========================================================================
-    // PROVIDER 2: GROQ LPUS TOOL CALLING LOOP (OPENAI-COMPATIBLE)
+    // PROVIDER 2 & 3: GROQ / MISTRAL OPENAI-COMPATIBLE TOOL & STREAMING LOOP
     // =========================================================================
-    if (provider === 'groq') {
-      const effectiveGroqKey = process.env.GROQ_API_KEY || s.customGroqKey || customGroqKey;
-      if (!effectiveGroqKey) {
-        throw new Error('GROQ_API_KEY is not configured for Groq provider. Please provide your key in Settings.');
+    if (provider === 'groq' || provider === 'mistral') {
+      const endpoint = provider === 'groq'
+        ? 'https://api.groq.com/openai/v1/chat/completions'
+        : 'https://api.mistral.ai/v1/chat/completions';
+      const apiKey = provider === 'groq'
+        ? this.resolveUsableCredential(process.env.GROQ_API_KEY, s.customGroqKey, customGroqKey)
+        : this.resolveUsableCredential(process.env.MISTRAL_API_KEY, s.customMistralKey, customMistralKey);
+      if (!apiKey) {
+        throw new Error(`${provider.toUpperCase()}_API_KEY is not configured for ${provider} provider. Please provide your key in Settings.`);
       }
 
-      const groqUserContent = (activeModelSupportsVision && validatedImage)
+      const providerUserContent = (activeModelSupportsVision && validatedImage)
         ? [
             { type: 'text', text: userPrompt || 'Please inspect and analyze this attached image.' },
             {
@@ -1747,206 +2236,83 @@ Respond in valid JSON:
           ]
         : userPrompt;
 
-      const groqMessages: Array<any> = [
+      const messagesList: Array<any> = [
         { role: 'system', content: systemInstruction },
         ...conversationHistory.map((m) => ({ role: m.role, content: m.content })),
-        { role: 'user', content: groqUserContent },
+        { role: 'user', content: providerUserContent },
       ];
 
+      const runOpenAiCompatibleRound = async (includeTools: boolean, operationName: string) => {
+        const useStreaming = Boolean(options.onTextChunk);
+        const bodyPayload: Record<string, unknown> = {
+          model,
+          messages: messagesList,
+          temperature: 0.7,
+          ...(includeTools ? { tools: OPENAI_COMPATIBLE_TWIN_TOOLS, tool_choice: 'auto' } : {}),
+          ...(useStreaming ? { stream: true } : {}),
+        };
 
-      let round = 0;
-      const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
-
-      while (round < MAX_ROUNDS) {
-        round++;
-
-        const groqRes = await callWithBoundedRetry(
+        let emittedAnyChunk = false;
+        return callWithBoundedRetry(
           async () => {
-            const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            const res = await fetch(endpoint, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${effectiveGroqKey}`,
+                Authorization: `Bearer ${apiKey}`,
               },
-              body: JSON.stringify({
-                model,
-                messages: groqMessages,
-                tools: OPENAI_COMPATIBLE_TWIN_TOOLS,
-                tool_choice: 'auto',
-                temperature: 0.7,
-              }),
+              body: JSON.stringify(bodyPayload),
               signal: options.signal,
             });
             if (!res.ok) {
               const errText = await res.text().catch(() => '');
-              throw new Error(`Groq API error (${res.status}): ${errText}`);
+              throw new Error(`${provider} API error (${res.status}): ${errText}`);
             }
-            return await res.json();
+
+            if (useStreaming) {
+              return readOpenAiCompatibleStream(res.body, (delta) => {
+                emittedAnyChunk = true;
+                options.onTextChunk?.(delta);
+              });
+            }
+
+            const data = await res.json();
+            const message = data.choices?.[0]?.message || { role: 'assistant', content: '' };
+            return {
+              role: 'assistant' as const,
+              content: typeof message.content === 'string' ? message.content : '',
+              ...(Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+                ? { tool_calls: message.tool_calls }
+                : {}),
+            };
           },
-          { operationName: `GroqAgentRound(${round})`, signal: options.signal }
+          {
+            operationName,
+            signal: options.signal,
+            isTransient: (err) => !emittedAnyChunk && isDefaultTransientError(err),
+          }
         );
-
-        const choice = groqRes.choices?.[0];
-        const message = choice?.message;
-        const toolCalls = message?.tool_calls;
-
-        if (!toolCalls || toolCalls.length === 0) {
-          const finalReply = message?.content?.trim() || '';
-          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Groq returned no final reply');
-          const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
-          
-          // Background Memory Extraction (Autonomous Learning)
-          memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
-            provider,
-            model,
-            userName: nickname || userName,
-          }).catch(() => {});
-          
-          return {
-            reply: finalReply,
-            toolsExecuted,
-            recalledKnowledge,
-            provider,
-            model,
-            suggestedActions,
-          };
-        }
-
-        groqMessages.push(message);
-
-        // Execute tools concurrently
-        const executed = await Promise.all(
-          toolCalls.map(async (tc: any) => {
-            let args: Record<string, unknown> = {};
-            try {
-              args = JSON.parse(tc.function?.arguments || '{}');
-            } catch {}
-            const res = await runTool(tc.function?.name || '', args);
-            return { id: tc.id, content: JSON.stringify(res) };
-          })
-        );
-
-        for (const item of executed) {
-          groqMessages.push({
-            role: 'tool',
-            tool_call_id: item.id,
-            content: item.content,
-          });
-        }
-      }
-
-      // Final pass if 3 rounds exhausted
-      const finalRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${effectiveGroqKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: groqMessages,
-          temperature: 0.7,
-        }),
-        signal: options.signal,
-      });
-      const finalData = await finalRes.json();
-      const finalReplyGroq = finalData.choices?.[0]?.message?.content?.trim() || '';
-      if (!finalReplyGroq) throw new Error('AI_OUTPUT_EMPTY: Groq final synthesis returned no reply');
-      const suggestedActionsGroq = this.extractSuggestedActions(finalReplyGroq, userPrompt, toolsExecuted);
-      
-      // Background Memory Extraction (Autonomous Learning)
-      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyGroq, {
-        provider,
-        model,
-        userName: nickname || userName,
-      }).catch(() => {});
-
-      return {
-        reply: finalReplyGroq,
-        toolsExecuted,
-        recalledKnowledge,
-        provider,
-        model,
-        suggestedActions: suggestedActionsGroq,
       };
-    }
-
-    // =========================================================================
-    // PROVIDER 3: MISTRAL AI TOOL CALLING LOOP (OPENAI-COMPATIBLE)
-    // =========================================================================
-    if (provider === 'mistral') {
-      const effectiveMistralKey = process.env.MISTRAL_API_KEY || s.customMistralKey || customMistralKey;
-      if (!effectiveMistralKey) {
-        throw new Error('MISTRAL_API_KEY is not configured for Mistral provider. Please provide your key in Settings.');
-      }
-
-      const mistralUserContent = (activeModelSupportsVision && validatedImage)
-        ? [
-            { type: 'text', text: userPrompt || 'Please inspect and analyze this attached image.' },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:${validatedImage.mimeType};base64,${validatedImage.data}`,
-              },
-            },
-          ]
-        : userPrompt;
-
-      const mistralMessages: Array<any> = [
-        { role: 'system', content: systemInstruction },
-        ...conversationHistory.map((m) => ({ role: m.role, content: m.content })),
-        { role: 'user', content: mistralUserContent },
-      ];
-
 
       let round = 0;
       const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
 
       while (round < MAX_ROUNDS) {
         round++;
-
-        const mistralRes = await callWithBoundedRetry(
-          async () => {
-            const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${effectiveMistralKey}`,
-              },
-              body: JSON.stringify({
-                model,
-                messages: mistralMessages,
-                tools: OPENAI_COMPATIBLE_TWIN_TOOLS,
-                tool_choice: 'auto',
-                temperature: 0.7,
-              }),
-              signal: options.signal,
-            });
-            if (!res.ok) {
-              const errText = await res.text().catch(() => '');
-              throw new Error(`Mistral API error (${res.status}): ${errText}`);
-            }
-            return await res.json();
-          },
-          { operationName: `MistralAgentRound(${round})`, signal: options.signal }
-        );
-
-        const choice = mistralRes.choices?.[0];
-        const message = choice?.message;
-        const toolCalls = message?.tool_calls;
+        const message = await runOpenAiCompatibleRound(true, `${provider}AgentRound(${round})`);
+        const toolCalls = message.tool_calls;
 
         if (!toolCalls || toolCalls.length === 0) {
-          const finalReply = message?.content?.trim() || '';
-          if (!finalReply) throw new Error('AI_OUTPUT_EMPTY: Mistral returned no final reply');
+          const finalReply = (message.content || '').trim();
+          if (!finalReply) throw new Error(`AI_OUTPUT_EMPTY: ${provider} returned no final reply`);
           const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
-          
-          // Background Memory Extraction (Autonomous Learning)
+
           memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
             provider,
             model,
             userName: nickname || userName,
           }).catch(() => {});
-          
+
           return {
             reply: finalReply,
             toolsExecuted,
@@ -1957,9 +2323,8 @@ Respond in valid JSON:
           };
         }
 
-        mistralMessages.push(message);
+        messagesList.push(message);
 
-        // Execute tools concurrently
         const executed = await Promise.all(
           toolCalls.map(async (tc: any) => {
             let args: Record<string, unknown> = {};
@@ -1972,7 +2337,7 @@ Respond in valid JSON:
         );
 
         for (const item of executed) {
-          mistralMessages.push({
+          messagesList.push({
             role: 'tool',
             tool_call_id: item.id,
             content: item.content,
@@ -1980,39 +2345,24 @@ Respond in valid JSON:
         }
       }
 
-      // Final pass if 3 rounds exhausted
-      const finalRes = await fetch('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${effectiveMistralKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: mistralMessages,
-          temperature: 0.7,
-        }),
-        signal: options.signal,
-      });
-      const finalData = await finalRes.json();
-      const finalReplyMistral = finalData.choices?.[0]?.message?.content?.trim() || '';
-      if (!finalReplyMistral) throw new Error('AI_OUTPUT_EMPTY: Mistral final synthesis returned no reply');
-      const suggestedActionsMistral = this.extractSuggestedActions(finalReplyMistral, userPrompt, toolsExecuted);
-      
-      // Background Memory Extraction (Autonomous Learning)
-      memoryService.extractMemoriesFromInteraction(userPrompt, finalReplyMistral, {
+      const finalMessage = await runOpenAiCompatibleRound(false, `${provider}FinalSynthesis`);
+      const finalReply = (finalMessage.content || '').trim();
+      if (!finalReply) throw new Error(`AI_OUTPUT_EMPTY: ${provider} final synthesis returned no reply`);
+      const suggestedActions = this.extractSuggestedActions(finalReply, userPrompt, toolsExecuted);
+
+      memoryService.extractMemoriesFromInteraction(userPrompt, finalReply, {
         provider,
         model,
         userName: nickname || userName,
       }).catch(() => {});
 
       return {
-        reply: finalReplyMistral,
+        reply: finalReply,
         toolsExecuted,
         recalledKnowledge,
         provider,
         model,
-        suggestedActions: suggestedActionsMistral,
+        suggestedActions,
       };
     }
 
