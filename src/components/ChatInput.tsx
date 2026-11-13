@@ -20,8 +20,11 @@ import {
   FolderGit2,
   ScrollText,
   Clock,
+  Sparkles,
 } from 'lucide-react';
-
+import { createSafeAudioRecorder, formatMicrophoneError } from '../utils/mediaPermissions.ts';
+import { clearChatDraft, loadChatDraft, saveChatDraft } from '../utils/chatDrafts.ts';
+import { apiFetch } from '../utils/apiFetch.ts';
 
 interface ChatInputProps {
   onSendMessage: (
@@ -52,6 +55,10 @@ interface ChatInputProps {
   onCreateTempRule?: (content: string, expiresMinutes?: number | null) => Promise<void> | void;
   onOpenRulesDrawer?: () => void;
   appliedRulesCount?: number;
+  threadId?: string | null;
+  isKeyboardOpen?: boolean;
+  prefillValue?: string;
+  onPrefillHandled?: () => void;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -76,8 +83,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   onCreateTempRule,
   onOpenRulesDrawer,
   appliedRulesCount,
+  threadId = null,
+  isKeyboardOpen = false,
+  prefillValue,
+  onPrefillHandled,
 }) => {
-  const [text, setText] = useState('');
+  const [text, setText] = useState(() => loadChatDraft(threadId));
   const [requestVoiceNote, setRequestVoiceNote] = useState(false);
   const [swarmMode, setSwarmMode] = useState(initialSwarmMode);
   const [isToolMenuOpen, setIsToolMenuOpen] = useState(false);
@@ -109,8 +120,38 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     setProjectDraft(activeProjectKey || '');
   }, [activeProjectKey]);
 
+  const lastThreadIdRef = useRef<string | null>(threadId);
+  useEffect(() => {
+    if (lastThreadIdRef.current !== threadId) {
+      lastThreadIdRef.current = threadId;
+      setText(loadChatDraft(threadId));
+    }
+  }, [threadId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      saveChatDraft(threadId, text);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [threadId, text]);
+
+  useEffect(() => {
+    if (prefillValue) {
+      setText((prev) => {
+        const trimmed = prev.trim();
+        return trimmed ? `${trimmed}\n\n${prefillValue}` : prefillValue;
+      });
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const len = textareaRef.current.value.length;
+        textareaRef.current.setSelectionRange(len, len);
+      }
+      onPrefillHandled?.();
+    }
+  }, [prefillValue, onPrefillHandled]);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recorderMimeTypeRef = useRef<string>('audio/webm');
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<any>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -137,20 +178,22 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   }, []);
 
   const startRecording = async () => {
+    setDocumentError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      mediaRecorderRef.current = mediaRecorder;
+      const { recorder, mimeType } = createSafeAudioRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorderMimeTypeRef.current = mimeType;
       audioChunksRef.current = [];
 
-      mediaRecorder.ondataavailable = (e) => {
+      recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           audioChunksRef.current.push(e.data);
         }
       };
 
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      recorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorderMimeTypeRef.current });
         stream.getTracks().forEach((track) => track.stop());
 
         const reader = new FileReader();
@@ -158,7 +201,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           const base64String = (reader.result as string).split(',')[1];
           if (base64String) {
             onSendMessage('[Voice Note Audio]', true, {
-              mimeType: 'audio/webm',
+              mimeType: recorderMimeTypeRef.current,
               data: base64String,
             });
           }
@@ -166,7 +209,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         reader.readAsDataURL(audioBlob);
       };
 
-      mediaRecorder.start();
+      recorder.start();
       setIsRecording(true);
       setRecordingSeconds(0);
       timerRef.current = setInterval(() => {
@@ -174,7 +217,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       }, 1000);
     } catch (err) {
       console.error('Failed to start audio recording:', err);
-      setDocumentError('Could not access microphone. Please check browser permissions.');
+      setDocumentError(formatMicrophoneError(err));
     }
   };
 
@@ -234,6 +277,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       imagePayload
     );
     setText('');
+    clearChatDraft(threadId);
     setSelectedImage(null);
     setAttachedDocument(null);
     setDocumentError(null);
@@ -275,14 +319,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       };
       reader.readAsDataURL(file);
     } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
-      // Parse PDF via the server document parsing service
       setIsParsingDocument(true);
       const reader = new FileReader();
       reader.onload = async () => {
         try {
           const resultStr = reader.result as string;
           const base64Data = resultStr.split(',')[1];
-          const res = await fetch('/api/documents/parse', {
+          const res = await apiFetch('/api/documents/parse', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -309,7 +352,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       };
       reader.readAsDataURL(file);
     } else {
-      // Markdown, CSV, JSON, code, or plaintext
       const reader = new FileReader();
       reader.onload = () => {
         const content = reader.result as string;
@@ -323,14 +365,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       reader.readAsText(file);
     }
     setIsToolMenuOpen(false);
-    // Reset file input value so selecting the same file again triggers onChange
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   };
 
+  const hasContent = Boolean(text.trim() || selectedImage || attachedDocument);
+
   return (
-    <div className="w-full shrink-0 max-w-3xl mx-auto px-3 sm:px-4 pb-3 pt-1 relative z-20">
+    <div className={`w-full shrink-0 max-w-3xl mx-auto px-3 sm:px-4 ${isKeyboardOpen ? 'pb-1 pt-0.5' : 'pb-3 pt-1'} relative z-20 transition-all`}>
       {/* Hidden File Input supporting PDF, photos, images, and text documents */}
       <input
         type="file"
@@ -339,7 +382,6 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         className="hidden"
         accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.json,.csv,.js,.ts,.tsx,.py"
       />
-
 
       {/* Recording Overlay Bar */}
       {isRecording && (
@@ -367,194 +409,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         </div>
       )}
 
-      {/* Floating Composer Container */}
-      <div className="relative bg-white/95 dark:bg-slate-900/95 border border-slate-200/90 dark:border-slate-800/90 rounded-2xl shadow-xl dark:shadow-2xl backdrop-blur-xl transition-all focus-within:border-amber-500/50 focus-within:ring-1 focus-within:ring-amber-500/30">
-        {(onSetProjectKey || onOpenRulesDrawer || onCreateTempRule) && (
-          <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-[11px] relative">
-            <div className="flex items-center gap-2 min-w-0">
-              {onSetProjectKey && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setIsProjectPopoverOpen((prev) => !prev);
-                    setIsTempRulePopoverOpen(false);
-                  }}
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition truncate max-w-[180px] ${
-                    activeProjectKey
-                      ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-700 dark:text-indigo-300 font-semibold'
-                      : 'bg-slate-100/80 dark:bg-slate-800/70 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                  title="Select project instruction scope for this thread"
-                >
-                  <FolderGit2 className="w-3 h-3 shrink-0" />
-                  <span className="truncate">
-                    {activeProjectKey ? `Project: ${activeProjectKey}` : 'Scope: Global'}
-                  </span>
-                </button>
-              )}
-
-              {onOpenRulesDrawer && (
-                <button
-                  type="button"
-                  onClick={onOpenRulesDrawer}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition"
-                  title="Inspect applied, overridden, and excluded rules for this conversation"
-                >
-                  <ScrollText className="w-3 h-3 text-emerald-500 shrink-0" />
-                  <span>Rules</span>
-                  {appliedRulesCount !== undefined && (
-                    <span className="font-mono tabular-nums text-[10px] opacity-80">
-                      ({appliedRulesCount})
-                    </span>
-                  )}
-                </button>
-              )}
-            </div>
-
-            {onCreateTempRule && (
-              <button
-                type="button"
-                onClick={() => {
-                  setIsTempRulePopoverOpen((prev) => !prev);
-                  setIsProjectPopoverOpen(false);
-                }}
-                className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 hover:underline shrink-0"
-              >
-                <Clock className="w-3 h-3" />
-                <span>+ Session Rule</span>
-              </button>
-            )}
-
-            {/* Project Binding Popover */}
-            {isProjectPopoverOpen && onSetProjectKey && (
-              <div className="absolute bottom-full left-2 mb-1.5 z-50 w-72 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
-                    Thread Project Scope
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsProjectPopoverOpen(false)}
-                    className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={projectDraft}
-                  onChange={(e) => setProjectDraft(e.target.value)}
-                  placeholder="e.g. twinmind-ai, uniace"
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                />
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    disabled={isSavingProject}
-                    onClick={async () => {
-                      setIsSavingProject(true);
-                      try {
-                        setProjectDraft('');
-                        await onSetProjectKey(null);
-                        setIsProjectPopoverOpen(false);
-                      } finally {
-                        setIsSavingProject(false);
-                      }
-                    }}
-                    className="text-[11px] text-slate-500 hover:text-rose-500"
-                  >
-                    Global only
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSavingProject}
-                    onClick={async () => {
-                      setIsSavingProject(true);
-                      try {
-                        await onSetProjectKey(projectDraft.trim() || null);
-                        setIsProjectPopoverOpen(false);
-                      } finally {
-                        setIsSavingProject(false);
-                      }
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-50"
-                  >
-                    {isSavingProject ? 'Saving...' : 'Bind Project'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Quick Temporary Session Rule Popover */}
-            {isTempRulePopoverOpen && onCreateTempRule && (
-              <div className="absolute bottom-full right-2 mb-1.5 z-50 w-72 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-3 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
-                    Add Temporary Session Rule
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setIsTempRulePopoverOpen(false)}
-                    className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <textarea
-                  rows={2}
-                  value={tempRuleText}
-                  onChange={(e) => setTempRuleText(e.target.value)}
-                  placeholder="e.g., Walk through this topic with 1 practice question at the end."
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500"
-                />
-                <div className="flex items-center justify-between gap-2">
-                  <select
-                    value={tempRuleExpiryMinutes === null ? 'none' : String(tempRuleExpiryMinutes)}
-                    onChange={(e) =>
-                      setTempRuleExpiryMinutes(e.target.value === 'none' ? null : Number(e.target.value))
-                    }
-                    className="px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
-                  >
-                    <option value="60">Expires in 1h</option>
-                    <option value="120">Expires in 2h</option>
-                    <option value="1440">Expires in 24h</option>
-                    <option value="none">Session (no timer)</option>
-                  </select>
-                  <button
-                    type="button"
-                    disabled={isSavingTempRule || !tempRuleText.trim()}
-                    onClick={async () => {
-                      if (!tempRuleText.trim()) return;
-                      setIsSavingTempRule(true);
-                      try {
-                        await onCreateTempRule(tempRuleText.trim(), tempRuleExpiryMinutes);
-                        setTempRuleText('');
-                        setIsTempRulePopoverOpen(false);
-                      } finally {
-                        setIsSavingTempRule(false);
-                      }
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-semibold disabled:opacity-50"
-                  >
-                    {isSavingTempRule ? 'Adding...' : 'Apply Rule'}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
+      {/* Floating Hybrid Composer Card: Claude-style 2-tier spacious deck with ChatGPT pill ergonomics */}
+      <div className="relative bg-white/95 dark:bg-[#1b1c20]/95 border border-slate-200/90 dark:border-slate-800/90 rounded-2xl sm:rounded-3xl shadow-xl dark:shadow-2xl backdrop-blur-xl transition-all focus-within:border-amber-500/50 focus-within:ring-1 focus-within:ring-amber-500/30 p-2 sm:p-2.5">
         
         {/* Attached Image/Photo Preview Chip */}
         {selectedImage && (
-          <div className="pt-2.5 px-3.5 flex items-center justify-between">
+          <div className="mb-2 px-1 flex items-center justify-between">
             <div className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs">
               <img src={selectedImage.previewUrl} alt="Preview" className="w-8 h-8 rounded-lg object-cover border border-amber-500/50" />
               <div className="flex flex-col">
                 <span className="font-semibold truncate max-w-[160px] text-xs">{selectedImage.name}</span>
-                <span className="text-[10px] text-amber-500 font-medium">Photo Attached (Multimodal Vision Ready)</span>
+                <span className="text-[10px] text-amber-500 font-medium">Photo Attached (Vision Ready)</span>
               </div>
             </div>
-
             <button
               type="button"
               onClick={() => setSelectedImage(null)}
@@ -568,9 +435,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
         {/* Thread-Pinned Reference Documents Bar */}
         {pinnedDocs.length > 0 && (
-          <div className="pt-2.5 px-3.5 flex flex-wrap items-center gap-1.5 border-b border-slate-100 dark:border-slate-800/70 pb-2">
+          <div className="mb-2 px-1 flex flex-wrap items-center gap-1.5 border-b border-slate-100 dark:border-slate-800/70 pb-2">
             <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mr-1">
-              <Pin className="w-3 h-3" /> Pinned to Thread:
+              <Pin className="w-3 h-3" /> Pinned:
             </span>
             {pinnedDocs.map((doc) => (
               <div
@@ -600,7 +467,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
         {/* Attached Document Preview Chip */}
         {attachedDocument && (
-          <div className="pt-2.5 px-3.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="mb-2 px-1 flex flex-wrap items-center justify-between gap-2">
             <div className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 text-xs min-w-0">
               <FileText className="w-5 h-5 text-indigo-500 shrink-0" />
               <div className="flex flex-col min-w-0">
@@ -621,7 +488,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                   title="Keep this document pinned across every turn in this thread"
                 >
                   {isPinningDoc ? <Loader2 className="w-3 h-3 animate-spin" /> : <Pin className="w-3 h-3" />}
-                  <span>Pin to Thread</span>
+                  <span>Pin</span>
                 </button>
               )}
               <button
@@ -638,7 +505,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
         {/* Document Parsing Progress Indicator */}
         {isParsingDocument && (
-          <div className="pt-2.5 px-3.5 flex items-center gap-2 text-xs text-indigo-500 dark:text-indigo-400">
+          <div className="mb-2 px-1 flex items-center gap-2 text-xs text-indigo-500 dark:text-indigo-400">
             <Loader2 className="w-4 h-4 animate-spin shrink-0" />
             <span>Reading and extracting document text...</span>
           </div>
@@ -646,7 +513,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
         {/* Document Parsing Error Banner */}
         {documentError && (
-          <div className="pt-2.5 px-3.5 flex items-center justify-between text-xs text-rose-500">
+          <div className="mb-2 px-1 flex items-center justify-between text-xs text-rose-500">
             <span>{documentError}</span>
             <button
               type="button"
@@ -658,83 +525,97 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           </div>
         )}
 
-        {/* Hands-Free Voice Conversation Mode Active Indicator */}
-        {voiceConversationMode && (
-          <div className="pt-2.5 px-3.5 flex items-center justify-between gap-2">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold">
-              <AudioLines className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
-              <span>Hands-Free Voice Active · Replies auto-speak</span>
-            </div>
-            {onToggleVoiceConversationMode && (
-              <button
-                type="button"
-                onClick={onToggleVoiceConversationMode}
-                className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-0.5 rounded transition"
-                title="Turn off Hands-Free Voice Mode"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Active Mode Badge Chip above text input */}
+        {/* Active Swarm Mode Pill Indicator (when active) */}
         {swarmMode && (
-          <div className="pt-2.5 px-3.5 flex items-center justify-between">
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-[11px] font-semibold">
-              <Cpu className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 animate-pulse" />
-              <span>⚡ Swarm Debate Mode Active</span>
+          <div className="mb-1.5 px-1 flex items-center justify-between">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-[11px] font-semibold">
+              <Cpu className="w-3 h-3 text-amber-500 animate-pulse" />
+              <span>Swarm Debate Mode Active</span>
             </div>
             <button
               type="button"
               onClick={() => setSwarmMode(false)}
-              className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-0.5 rounded transition"
-              title="Deactivate Swarm Debate Mode"
+              className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs px-1"
+              title="Turn off Swarm Mode"
             >
-              <X className="w-3.5 h-3.5" />
+              Turn off
             </button>
           </div>
         )}
 
-        {/* Input Text Area Form */}
-        <form onSubmit={handleSubmit} className="p-2 sm:p-2.5 flex items-end gap-2">
+        {/* Top Text Deck: Full Width Unconstrained Textarea (Claude Style) */}
+        <div className="w-full px-1 pt-0.5">
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Message TwinMind AI..."
+            className="w-full bg-transparent text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-[15px] sm:text-base focus:outline-none resize-none py-1.5 px-1 min-h-[42px] max-h-[160px] leading-relaxed block"
+          />
+        </div>
+
+        {/* Bottom Utility Dock: Clean Claude/ChatGPT Hybrid Row */}
+        <div className="pt-1 px-0.5 flex items-center justify-between gap-2 relative">
           
-          {/* Tool Menu Anchor & 1-Tap Toggle Dock Group */}
-          <div className="relative flex items-center gap-1 shrink-0 pb-0.5" ref={menuRef}>
-            
-            {/* Pop-Up Tool Action Sheet Button (+) */}
+          {/* Left Controls: (+) Tool Menu, Thinking Level Pill, and Subtle Rules/Scope Pill */}
+          <div className="flex items-center gap-1.5 min-w-0" ref={menuRef}>
+            {/* Pop-Up Tool Menu Button (+) */}
             <button
               type="button"
               onClick={() => setIsToolMenuOpen(!isToolMenuOpen)}
-              className={`w-9 h-9 rounded-xl flex items-center justify-center transition ${
+              className={`w-8 h-8 rounded-full flex items-center justify-center transition shrink-0 ${
                 isToolMenuOpen
                   ? 'bg-amber-500/20 text-amber-600 dark:text-amber-300 border border-amber-500/40'
-                  : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white border border-slate-200 dark:border-slate-700/60'
+                  : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white border border-slate-200 dark:border-slate-700/60'
               }`}
-              title="Open tools and attachment menu"
+              title="Add attachment, swarm debate, or launch tools"
+              aria-label="Add attachment, swarm debate, or launch tools"
             >
               <Plus className={`w-4 h-4 transition-transform duration-200 ${isToolMenuOpen ? 'rotate-45 text-amber-500 dark:text-amber-400' : ''}`} />
             </button>
 
-            {/* 1-Tap Swarm Debate Toggle Button beside (+) */}
-            <button
-              type="button"
-              onClick={() => setSwarmMode(!swarmMode)}
-              className={`w-9 h-9 rounded-xl flex items-center justify-center transition ${
-                swarmMode
-                  ? 'bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/50 shadow-sm shadow-amber-500/20'
-                  : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 hover:text-amber-600 dark:hover:text-amber-300 border border-slate-200 dark:border-slate-700/60'
-              }`}
-              title={swarmMode ? 'Swarm Debate Active (Click to disable)' : 'Activate Swarm Debate Mode (1-Tap)'}
-            >
-              <Cpu className="w-4 h-4" />
-            </button>
+            {/* Claude-Style Compact Thinking Level Pill */}
+            {onThinkingLevelChange && (
+              <ThinkingLevelSelector
+                value={thinkingLevel}
+                onChange={onThinkingLevelChange}
+                compact={true}
+                dropUp={true}
+                className="shrink-0"
+              />
+            )}
+
+            {/* Compact Rules Pill (Shows active rules count, opens rules drawer) */}
+            {onOpenRulesDrawer && (
+              <button
+                type="button"
+                onClick={onOpenRulesDrawer}
+                className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border transition text-xs truncate max-w-[130px] sm:max-w-[160px] shrink-0 ${
+                  activeProjectKey
+                    ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-700 dark:text-indigo-300 font-semibold'
+                    : 'bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/80 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700/60'
+                }`}
+                title={activeProjectKey ? `Project Scope: ${activeProjectKey}` : 'Global Persona Rules'}
+              >
+                <ScrollText className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                <span className="truncate">
+                  {activeProjectKey ? activeProjectKey : 'Rules'}
+                </span>
+                {appliedRulesCount !== undefined && appliedRulesCount > 0 && (
+                  <span className="font-mono tabular-nums text-[10px] opacity-80">
+                    ({appliedRulesCount})
+                  </span>
+                )}
+              </button>
+            )}
 
             {/* Tool Action Sheet Dropdown Menu */}
             {isToolMenuOpen && (
-              <div className="absolute bottom-12 left-0 w-64 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
+              <div className="absolute bottom-11 left-0 w-72 bg-white dark:bg-[#1e1f23] border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
                 <div className="text-[10px] font-bold text-slate-400 dark:text-slate-500 px-2.5 py-1 uppercase tracking-wider">
-                  TwinMind Tools & Capabilities
+                  Tools & Capabilities
                 </div>
                 
                 <div className="space-y-0.5">
@@ -743,7 +624,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     onClick={() => {
                       fileInputRef.current?.click();
                     }}
-                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
+                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
                   >
                     <Camera className="w-4 h-4 text-amber-500 dark:text-amber-400" />
                     <span className="font-medium">Upload Photo or Image</span>
@@ -754,11 +635,45 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                     onClick={() => {
                       fileInputRef.current?.click();
                     }}
-                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
+                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
                   >
                     <Paperclip className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
                     <span>Upload Document File</span>
                   </button>
+
+                  {/* Swarm Debate Toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSwarmMode(!swarmMode);
+                      setIsToolMenuOpen(false);
+                    }}
+                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center justify-between transition"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <Cpu className="w-4 h-4 text-amber-500 dark:text-amber-400" />
+                      <span className="font-medium">Swarm Debate Mode</span>
+                    </div>
+                    {swarmMode && <Check className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />}
+                  </button>
+
+                  {/* Hands-Free Voice Mode Toggle */}
+                  {onToggleVoiceConversationMode && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onToggleVoiceConversationMode();
+                        setIsToolMenuOpen(false);
+                      }}
+                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center justify-between transition"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <AudioLines className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
+                        <span className="font-medium">Hands-Free Voice Mode</span>
+                      </div>
+                      {voiceConversationMode && <Check className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />}
+                    </button>
+                  )}
 
                   {onOpenKnowledgeVault && (
                     <button
@@ -767,7 +682,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                         setIsToolMenuOpen(false);
                         onOpenKnowledgeVault();
                       }}
-                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
+                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
                     >
                       <BookOpen className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
                       <span>Knowledge Memory Vault</span>
@@ -781,42 +696,40 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                         setIsToolMenuOpen(false);
                         onOpenDecisionAnalyzer();
                       }}
-                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
+                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
                     >
                       <Brain className="w-4 h-4 text-purple-500 dark:text-purple-400" />
                       <span>7-Step Decision Deconstructor</span>
                     </button>
                   )}
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSwarmMode(!swarmMode);
-                      setIsToolMenuOpen(false);
-                    }}
-                    className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center justify-between transition"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <Cpu className="w-4 h-4 text-amber-500 dark:text-amber-400" />
-                      <span className="font-medium">Swarm Debate Mode</span>
-                    </div>
-                    {swarmMode && <Check className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400" />}
-                  </button>
-
-                  {onToggleVoiceConversationMode && (
+                  {/* Quick Project Scope Setting */}
+                  {onSetProjectKey && (
                     <button
                       type="button"
                       onClick={() => {
-                        onToggleVoiceConversationMode();
                         setIsToolMenuOpen(false);
+                        setIsProjectPopoverOpen(true);
                       }}
-                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-xs text-slate-800 dark:text-slate-200 flex items-center justify-between transition"
+                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
                     >
-                      <div className="flex items-center gap-2.5">
-                        <AudioLines className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
-                        <span className="font-medium">Hands-Free Voice Mode</span>
-                      </div>
-                      {voiceConversationMode && <Check className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />}
+                      <FolderGit2 className="w-4 h-4 text-indigo-400" />
+                      <span>Set Project Scope...</span>
+                    </button>
+                  )}
+
+                  {/* Quick Session Rule */}
+                  {onCreateTempRule && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsToolMenuOpen(false);
+                        setIsTempRulePopoverOpen(true);
+                      }}
+                      className="w-full text-left px-2.5 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800/80 text-xs text-slate-800 dark:text-slate-200 flex items-center gap-2.5 transition"
+                    >
+                      <Clock className="w-4 h-4 text-amber-500" />
+                      <span>Add Session Rule...</span>
                     </button>
                   )}
                 </div>
@@ -824,85 +737,193 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             )}
           </div>
 
-          {/* Text Area Input */}
-          <div className="flex-1 min-w-0">
-            <textarea
-              ref={textareaRef}
-              rows={1}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Message TwinMind AI..."
-              className="w-full bg-transparent text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 text-sm focus:outline-none resize-none py-1.5 px-1 min-h-[38px] max-h-[160px] leading-relaxed"
-            />
-          </div>
-
-          {/* Right Action Group: Thinking Level Selector, Hands-Free Toggle, Mic & Circular Send Button */}
-          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 pb-0.5">
-            {onThinkingLevelChange && (
-              <ThinkingLevelSelector
-                value={thinkingLevel}
-                onChange={onThinkingLevelChange}
-                compact={true}
-                dropUp={true}
-              />
-            )}
-
-            {onToggleVoiceConversationMode && (
+          {/* Right Action Group: Mic button at rest, Circular Amber Send Arrow when typing */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* If Hands-Free Mode is Active, show indicator */}
+            {voiceConversationMode && (
               <button
                 type="button"
                 onClick={onToggleVoiceConversationMode}
-                className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl border flex items-center justify-center transition ${
-                  voiceConversationMode
-                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-600 dark:text-emerald-400'
-                    : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200 border-slate-200 dark:border-slate-700/60'
-                }`}
-                title={voiceConversationMode ? 'Hands-Free Voice Mode ON (Click to disable)' : 'Enable Hands-Free Voice Mode'}
-                aria-label="Toggle hands-free voice mode"
+                className="w-8 h-8 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-600 dark:text-emerald-400 flex items-center justify-center transition"
+                title="Hands-Free Voice Active (Click to disable)"
               >
-                <AudioLines className="w-4 h-4" />
+                <AudioLines className="w-4 h-4 animate-pulse" />
               </button>
             )}
 
-            {/* Mic / Audio Record Button */}
-            <button
-              type="button"
-              onClick={startRecording}
-              className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200 border border-slate-200 dark:border-slate-700/60 flex items-center justify-center transition"
-              title="Record voice note"
-              aria-label="Record voice note"
-            >
-              <Mic className="w-4 h-4" />
-            </button>
-
-            {/* Circular Amber Send Button */}
-            <button
-              type="submit"
-              disabled={(!text.trim() && !selectedImage && !attachedDocument) || isLoading || isParsingDocument}
-              className={`w-9 h-9 rounded-full flex items-center justify-center transition shadow-lg ${
-                (text.trim() || selectedImage || attachedDocument) && !isLoading && !isParsingDocument
-                  ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold active:scale-95 shadow-amber-500/20'
-                  : 'bg-slate-100 text-slate-400 border border-slate-200 dark:bg-slate-800 dark:text-slate-600 dark:border-slate-700/50 cursor-not-allowed'
-              }`}
-              title="Send message"
-            >
-
-              {isLoading ? (
-                <Square className="w-3.5 h-3.5 fill-slate-950 animate-pulse" />
-              ) : (
-                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
-              )}
-            </button>
+            {/* When hasContent: Circular Amber Send Button (ChatGPT/Claude style). When empty: Mic button */}
+            {hasContent || isLoading ? (
+              <button
+                type="button"
+                onClick={() => handleSubmit()}
+                disabled={!hasContent || isLoading || isParsingDocument}
+                className={`w-9 h-9 rounded-full flex items-center justify-center transition shadow-md ${
+                  hasContent && !isLoading && !isParsingDocument
+                    ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold active:scale-95 shadow-amber-500/20'
+                    : 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600 cursor-not-allowed'
+                }`}
+                title="Send message"
+                aria-label="Send message"
+              >
+                {isLoading ? (
+                  <Square className="w-3.5 h-3.5 fill-slate-950 animate-pulse" />
+                ) : (
+                  <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+                )}
+              </button>
+            ) : (
+              <div className="flex items-center gap-1">
+                {onToggleVoiceConversationMode && !voiceConversationMode && (
+                  <button
+                    type="button"
+                    onClick={onToggleVoiceConversationMode}
+                    className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-700 text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200 flex items-center justify-center transition"
+                    title="Hands-Free Voice Mode"
+                    aria-label="Hands-Free Voice Mode"
+                  >
+                    <AudioLines className="w-4 h-4" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={startRecording}
+                  className="w-9 h-9 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-700 text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white border border-slate-200/80 dark:border-slate-700/60 flex items-center justify-center transition"
+                  title="Record voice note"
+                  aria-label="Record voice note"
+                >
+                  <Mic className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
-        </form>
+        </div>
+
+        {/* Project Binding Popover */}
+        {isProjectPopoverOpen && onSetProjectKey && (
+          <div className="absolute bottom-full left-2 mb-2 z-50 w-72 rounded-2xl bg-white dark:bg-[#1e1f23] border border-slate-200 dark:border-slate-800 shadow-2xl p-3 space-y-2 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                Thread Project Scope
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsProjectPopoverOpen(false)}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <input
+              type="text"
+              value={projectDraft}
+              onChange={(e) => setProjectDraft(e.target.value)}
+              placeholder="e.g. twinmind-ai, uniace"
+              className="w-full px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+            />
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isSavingProject}
+                onClick={async () => {
+                  setIsSavingProject(true);
+                  try {
+                    setProjectDraft('');
+                    await onSetProjectKey(null);
+                    setIsProjectPopoverOpen(false);
+                  } finally {
+                    setIsSavingProject(false);
+                  }
+                }}
+                className="text-[11px] text-slate-500 hover:text-rose-500"
+              >
+                Reset to Global
+              </button>
+              <button
+                type="button"
+                disabled={isSavingProject}
+                onClick={async () => {
+                  setIsSavingProject(true);
+                  try {
+                    await onSetProjectKey(projectDraft.trim() || null);
+                    setIsProjectPopoverOpen(false);
+                  } finally {
+                    setIsSavingProject(false);
+                  }
+                }}
+                className="px-3 py-1 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-50"
+              >
+                {isSavingProject ? 'Saving...' : 'Bind Scope'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Quick Temporary Session Rule Popover */}
+        {isTempRulePopoverOpen && onCreateTempRule && (
+          <div className="absolute bottom-full right-2 mb-2 z-50 w-72 rounded-2xl bg-white dark:bg-[#1e1f23] border border-slate-200 dark:border-slate-800 shadow-2xl p-3 space-y-2 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                Add Session Rule
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsTempRulePopoverOpen(false)}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <textarea
+              rows={2}
+              value={tempRuleText}
+              onChange={(e) => setTempRuleText(e.target.value)}
+              placeholder="e.g., Explain step-by-step with 1 practice question at the end."
+              className="w-full px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500 resize-none"
+            />
+            <div className="flex items-center justify-between gap-2 pt-1">
+              <select
+                value={tempRuleExpiryMinutes === null ? 'none' : String(tempRuleExpiryMinutes)}
+                onChange={(e) =>
+                  setTempRuleExpiryMinutes(e.target.value === 'none' ? null : Number(e.target.value))
+                }
+                className="px-2 py-1 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
+              >
+                <option value="60">Expires in 1h</option>
+                <option value="120">Expires in 2h</option>
+                <option value="1440">Expires in 24h</option>
+                <option value="none">Session only</option>
+              </select>
+              <button
+                type="button"
+                disabled={isSavingTempRule || !tempRuleText.trim()}
+                onClick={async () => {
+                  if (!tempRuleText.trim()) return;
+                  setIsSavingTempRule(true);
+                  try {
+                    await onCreateTempRule(tempRuleText.trim(), tempRuleExpiryMinutes);
+                    setTempRuleText('');
+                    setIsTempRulePopoverOpen(false);
+                  } finally {
+                    setIsSavingTempRule(false);
+                  }
+                }}
+                className="px-3 py-1 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-semibold disabled:opacity-50"
+              >
+                {isSavingTempRule ? 'Adding...' : 'Apply Rule'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Quiet Footer Tagline matching concept */}
-      <div className="text-center mt-2">
-        <span className="text-[11px] text-slate-500/80 tracking-wide">
-          TwinMind AI thinking partner · Grounded in your context
-        </span>
-      </div>
+      {/* Quiet Footer Tagline - Automatically hidden when mobile keyboard is open */}
+      {!isKeyboardOpen && (
+        <div className="hidden sm:block text-center mt-1.5">
+          <span className="text-[11px] text-slate-500/80 tracking-wide">
+            TwinMind AI thinking partner · Grounded in your context
+          </span>
+        </div>
+      )}
     </div>
   );
 };

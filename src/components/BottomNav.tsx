@@ -7,13 +7,17 @@ interface BottomNavProps {
   activeTab: NavigationTab;
   onTabChange: (tab: NavigationTab) => void;
   isKnowledgeLive?: boolean;
+  hidden?: boolean;
 }
 
 export const BottomNav: React.FC<BottomNavProps> = ({
   activeTab,
   onTabChange,
   isKnowledgeLive = true,
+  hidden = false,
 }) => {
+  if (hidden) return null;
+
   const tabs = [
     {
       id: 'home' as NavigationTab,

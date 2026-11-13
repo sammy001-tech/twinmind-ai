@@ -9,9 +9,18 @@ import {
   ShieldCheck,
   AlertTriangle,
   RefreshCw,
+  Share2,
+  Loader2,
 } from 'lucide-react';
 import type { GeneratedArtifact } from '../types/index.ts';
 import { ArtifactPreviewModal } from './ArtifactPreviewModal.tsx';
+import {
+  canUseNativeFileShare,
+  downloadOrShareArtifact,
+  isFreshSignedPath,
+  resolveSignedArtifactUrl,
+  safeArtifactPath,
+} from '../utils/artifactDownload.ts';
 
 interface ArtifactCardProps {
   artifact: GeneratedArtifact;
@@ -22,24 +31,6 @@ function formatFileSize(sizeBytes: number): string {
   if (sizeBytes < 1024) return sizeBytes + ' B';
   if (sizeBytes < 1024 * 1024) return (sizeBytes / 1024).toFixed(1) + ' KB';
   return (sizeBytes / (1024 * 1024)).toFixed(2) + ' MB';
-}
-
-function safeArtifactPath(value: string): string | null {
-  if (!/^\/artifacts\/[^/?#]+(?:\?[^#]*)?$/.test(value)) return null;
-  return value;
-}
-
-function isFreshSignedPath(value: string | null): boolean {
-  if (!value) return false;
-  const safe = safeArtifactPath(value);
-  if (!safe) return false;
-  const queryIndex = safe.indexOf('?');
-  if (queryIndex < 0) return false;
-  const params = new URLSearchParams(safe.slice(queryIndex + 1));
-  const expires = Number(params.get('expires'));
-  return Boolean(params.get('signature'))
-    && Number.isSafeInteger(expires)
-    && expires * 1000 > Date.now() + 5000;
 }
 
 function artifactIcon(type: string) {
@@ -62,47 +53,16 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
     () => isFreshSignedPath(initialUrl) ? initialUrl : null,
   );
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isTransferring, setIsTransferring] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
 
   const refreshDownloadUrl = useCallback(async (signal?: AbortSignal) => {
-    if (!artifact.name || artifact.name.includes('/') || artifact.name.includes('\\')) {
-      setDownloadUrl(null);
-      setLinkError('The stored artifact identifier is invalid.');
-      return;
-    }
-
     setIsRefreshing(true);
     setLinkError(null);
     try {
-      const response = await fetch(
-        '/api/artifacts/' + encodeURIComponent(artifact.name) + '/access',
-        {
-          method: 'GET',
-          credentials: 'same-origin',
-          cache: 'no-store',
-          signal,
-        },
-      );
-      const payload: unknown = await response.json().catch(() => null);
-      const data = payload && typeof payload === 'object' && !Array.isArray(payload)
-        ? payload as Record<string, unknown>
-        : null;
-
-      if (!response.ok || data?.success !== true || typeof data.url !== 'string') {
-        const serverError = typeof data?.error === 'string' && data.error.trim()
-          ? data.error
-          : data?.code === 'ARTIFACT_NOT_FOUND'
-            ? 'This file is not present in the database-backed store. Regenerate it if it predates the storage rollout.'
-            : 'The secure link service returned HTTP ' + response.status + '.';
-        throw new Error(serverError);
-      }
-
-      const resolvedUrl = safeArtifactPath(data.url);
-      if (!resolvedUrl || !isFreshSignedPath(resolvedUrl)) {
-        throw new Error('The server did not return a valid, unexpired artifact link.');
-      }
-
+      const resolvedUrl = await resolveSignedArtifactUrl(artifact.name, signal);
       if (signal?.aborted) return;
       setDownloadUrl(resolvedUrl);
       setLinkError(null);
@@ -127,6 +87,25 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
   const hasVerifiedMetadata = artifact.validationStatus === 'validated';
   const sizeLabel = typeof artifact.sizeBytes === 'number' ? formatFileSize(artifact.sizeBytes) : '';
   const supportsPreview = ['pdf', 'md', 'markdown', 'csv', 'xlsx', 'excel'].includes(artifact.type.toLowerCase());
+  const nativeShareAvailable = canUseNativeFileShare();
+
+  const handleTransfer = async (preferShare: boolean) => {
+    if (!safeUrl || isTransferring) return;
+    setIsTransferring(true);
+    setTransferError(null);
+    try {
+      const result = await downloadOrShareArtifact({
+        url: safeUrl,
+        fileName: displayName,
+        preferShare,
+      });
+      if (!result.ok && !result.cancelled) {
+        setTransferError(result.error || 'Could not transfer artifact file.');
+      }
+    } finally {
+      setIsTransferring(false);
+    }
+  };
 
   return (
     <section
@@ -162,35 +141,58 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
       </div>
 
       {safeUrl ? (
-        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 bg-slate-50 p-3 dark:border-slate-700/80 dark:bg-slate-950/40">
-          <a
-            href={safeUrl}
-            download={displayName}
-            className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 transition hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
-          >
-            <Download className="h-4 w-4" aria-hidden="true" />
-            Download file
-          </a>
-          {supportsPreview && (
+        <div className="space-y-2 border-t border-slate-200 bg-slate-50 p-3 dark:border-slate-700/80 dark:bg-slate-950/40">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setIsPreviewOpen(true)}
-              className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              disabled={isTransferring}
+              onClick={() => { void handleTransfer(false); }}
+              className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 transition hover:bg-amber-400 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-2"
             >
-              <Eye className="h-3.5 w-3.5" aria-hidden="true" />
-              Preview
+              {isTransferring ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Download className="h-4 w-4" aria-hidden="true" />
+              )}
+              {isTransferring ? 'Preparing...' : 'Download file'}
             </button>
-          )}
-          {['pdf', 'md', 'markdown', 'csv'].includes(artifact.type.toLowerCase()) && (
-            <a
-              href={safeUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-            >
-              <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
-              Open
-            </a>
+            {nativeShareAvailable && (
+              <button
+                type="button"
+                disabled={isTransferring}
+                onClick={() => { void handleTransfer(true); }}
+                className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-amber-500 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <Share2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Share
+              </button>
+            )}
+            {supportsPreview && (
+              <button
+                type="button"
+                onClick={() => setIsPreviewOpen(true)}
+                className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                Preview
+              </button>
+            )}
+            {['pdf', 'md', 'markdown', 'csv'].includes(artifact.type.toLowerCase()) && (
+              <a
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                Open
+              </a>
+            )}
+          </div>
+          {transferError && (
+            <p className="text-[11px] text-rose-600 dark:text-rose-400">
+              {transferError} Try using <strong>Open</strong> or <strong>Share</strong> if WebView blocks direct file saves.
+            </p>
           )}
         </div>
       ) : (

@@ -9,9 +9,12 @@ import {
   FileSpreadsheet,
   FileCode2,
   FileText,
+  Share2,
 } from 'lucide-react';
 import type { ArtifactPreviewData, GeneratedArtifact } from '../types/index.ts';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
+import { apiFetch } from '../utils/apiFetch.ts';
+import { canUseNativeFileShare, downloadOrShareArtifact } from '../utils/artifactDownload.ts';
 
 interface ArtifactPreviewModalProps {
   isOpen: boolean;
@@ -30,14 +33,14 @@ export const ArtifactPreviewModal: React.FC<ArtifactPreviewModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedSheetIndex, setSelectedSheetIndex] = useState(0);
+  const [isTransferring, setIsTransferring] = useState(false);
 
   const loadPreview = useCallback(async (signal?: AbortSignal) => {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/artifacts/${encodeURIComponent(artifact.name)}/preview`, {
+      const res = await apiFetch(`/api/artifacts/${encodeURIComponent(artifact.name)}/preview`, {
         method: 'GET',
-        credentials: 'same-origin',
         cache: 'no-store',
         signal,
       });
@@ -149,7 +152,7 @@ export const ArtifactPreviewModal: React.FC<ArtifactPreviewModalProps> = ({
       aria-modal="true"
       aria-label={`Preview ${displayName}`}
     >
-      <div className="w-full max-w-4xl max-h-[90vh] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl flex flex-col overflow-hidden">
+      <div className="w-full max-w-4xl max-h-[92dvh] rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 bg-slate-50 dark:bg-slate-900/70 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
@@ -166,14 +169,50 @@ export const ArtifactPreviewModal: React.FC<ArtifactPreviewModalProps> = ({
 
           <div className="flex items-center gap-2 shrink-0">
             {resolvedDownloadUrl && (
-              <a
-                href={resolvedDownloadUrl}
-                download={displayName}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Download</span>
-              </a>
+              <>
+                {canUseNativeFileShare() && (
+                  <button
+                    type="button"
+                    disabled={isTransferring}
+                    onClick={async () => {
+                      setIsTransferring(true);
+                      try {
+                        await downloadOrShareArtifact({
+                          url: resolvedDownloadUrl,
+                          fileName: displayName,
+                          preferShare: true,
+                        });
+                      } finally {
+                        setIsTransferring(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 font-semibold text-xs transition disabled:opacity-60"
+                  >
+                    <Share2 className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Share</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  disabled={isTransferring}
+                  onClick={async () => {
+                    setIsTransferring(true);
+                    try {
+                      await downloadOrShareArtifact({
+                        url: resolvedDownloadUrl,
+                        fileName: displayName,
+                        preferShare: false,
+                      });
+                    } finally {
+                      setIsTransferring(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition disabled:opacity-60"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Download</span>
+                </button>
+              </>
             )}
             <button
               type="button"

@@ -1,5 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { Mic, Square, Loader2, FileText, Download, CheckCircle2, X, Volume2, Sparkles } from 'lucide-react';
+import { createSafeAudioRecorder, formatMicrophoneError } from '../utils/mediaPermissions.ts';
+import { apiFetch } from '../utils/apiFetch.ts';
+import { downloadOrShareArtifact, resolveSignedArtifactUrl } from '../utils/artifactDownload.ts';
 
 interface VoiceRecorderModalProps {
   isOpen: boolean;
@@ -19,6 +22,7 @@ export const VoiceRecorderModal: React.FC<VoiceRecorderModalProps> = ({ isOpen, 
   const [error, setError] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recorderMimeTypeRef = useRef<string>('audio/webm');
   const audioChunksRef = useRef<Blob[]>([]);
 
   if (!isOpen) return null;
@@ -32,27 +36,28 @@ export const VoiceRecorderModal: React.FC<VoiceRecorderModalProps> = ({ isOpen, 
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
+      const { recorder, mimeType } = createSafeAudioRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      recorderMimeTypeRef.current = mimeType;
 
-      mediaRecorder.ondataavailable = (event) => {
+      recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
-      mediaRecorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      recorder.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: recorderMimeTypeRef.current });
         setAudioBlob(blob);
         setAudioUrl(URL.createObjectURL(blob));
         // Stop all audio tracks
         stream.getTracks().forEach((track) => track.stop());
       };
 
-      mediaRecorder.start();
+      recorder.start();
       setIsRecording(true);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Microphone access denied or unsupported.');
+      setError(formatMicrophoneError(err));
     }
   };
 
@@ -69,34 +74,36 @@ export const VoiceRecorderModal: React.FC<VoiceRecorderModalProps> = ({ isOpen, 
     setError(null);
 
     try {
-      const reader = new FileReader();
-      reader.readAsDataURL(audioBlob);
-      reader.onloadend = async () => {
-        const base64String = (reader.result as string)?.split(',')[1];
-        if (!base64String) {
-          throw new Error('Failed to encode audio blob.');
-        }
+      const base64String = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error('Failed to read recorded audio.'));
+        reader.onloadend = () => {
+          const encoded = typeof reader.result === 'string' ? reader.result.split(',')[1] : '';
+          if (!encoded) reject(new Error('Failed to encode audio blob.'));
+          else resolve(encoded);
+        };
+        reader.readAsDataURL(audioBlob);
+      });
 
-        const res = await fetch('/api/audio/transcribe-and-summarize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            audioBase64: base64String,
-            mimeType: audioBlob.type || 'audio/webm',
-            prompt: 'Listen to this voice memo/recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast.',
-          }),
-        });
+      const res = await apiFetch('/api/audio/transcribe-and-summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64: base64String,
+          mimeType: audioBlob.type || recorderMimeTypeRef.current || 'audio/webm',
+          prompt: 'Listen to this voice memo/recording, transcribe it accurately, extract key action items and strategic takeaways, and generate a professional PDF meeting notes document or financial forecast.',
+        }),
+      });
 
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          throw new Error(data.error || 'Failed to process voice note.');
-        }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to process voice note.');
+      }
 
-        setResultData({
-          reply: data.reply,
-          toolsExecuted: data.toolsExecuted,
-        });
-      };
+      setResultData({
+        reply: data.reply,
+        toolsExecuted: data.toolsExecuted,
+      });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Audio processing failed.');
     } finally {
@@ -213,25 +220,37 @@ export const VoiceRecorderModal: React.FC<VoiceRecorderModalProps> = ({ isOpen, 
                   {resultData.toolsExecuted.map((tool, idx) => {
                     const res = tool.result || {};
                     if (tool.toolName === 'generateArtifact' && res.fileName) {
-                      const fileUrl = `/artifacts/${encodeURIComponent(res.fileName)}`;
                       return (
-                        <div key={idx} className="flex items-center justify-between bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 p-3.5 rounded-xl">
-                          <div className="flex items-center gap-3">
+                        <div key={idx} className="flex items-center justify-between gap-2 bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900 p-3.5 rounded-xl">
+                          <div className="flex items-center gap-3 min-w-0">
                             <div className="w-9 h-9 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0">
                               <FileText className="w-5 h-5" />
                             </div>
-                            <div>
-                              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{res.fileName}</p>
-                              <p className="text-xs text-indigo-600 dark:text-indigo-400">Ready for download & distribution</p>
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">{res.fileName}</p>
+                              <p className="text-xs text-indigo-600 dark:text-indigo-400">Ready for download & share</p>
                             </div>
                           </div>
-                          <a
-                            href={fileUrl}
-                            download={res.fileName}
-                            className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium py-2 px-3.5 rounded-lg flex items-center gap-1.5 transition-all shadow-sm"
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const signedUrl = await resolveSignedArtifactUrl(res.fileName);
+                                const result = await downloadOrShareArtifact({
+                                  url: signedUrl,
+                                  fileName: res.fileName,
+                                });
+                                if (!result.ok && !result.cancelled) {
+                                  setError(result.error || 'Failed to download generated document.');
+                                }
+                              } catch (err: unknown) {
+                                setError(err instanceof Error ? err.message : 'Failed to download generated document.');
+                              }
+                            }}
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium py-2 px-3.5 rounded-lg flex items-center gap-1.5 transition-all shadow-sm shrink-0"
                           >
-                            <Download className="w-4 h-4" /> Download
-                          </a>
+                            <Download className="w-4 h-4" /> Save
+                          </button>
                         </div>
                       );
                     }

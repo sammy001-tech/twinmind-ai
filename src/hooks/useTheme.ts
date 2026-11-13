@@ -37,6 +37,11 @@ export function useTheme() {
         root.classList.remove('dark');
         root.style.colorScheme = 'light';
       }
+
+      const themeMeta = document.querySelector('meta[name="theme-color"]');
+      if (themeMeta) {
+        themeMeta.setAttribute('content', isDark ? '#020617' : '#f8fafc');
+      }
     };
 
     updateTheme();

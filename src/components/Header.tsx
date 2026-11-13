@@ -143,7 +143,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   return (
-    <header className="border-b border-slate-200/80 dark:border-slate-800/80 bg-white/90 dark:bg-slate-950/90 backdrop-blur-md sticky top-0 z-30 transition-colors">
+    <header className="safe-area-pt border-b border-slate-200/80 dark:border-slate-800/80 bg-white/90 dark:bg-slate-950/90 backdrop-blur-md sticky top-0 z-30 transition-colors">
       <div className="max-w-4xl mx-auto px-3.5 sm:px-4 py-2 flex items-center justify-between gap-2">
         
         {/* Left Side: Circular Menu Button (☰) matching ChatGPT style */}

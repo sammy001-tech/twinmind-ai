@@ -22,6 +22,7 @@ import {
   Pencil,
   FileDown,
   ChevronDown,
+  Sparkles,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { ArtifactCard } from './ArtifactCard.tsx';
@@ -116,12 +117,14 @@ interface ChatMessageProps {
   message: ChatMessage;
   channel: ChannelType;
   displayName?: string;
+  brandName?: string;
   onGenerateAudio: (messageId: string, text: string) => void;
   onEditMessage?: (messageId: string, newContent: string) => void;
   onEditAndRegenerate?: (messageId: string, newContent: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onRetryMessage?: (messageId: string) => void;
   onOpenKnowledgeVault?: (docId?: string | number) => void;
+  onAskAboutSelection?: (text: string) => void;
   isFirstInGroup?: boolean;
   isLastInGroup?: boolean;
   hasMultipleInGroup?: boolean;
@@ -137,12 +140,14 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   message,
   channel,
   displayName = '',
+  brandName = '',
   onGenerateAudio,
   onEditMessage,
   onEditAndRegenerate,
   onDeleteMessage,
   onRetryMessage,
   onOpenKnowledgeVault,
+  onAskAboutSelection,
   isFirstInGroup = true,
   isLastInGroup = true,
   hasMultipleInGroup = false,
@@ -164,6 +169,14 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
 
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
+  const messageContentRef = useRef<HTMLDivElement | null>(null);
+  const [selectionToolbar, setSelectionToolbar] = useState<{
+    text: string;
+    top: number;
+    left: number;
+  } | null>(null);
+  const [selectionCopied, setSelectionCopied] = useState(false);
   const [displayedContent, setDisplayedContent] = useState(isStreaming ? '' : message.content);
   const displayedContentRef = useRef(isStreaming ? '' : message.content);
 
@@ -250,12 +263,109 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
     setIsDeleting(false);
   };
 
-  // Touch handlers for long-press trigger on user messages across ALL channels
-  const handleTouchStart = () => {
+  // Native text selection toolbar for assistant messages (ChatGPT style)
+  useEffect(() => {
+    if (isUser) return;
+
+    const handleSelection = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !messageContentRef.current) {
+        setSelectionToolbar(null);
+        return;
+      }
+
+      const anchorNode = selection.anchorNode;
+      const focusNode = selection.focusNode;
+      if (
+        !anchorNode ||
+        !focusNode ||
+        !messageContentRef.current.contains(anchorNode) ||
+        !messageContentRef.current.contains(focusNode)
+      ) {
+        setSelectionToolbar(null);
+        return;
+      }
+
+      const selectedText = selection.toString().trim();
+      if (!selectedText) {
+        setSelectionToolbar(null);
+        return;
+      }
+
+      try {
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          const placeAbove = rect.top > 65;
+          const top = placeAbove ? Math.max(12, rect.top - 46) : rect.bottom + 8;
+          const center = rect.left + rect.width / 2;
+          const left = Math.max(12, Math.min(window.innerWidth - 260, center - 120));
+          setSelectionToolbar({
+            text: selectedText,
+            top,
+            left,
+          });
+        }
+      } catch {
+        setSelectionToolbar(null);
+      }
+    };
+
+    document.addEventListener('selectionchange', handleSelection);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelection);
+    };
+  }, [isUser]);
+
+  const handleAskFromSelection = (textToAsk: string) => {
+    setSelectionToolbar(null);
+    window.getSelection()?.removeAllRanges();
+    if (onAskAboutSelection) {
+      onAskAboutSelection(textToAsk);
+    }
+  };
+
+  const handleCopyFromSelection = async (textToCopy: string) => {
+    try {
+      await navigator.clipboard.writeText(textToCopy);
+      setSelectionCopied(true);
+      setTimeout(() => {
+        setSelectionCopied(false);
+        setSelectionToolbar(null);
+        window.getSelection()?.removeAllRanges();
+      }, 700);
+    } catch {
+      setSelectionToolbar(null);
+    }
+  };
+
+  const handleSelectAllInMessage = () => {
+    if (!messageContentRef.current) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(messageContentRef.current);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  // Touch handlers for long-press trigger ONLY on user messages across ALL channels
+  const handleTouchStart = (e: React.TouchEvent) => {
     if (!isUser) return;
+    const touch = e.touches[0];
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
+
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+    }
     longPressTimerRef.current = setTimeout(() => {
       setShowContextMenu(true);
-    }, 400);
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate(40);
+        } catch {}
+      }
+    }, 450);
   };
 
   const handleTouchEnd = () => {
@@ -263,10 +373,16 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
+    touchStartPos.current = null;
   };
 
-  const handleTouchMove = () => {
-    if (longPressTimerRef.current) {
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isUser || !longPressTimerRef.current || !touchStartPos.current) return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartPos.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPos.current.y);
+    // Ignore natural finger micro-jitter under 10px; only cancel if intentionally scrolling
+    if (dx > 10 || dy > 10) {
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
@@ -374,14 +490,14 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   return (
     <div
       id={`message-${message.id}`}
-      className={`group w-full flex flex-col relative break-words overflow-hidden ${isUser ? 'items-end' : 'items-start'} ${isLastInGroup ? 'mb-3' : 'mb-1'}`}
+      className={`group w-full flex flex-col relative break-words ${isUser ? 'items-end' : 'items-start'} ${isLastInGroup ? 'mb-3' : 'mb-1'}`}
     >
       {/* Message Bubble Container */}
       <div
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
-        onTouchMove={handleTouchMove}
-        onContextMenu={handleContextMenu}
+        onTouchStart={isUser ? handleTouchStart : undefined}
+        onTouchEnd={isUser ? handleTouchEnd : undefined}
+        onTouchMove={isUser ? handleTouchMove : undefined}
+        onContextMenu={isUser ? handleContextMenu : undefined}
         className={`relative transition-all duration-200 select-text ${
           isMatch ? 'ring-2 ring-amber-400 border-amber-400 shadow-md shadow-amber-500/10' : ''
         } ${getBubbleStyle()} ${!isUser ? complexity.layoutHints.containerClassName : ''} ${isUser ? 'max-w-[95%] sm:max-w-[85%] cursor-pointer active:scale-[0.99]' : complexity.layoutHints.maxWidthClass}`}
@@ -443,7 +559,10 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
         {isEditing ? (
           editBox
         ) : (
-          <div className={`transition-all duration-150 ${complexity.layoutHints.bodyClassName} ${!isUser && complexity.layoutHints.showHierarchyLines ? 'border-l-2 border-slate-200/50 dark:border-slate-800/50 pl-4' : ''}`}>
+          <div
+            ref={!isUser ? messageContentRef : undefined}
+            className={`transition-all duration-150 ${complexity.layoutHints.bodyClassName} ${!isUser && complexity.layoutHints.showHierarchyLines ? 'border-l-2 border-slate-200/50 dark:border-slate-800/50 pl-4' : ''}`}
+          >
 
             {!message.content && !isUser ? (
               <div className="flex items-center gap-1.5 py-1 text-amber-500 dark:text-amber-400">
@@ -740,56 +859,161 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
               type="button"
               onClick={() => setShowMoreMenu(!showMoreMenu)}
               className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-transparent transition-colors hover:border-slate-200 hover:bg-white/80 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/60 dark:hover:border-slate-700 dark:hover:bg-slate-800/80 dark:hover:text-white"
-              aria-label="More response options" title="More options"
+              aria-label="More response options"
+              title="More options"
             >
               <MoreVertical className="w-4 h-4" />
             </button>
 
             {showMoreMenu && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setShowMoreMenu(false)} />
-                <div className="absolute left-0 top-full mt-1.5 z-50 w-44 p-1.5 bg-[#2d2d2e] dark:bg-[#282829] text-white rounded-xl border border-white/10 shadow-xl font-sans text-xs space-y-0.5">
+                <div
+                  className="fixed inset-0 z-40 bg-black/10 backdrop-blur-[0.5px]"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowMoreMenu(false);
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                    setShowMoreMenu(false);
+                  }}
+                />
+                <div className="absolute left-0 bottom-full mb-2 z-50 w-48 p-1.5 bg-[#2d2d2e] dark:bg-[#282829] text-white rounded-2xl border border-white/10 shadow-2xl font-sans text-xs space-y-0.5 animate-in fade-in zoom-in-95 duration-100">
                   {onRetryMessage && (
                     <button
                       type="button"
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         onRetryMessage(message.id);
                         setShowMoreMenu(false);
                       }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition"
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-white/10 text-slate-100 transition"
                     >
-                      <RefreshCw className="w-3.5 h-3.5" />
+                      <RefreshCw className="w-3.5 h-3.5 text-slate-300" />
                       <span>Regenerate response</span>
                     </button>
                   )}
                   <button
                     type="button"
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       handleCopy();
                       setShowMoreMenu(false);
                     }}
-                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition"
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-white/10 text-slate-100 transition"
                   >
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy text</span>
+                    <Copy className="w-3.5 h-3.5 text-slate-300" />
+                    <span>Copy response</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onGenerateAudio(message.id, message.content);
+                      setShowMoreMenu(false);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-white/10 text-slate-100 transition"
+                  >
+                    <Volume2 className="w-3.5 h-3.5 text-slate-300" />
+                    <span>Read aloud</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (navigator.share) {
+                        navigator.share({ title: 'TwinMind Response', text: message.content }).catch(() => {});
+                      } else {
+                        handleCopy();
+                      }
+                      setShowMoreMenu(false);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-white/10 text-slate-100 transition"
+                  >
+                    <Share2 className="w-3.5 h-3.5 text-slate-300" />
+                    <span>Share response</span>
                   </button>
                   {onDeleteMessage && (
                     <button
                       type="button"
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         setIsDeleting(true);
                         setShowMoreMenu(false);
                       }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-red-500/20 text-red-400 transition"
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-red-500/20 text-red-400 transition border-t border-white/10 mt-1 pt-1.5"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Delete</span>
+                      <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                      <span>Delete message</span>
                     </button>
                   )}
                 </div>
               </>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Floating Selection Toolbar for Assistant Messages (ChatGPT-style) */}
+      {!isUser && selectionToolbar && (
+        <div
+          style={{
+            position: 'fixed',
+            top: selectionToolbar.top,
+            left: selectionToolbar.left,
+            zIndex: 9999,
+          }}
+          className="flex items-center gap-0.5 p-1 rounded-2xl bg-white dark:bg-[#282a2d] text-slate-800 dark:text-slate-100 border border-slate-200/90 dark:border-slate-700/80 shadow-2xl text-xs font-semibold select-none animate-in fade-in zoom-in-95 duration-100"
+        >
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleAskFromSelection(selectionToolbar.text);
+            }}
+            className="px-2.5 py-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-amber-600 dark:text-amber-400 font-bold transition flex items-center gap-1.5 active:scale-95"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+            <span>Ask {brandName || 'TwinMind'}</span>
+          </button>
+          <div className="w-[1px] h-4 bg-slate-200 dark:bg-slate-700" />
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleCopyFromSelection(selectionToolbar.text);
+            }}
+            className="px-2.5 py-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium transition flex items-center gap-1 active:scale-95"
+          >
+            {selectionCopied ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-500" />
+                <span className="text-emerald-500">Copied</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
+              </>
+            )}
+          </button>
+          <div className="w-[1px] h-4 bg-slate-200 dark:bg-slate-700" />
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleSelectAllInMessage();
+            }}
+            className="px-2.5 py-1.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium transition active:scale-95"
+          >
+            Select all
+          </button>
         </div>
       )}
     </div>
@@ -800,12 +1024,14 @@ interface GroupedChatMessageListProps {
   messages: ChatMessage[];
   channel: ChannelType;
   displayName?: string;
+  brandName?: string;
   onGenerateAudio: (messageId: string, text: string) => void;
   onEditMessage?: (messageId: string, newContent: string) => void;
   onEditAndRegenerate?: (messageId: string, newContent: string) => void;
   onDeleteMessage?: (messageId: string) => void;
   onRetryMessage?: (messageId: string) => void;
   onOpenKnowledgeVault?: (docId?: string | number) => void;
+  onAskAboutSelection?: (text: string) => void;
   searchQuery?: string;
   autoPlayVoice?: boolean;
   voiceSpeed?: number;
@@ -818,12 +1044,14 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
   messages,
   channel,
   displayName = '',
+  brandName = '',
   onGenerateAudio,
   onEditMessage,
   onEditAndRegenerate,
   onDeleteMessage,
   onRetryMessage,
   onOpenKnowledgeVault,
+  onAskAboutSelection,
   searchQuery = '',
   autoPlayVoice = false,
   voiceSpeed = 1,
@@ -861,12 +1089,14 @@ export const GroupedChatMessageList: React.FC<GroupedChatMessageListProps> = ({
                     message={message}
                     channel={channel}
                     displayName={displayName}
+                    brandName={brandName}
                     onGenerateAudio={onGenerateAudio}
                     onEditMessage={onEditMessage}
                     onEditAndRegenerate={onEditAndRegenerate}
                     onDeleteMessage={onDeleteMessage}
                     onRetryMessage={onRetryMessage}
                     onOpenKnowledgeVault={onOpenKnowledgeVault}
+                    onAskAboutSelection={onAskAboutSelection}
                     isFirstInGroup={msgIdx === 0}
                     isLastInGroup={msgIdx === group.messages.length - 1}
                     hasMultipleInGroup={hasMultiple}

@@ -2,7 +2,16 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#020617" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="TwinMind AI" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/icons/favicon-64.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
     <title>TwinMind AI — Personal Digital Twin &amp; Thinking Partner</title>
     <meta name="description" content="TwinMind AI: Live personal digital twin and second brain, faithfully representing communication style, values, and practical reasoning." />
     <meta property="og:title" content="TwinMind AI — Personal Digital Twin &amp; Thinking Partner" />
@@ -16,16 +25,17 @@
       (function() {
         try {
           var saved = localStorage.getItem('twin_theme');
-          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-          var isDark = saved === 'dark' || (!saved && prefersDark) || (saved === 'system' && prefersDark) || !saved;
+          var themeMeta = document.querySelector('meta[name="theme-color"]');
           if (saved === 'light') {
             document.documentElement.classList.remove('dark');
             document.documentElement.classList.add('light');
             document.documentElement.style.colorScheme = 'light';
+            if (themeMeta) themeMeta.setAttribute('content', '#f8fafc');
           } else {
             document.documentElement.classList.add('dark');
             document.documentElement.classList.remove('light');
             document.documentElement.style.colorScheme = 'dark';
+            if (themeMeta) themeMeta.setAttribute('content', '#020617');
           }
         } catch (e) {}
       })();

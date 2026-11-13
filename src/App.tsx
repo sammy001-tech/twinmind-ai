@@ -21,7 +21,12 @@ import { EmptyState } from './components/EmptyState.tsx';
 import { VoiceRecorderModal } from './components/VoiceRecorderModal.tsx';
 import { CommunicationStyleWidget } from './components/CommunicationStyleWidget.tsx';
 import { ThreadRulesDrawer } from './components/ThreadRulesDrawer.tsx';
+import { PullToRefresh } from './components/PullToRefresh.tsx';
 import { useTheme, ThemeMode } from './hooks/useTheme.ts';
+import { useKeyboardOpen } from './hooks/useKeyboardOpen.ts';
+import { useMobileConnectivity } from './hooks/useMobileConnectivity.ts';
+import { useAndroidBackNavigation } from './hooks/useAndroidBackNavigation.ts';
+import type { BackOverlayId } from './utils/mobileHistoryNav.ts';
 import {
   Sparkles,
   Target,
@@ -35,6 +40,8 @@ import {
   ArrowDown,
   Edit3,
   Plus,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
 import { getChatScrollState } from './utils/chatScroll.ts';
 import { normalizeDynamicPromptTemplates } from './utils/dynamicPrompts.ts';
@@ -47,6 +54,7 @@ export default function App() {
   const [channel, setChannel] = useState<ChannelType>('web');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lastFailedAssistantId, setLastFailedAssistantId] = useState<string | null>(null);
   const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([]);
   const [promptTemplatesStatus, setPromptTemplatesStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [promptTemplatesError, setPromptTemplatesError] = useState<string | null>(null);
@@ -155,6 +163,10 @@ export default function App() {
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isStyleWidgetOpen, setIsStyleWidgetOpen] = useState(false);
 
+  // Mobile APK & WebView enhancements
+  const isKeyboardOpen = useKeyboardOpen();
+  const connectivity = useMobileConnectivity();
+
   const handleOpenKnowledgeVault = (docId?: string | number) => {
     setFocusedKnowledgeDocId(docId !== undefined && docId !== null && docId !== '' ? docId : null);
     setActiveTab('knowledge');
@@ -165,6 +177,16 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatchIndex, setSearchMatchIndex] = useState(0);
   const [filterOnlyMatches, setFilterOnlyMatches] = useState(false);
+
+  // Floating text selection quotation / composer prefill state
+  const [composerPrefill, setComposerPrefill] = useState<string>('');
+
+  const handleAskAboutSelection = (selectedText: string) => {
+    setComposerPrefill(`Regarding: "${selectedText}"\n\n`);
+    if (activeTab !== 'chat') {
+      setActiveTab('chat');
+    }
+  };
 
   // Voice Note Playback Preferences & Hands-Free Voice Conversation Mode
   const [autoPlayVoice, setAutoPlayVoice] = useState<boolean>(false);
@@ -181,6 +203,47 @@ export default function App() {
   const [isRulesDrawerOpen, setIsRulesDrawerOpen] = useState(false);
   const [rulesDrawerLoading, setRulesDrawerLoading] = useState(false);
   const [rulesDrawerError, setRulesDrawerError] = useState<string | null>(null);
+
+  useAndroidBackNavigation({
+    activeTab,
+    setActiveTab,
+    openOverlays: {
+      'rules-drawer': isRulesDrawerOpen,
+      'thread-drawer': isThreadDrawerOpen,
+      'style-widget': isStyleWidgetOpen,
+      'voice-modal': isVoiceModalOpen,
+      'custom-prompt-modal': isCustomPromptModalOpen,
+      'export-modal': isExportModalOpen,
+      'telegram-modal': isTelegramModalOpen,
+      'nickname-modal': isNicknameModalOpen,
+      'profile-modal': isProfileModalOpen,
+      'decision-modal': isDecisionModalOpen,
+      'knowledge-modal': isKnowledgeModalOpen,
+      'settings-modal': isSettingsModalOpen,
+      'chat-search': isSearchOpen,
+    },
+    closeOverlay: (overlayId: BackOverlayId) => {
+      switch (overlayId) {
+        case 'rules-drawer': setIsRulesDrawerOpen(false); break;
+        case 'thread-drawer': setIsThreadDrawerOpen(false); break;
+        case 'style-widget': setIsStyleWidgetOpen(false); break;
+        case 'voice-modal': setIsVoiceModalOpen(false); break;
+        case 'custom-prompt-modal': setIsCustomPromptModalOpen(false); break;
+        case 'export-modal': setIsExportModalOpen(false); break;
+        case 'telegram-modal': setIsTelegramModalOpen(false); break;
+        case 'nickname-modal': setIsNicknameModalOpen(false); break;
+        case 'profile-modal': setIsProfileModalOpen(false); break;
+        case 'decision-modal': setIsDecisionModalOpen(false); break;
+        case 'knowledge-modal': setIsKnowledgeModalOpen(false); break;
+        case 'settings-modal': setIsSettingsModalOpen(false); break;
+        case 'chat-search':
+          setIsSearchOpen(false);
+          setSearchQuery('');
+          setFilterOnlyMatches(false);
+          break;
+      }
+    },
+  });
 
   const handleAutoPlayVoiceChange = (val: boolean) => {
     setAutoPlayVoice(val);
@@ -1153,6 +1216,7 @@ export default function App() {
 
     setActiveTab('chat');
     setErrorMessage(null);
+    setLastFailedAssistantId(null);
     isFollowingLatestRef.current = true;
     jumpToLatestInProgressRef.current = false;
     setShowScrollToLatest(false);
@@ -1243,6 +1307,8 @@ export default function App() {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.error || `Server responded with status ${response.status}`);
       }
+
+      connectivity.clearNetworkFailure();
 
       if (!response.body) {
         throw new Error('Readable stream not supported.');
@@ -1581,7 +1647,15 @@ export default function App() {
     } catch (err: unknown) {
       console.error('Chat error:', err);
       const errMsg = err instanceof Error ? err.message : 'Failed to communicate with your digital twin.';
+      if (
+        (typeof navigator !== 'undefined' && navigator.onLine === false) ||
+        err instanceof TypeError ||
+        /network|failed to fetch|load failed|aborted/i.test(errMsg)
+      ) {
+        connectivity.reportNetworkFailure(errMsg);
+      }
       setErrorMessage(errMsg);
+      setLastFailedAssistantId(assistantId);
       const visibleError = `⚠️ Error: ${errMsg}`;
       ensureAssistantMessage({ content: visibleError });
       setMessages((prev) =>
@@ -1768,6 +1842,30 @@ export default function App() {
         }}
       />
 
+      {/* Real-time Mobile Connectivity & Server Reachability Banner */}
+      {connectivity.state !== 'online' && (
+        <div
+          role="status"
+          className="shrink-0 z-30 border-b border-amber-500/30 bg-amber-500/15 px-3.5 py-2 text-xs text-amber-900 dark:text-amber-200 flex items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <WifiOff className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span className="truncate font-medium">
+              {connectivity.lastError || 'Connection interrupted.'}
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={connectivity.isChecking}
+            onClick={() => { void connectivity.checkServerHealth(); }}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-semibold text-[11px] shrink-0 disabled:opacity-60"
+          >
+            <RefreshCw className={`w-3 h-3 ${connectivity.isChecking ? 'animate-spin' : ''}`} />
+            <span>{connectivity.isChecking ? 'Checking...' : 'Reconnect'}</span>
+          </button>
+        </div>
+      )}
+
       {/* Main Content Area Switched by Navigation Tabs */}
       <div className="flex-1 flex flex-row min-h-0 overflow-hidden relative">
         {/* Desktop Persistent Sidebar (Optimized) */}
@@ -1793,40 +1891,43 @@ export default function App() {
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
         {/* Tab 1: Dedicated Home Dashboard */}
         {activeTab === 'home' && (
-          <HomeView
-            brandName={brandName}
-            displayName={displayName}
-            userName={userName}
-            nickname={nickname}
-            onOpenNicknameModal={() => setIsNicknameModalOpen(true)}
-            activeProvider={activeProvider}
-            activeModel={activeModel}
-            providerModels={providerModels}
-            onProviderChange={handleProviderChange}
-            onNavigateTab={(tab) => setActiveTab(tab)}
-            onSelectPrompt={(text) => {
-              setActiveTab('chat');
-              handleSendMessage(text);
-            }}
-            messageCount={messages.length}
-            threads={threads}
-            onSelectThread={handleSelectThread}
-            onStartJourneyThread={handleStartJourneyThread}
-            onOpenThreadDrawer={() => {
-              loadThreads();
-              setIsThreadDrawerOpen(true);
-            }}
-            onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
-            customPrompts={customPrompts}
-            dynamicPrompts={promptTemplates}
-            onRefreshDynamicPrompts={() => fetchPrompts(true)}
-            onOpenCustomPromptModal={() => setIsCustomPromptModalOpen(true)}
-          />
+          <PullToRefresh>
+            <HomeView
+              brandName={brandName}
+              displayName={displayName}
+              userName={userName}
+              nickname={nickname}
+              onOpenNicknameModal={() => setIsNicknameModalOpen(true)}
+              activeProvider={activeProvider}
+              activeModel={activeModel}
+              providerModels={providerModels}
+              onProviderChange={handleProviderChange}
+              onNavigateTab={(tab) => setActiveTab(tab)}
+              onSelectPrompt={(text) => {
+                setActiveTab('chat');
+                handleSendMessage(text);
+              }}
+              messageCount={messages.length}
+              threads={threads}
+              onSelectThread={handleSelectThread}
+              onStartJourneyThread={handleStartJourneyThread}
+              onOpenThreadDrawer={() => {
+                loadThreads();
+                setIsThreadDrawerOpen(true);
+              }}
+              onOpenTelegramModal={() => setIsTelegramModalOpen(true)}
+              customPrompts={customPrompts}
+              dynamicPrompts={promptTemplates}
+              onRefreshDynamicPrompts={() => fetchPrompts(true)}
+              onOpenCustomPromptModal={() => setIsCustomPromptModalOpen(true)}
+            />
+          </PullToRefresh>
         )}
 
         {/* Tab 2: Conversational Thinking Partner Workspace */}
         {activeTab === 'chat' && (
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden overflow-x-hidden max-w-4xl w-full mx-auto">
+          <PullToRefresh>
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden overflow-x-hidden max-w-4xl w-full mx-auto">
             {/* In-Chat Real-Time Search Bar */}
             {isSearchOpen && (
               <ChatSearchInput
@@ -1856,17 +1957,37 @@ export default function App() {
             {/* Error Notification Banner if any */}
             {errorMessage && (
               <div className="mx-3 sm:mx-4 mt-2 p-3 rounded-xl bg-red-950/60 border border-red-800 text-red-200 text-xs flex items-center justify-between gap-3 shadow-lg">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-                  <span>{errorMessage}</span>
+                  <span className="break-words">{errorMessage}</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setErrorMessage(null)}
-                  className="text-red-400 hover:text-red-200 font-medium underline shrink-0"
-                >
-                  Dismiss
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  {lastFailedAssistantId && !isLoading && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const failedId = lastFailedAssistantId;
+                        setLastFailedAssistantId(null);
+                        setErrorMessage(null);
+                        void handleRetryMessage(failedId);
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-100 font-semibold"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Retry</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setErrorMessage(null);
+                      setLastFailedAssistantId(null);
+                    }}
+                    className="text-red-400 hover:text-red-200 font-medium underline shrink-0"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1897,12 +2018,14 @@ export default function App() {
                     messages={displayMessages}
                     channel={channel}
                     displayName={displayName}
+                    brandName={brandName}
                     onGenerateAudio={handleGenerateAudio}
                     onEditMessage={handleEditMessage}
                     onEditAndRegenerate={handleEditAndRegenerate}
                     onDeleteMessage={handleDeleteMessage}
                     onRetryMessage={handleRetryMessage}
                     onOpenKnowledgeVault={handleOpenKnowledgeVault}
+                    onAskAboutSelection={handleAskAboutSelection}
                     searchQuery={searchQuery}
                     autoPlayVoice={autoPlayVoice || voiceConversationMode}
                     voiceSpeed={voiceSpeed}
@@ -1941,6 +2064,10 @@ export default function App() {
 
             {/* Chat Input Dock */}
             <ChatInput
+              threadId={activeThreadId}
+              isKeyboardOpen={isKeyboardOpen}
+              prefillValue={composerPrefill}
+              onPrefillHandled={() => setComposerPrefill('')}
               onSendMessage={handleSendMessage}
               isLoading={isLoading}
               channel={channel}
@@ -1968,7 +2095,8 @@ export default function App() {
               }}
             />
           </div>
-        )}
+        </PullToRefresh>
+      )}
 
         {/* Tab 3: 7-Step Decision Deconstructor */}
         {activeTab === 'advice' && (
@@ -2064,6 +2192,7 @@ export default function App() {
       {/* Mobile-First Categorized Bottom Navigation */}
       <BottomNav
         activeTab={activeTab}
+        hidden={isKeyboardOpen}
         onTabChange={(tab) => {
           if (tab !== 'knowledge') {
             setFocusedKnowledgeDocId(null);
