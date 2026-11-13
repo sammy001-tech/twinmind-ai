@@ -63,6 +63,8 @@ export interface ChatMessage {
   artifacts?: GeneratedArtifact[];
   beliefConflict?: BeliefConflict;
   autonomousMemory?: AutonomousMemoryEvent;
+  verificationEnvelope?: VerificationEnvelope;
+  instructionManifest?: InstructionResolutionManifest;
 }
 
 export interface AutonomousMemoryEvent {
@@ -166,6 +168,7 @@ export interface ChatThread {
   channel?: ChannelType;
   journey_id?: number | null;
   journey_title?: string | null;
+  project_key?: string | null;
   created_at?: string;
   updated_at?: string;
   message_count?: number;
@@ -181,6 +184,17 @@ export interface UserContext {
   channel?: ChannelType;
 }
 
+export type MemorySourceType =
+  | 'direct_directive'
+  | 'imported_doc'
+  | 'in_turn_synthesis'
+  | 'web_research'
+  | 'legacy_import';
+
+export type MemoryConfidenceStatus = 'confirmed' | 'provisional' | 'inferred';
+export type MemoryImpactLevel = 'low' | 'medium' | 'high';
+export type MemoryLifecycleStatus = 'active' | 'superseded' | 'conflicted' | 'unconfirmed';
+
 export interface KnowledgeItem {
   id: number | string;
   title: string;
@@ -189,6 +203,15 @@ export interface KnowledgeItem {
   tags: string[];
   similarity?: number;
   hasEmbedding?: boolean;
+  sourceType?: MemorySourceType;
+  sourceRef?: string | null;
+  confidenceStatus?: MemoryConfidenceStatus;
+  impactLevel?: MemoryImpactLevel;
+  lifecycleStatus?: MemoryLifecycleStatus;
+  supersededById?: number | string | null;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  lastVerifiedAt?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -340,14 +363,159 @@ export interface ThreadPinnedDoc {
   created_at: string;
 }
 
+export type InstructionScope = 'permanent' | 'project' | 'temporary';
+
 export interface PersonaMemoryRecord {
   id: number;
   category: 'preference' | 'opinion' | 'correction' | 'feedback' | string;
   content: string;
   priority: number;
+  scope?: InstructionScope;
+  project_key?: string | null;
+  thread_id?: string | null;
+  expires_at?: string | null;
+  is_active?: boolean;
+  superseded_by_id?: number | null;
   metadata?: Record<string, unknown>;
   created_at: string;
   updated_at?: string;
+}
+
+export type InstructionExclusionReason =
+  | 'expired'
+  | 'inactive'
+  | 'superseded'
+  | 'wrong_project_scope'
+  | 'wrong_thread_scope'
+  | 'overridden_by_higher_precedence'
+  | 'overridden_by_priority';
+
+export interface ResolvedInstructionEntry {
+  id: number;
+  category: string;
+  content: string;
+  priority: number;
+  scope: InstructionScope;
+  project_key?: string | null;
+  thread_id?: string | null;
+  expires_at?: string | null;
+  precedenceRank: number;
+  sourceLabel: string;
+}
+
+export interface ExcludedInstructionEntry {
+  id: number;
+  category: string;
+  content: string;
+  priority: number;
+  scope: InstructionScope;
+  project_key?: string | null;
+  thread_id?: string | null;
+  expires_at?: string | null;
+  reason: InstructionExclusionReason;
+  explanation: string;
+  overriddenByRuleId?: number;
+}
+
+export interface InstructionResolutionManifest {
+  resolvedAt: string;
+  threadId?: string | null;
+  projectKey?: string | null;
+  precedenceOrder: ['system_safety', 'permanent', 'project', 'temporary'];
+  applied: ResolvedInstructionEntry[];
+  overridden: ExcludedInstructionEntry[];
+  excluded: ExcludedInstructionEntry[];
+  scopeCounts: {
+    permanent: number;
+    project: number;
+    temporary: number;
+  };
+}
+
+export type ClaimEvidenceStatus = 'verified' | 'partial' | 'inferred' | 'unverified';
+
+export type ToolExecutionStatus =
+  | 'succeeded_usable'
+  | 'succeeded_insufficient'
+  | 'failed'
+  | 'not_attempted';
+
+export type VerificationOverallPosture =
+  | 'verified'
+  | 'mixed'
+  | 'partial'
+  | 'unverified'
+  | 'unassisted_reasoning';
+
+export interface EvidenceClaimRecord {
+  id: string;
+  statement: string;
+  status: ClaimEvidenceStatus;
+  basisSummary: string;
+  sourceType: 'vault_memory' | 'web_research' | 'tool_output' | 'thread_document' | 'reasoning' | 'conflict_unresolved';
+  sourceRefs: Array<{
+    kind: 'memory' | 'url' | 'tool' | 'pinned_doc';
+    id?: string | number;
+    label: string;
+    url?: string;
+    timestamp?: string | null;
+    confidenceStatus?: MemoryConfidenceStatus;
+    lifecycleStatus?: MemoryLifecycleStatus;
+  }>;
+  gapOrConflictNote?: string;
+}
+
+export interface ToolExecutionLedgerEntry {
+  toolName: string;
+  executionStatus: ToolExecutionStatus;
+  summary: string;
+  errorCode?: string;
+  errorMessage?: string;
+  resultCount?: number;
+  urls?: string[];
+  timestamp: string;
+}
+
+export interface RetrievedMemoryDiagnostic {
+  id: number | string;
+  title: string;
+  category: string;
+  similarity?: number;
+  sourceType: MemorySourceType;
+  confidenceStatus: MemoryConfidenceStatus;
+  impactLevel: MemoryImpactLevel;
+  lifecycleStatus: MemoryLifecycleStatus;
+  supersededById?: number | string | null;
+  validFrom?: string | null;
+  lastVerifiedAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  includedInPrompt: boolean;
+  reason: string;
+}
+
+export interface VerificationEnvelope {
+  generatedAt: string;
+  overallPosture: VerificationOverallPosture;
+  summaryLabel: string;
+  hasToolFailures: boolean;
+  hasInsufficientTools: boolean;
+  hasUnverifiedMaterialClaims: boolean;
+  hasMemoryConflicts: boolean;
+  bannerMessages: Array<{
+    severity: 'error' | 'warning';
+    code: string;
+    message: string;
+  }>;
+  claims: EvidenceClaimRecord[];
+  toolLedger: ToolExecutionLedgerEntry[];
+  memoryDiagnostics: RetrievedMemoryDiagnostic[];
+  conflictsDetected: Array<{
+    existingDocId?: number | string;
+    title: string;
+    explanation: string;
+    impactLevel?: MemoryImpactLevel;
+  }>;
 }
 
 export interface LearningJourney {

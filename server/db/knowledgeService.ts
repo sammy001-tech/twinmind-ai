@@ -1,7 +1,23 @@
 import { GoogleGenAI } from '@google/genai';
 import { neonDb } from './neonService.ts';
 import { modelCatalogService } from '../services/modelCatalogService.ts';
-import type { GraphNode, GraphEdge, KnowledgeGraphData } from '../../src/types/index.ts';
+import {
+  evaluateMemorySupersession,
+  inferImpactLevelFromCategory,
+  rankAndFilterRetrievedMemories,
+  toGovernedRecord,
+  type GovernedKnowledgeRecord,
+} from '../services/memoryGovernanceService.ts';
+import type {
+  GraphNode,
+  GraphEdge,
+  KnowledgeGraphData,
+  MemoryConfidenceStatus,
+  MemoryImpactLevel,
+  MemoryLifecycleStatus,
+  MemorySourceType,
+  RetrievedMemoryDiagnostic,
+} from '../../src/types/index.ts';
 
 export interface KnowledgeDoc {
   id: string | number;
@@ -10,7 +26,17 @@ export interface KnowledgeDoc {
   category: string;
   tags: string[];
   embedding?: number[];
+  sourceType?: MemorySourceType;
+  sourceRef?: string | null;
+  confidenceStatus?: MemoryConfidenceStatus;
+  impactLevel?: MemoryImpactLevel;
+  lifecycleStatus?: MemoryLifecycleStatus;
+  supersededById?: number | string | null;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  lastVerifiedAt?: string | null;
   createdAt: string;
+  updatedAt?: string;
 }
 
 class KnowledgeService {
@@ -65,21 +91,40 @@ class KnowledgeService {
   }
 
   /**
-   * Save a new note or document with automatic vector embedding
+   * Save a new note or document with automatic vector embedding and governance provenance
    */
   public async addDocument(params: {
     title: string;
     content: string;
     category?: string;
     tags?: string[];
+    sourceType?: MemorySourceType;
+    sourceRef?: string | null;
+    confidenceStatus?: MemoryConfidenceStatus;
+    impactLevel?: MemoryImpactLevel;
+    lifecycleStatus?: MemoryLifecycleStatus;
+    validFrom?: string | null;
+    validUntil?: string | null;
+    lastVerifiedAt?: string | null;
   }): Promise<{ id: string | number; success: boolean; hasEmbedding: boolean }> {
-    const { title, content, category = 'personal_note', tags = [] } = params;
+    const {
+      title,
+      content,
+      category = 'personal_note',
+      tags = [],
+      sourceType = 'direct_directive',
+      sourceRef = null,
+      confidenceStatus = 'confirmed',
+      impactLevel = inferImpactLevelFromCategory(category),
+      lifecycleStatus = confidenceStatus === 'confirmed' ? 'active' : 'unconfirmed',
+      validFrom = null,
+      validUntil = null,
+      lastVerifiedAt = null,
+    } = params;
 
-    // Generate vector embedding
     const textToEmbed = `${title}\n\n${content}`;
     const embedding = await this.generateEmbedding(textToEmbed);
 
-    // Store in Neon PostgreSQL if connected
     const status = await neonDb.refreshConnection();
     if (status) {
       const neonRes = await neonDb.saveKnowledge({
@@ -88,6 +133,14 @@ class KnowledgeService {
         category,
         tags,
         embedding: embedding.length > 0 ? embedding : undefined,
+        sourceType,
+        sourceRef,
+        confidenceStatus,
+        impactLevel,
+        lifecycleStatus,
+        validFrom,
+        validUntil,
+        lastVerifiedAt,
       });
       return {
         id: neonRes.id,
@@ -104,37 +157,64 @@ class KnowledgeService {
   }
 
   /**
-   * Semantic vector search across stored documents
+   * Governed hybrid retrieval: filters out superseded records from primary prompt injection
+   * while returning full provenance & exclusion diagnostics.
+   */
+  public async searchWithDiagnostics(
+    queryText: string,
+    limit = 5,
+    threshold = 0.45
+  ): Promise<{
+    primaryRecords: GovernedKnowledgeRecord[];
+    diagnostics: RetrievedMemoryDiagnostic[];
+    conflictsDetected: Array<{
+      existingDocId: number | string;
+      title: string;
+      explanation: string;
+      impactLevel: MemoryImpactLevel;
+    }>;
+  }> {
+    if (!queryText.trim()) {
+      return { primaryRecords: [], diagnostics: [], conflictsDetected: [] };
+    }
+
+    const queryEmbedding = await this.generateEmbedding(queryText);
+    if (queryEmbedding.length > 0) {
+      try {
+        const candidatePoolLimit = Math.max(limit * 3, 12);
+        const rawResults = await neonDb.searchKnowledgeVector(queryEmbedding, candidatePoolLimit, threshold);
+        if (rawResults.length > 0) {
+          const governed = rawResults.map((row) => toGovernedRecord(row as unknown as Record<string, unknown>));
+          return rankAndFilterRetrievedMemories(governed, {
+            limit,
+            includeSupersededInDiagnostics: true,
+          });
+        }
+      } catch (err) {
+        console.warn('[KnowledgeService] Neon vector diagnostic search error:', err);
+      }
+    }
+
+    return { primaryRecords: [], diagnostics: [], conflictsDetected: [] };
+  }
+
+  /**
+   * Semantic vector search across active (non-superseded) stored documents
    */
   public async search(
     queryText: string,
     limit = 5,
     threshold = 0.45
-  ): Promise<Array<{ id: string | number; title: string; content: string; category: string; tags: string[]; similarity: number; createdAt?: string }>> {
-    if (!queryText.trim()) return [];
-
-    const queryEmbedding = await this.generateEmbedding(queryText);
-
-    // If Neon pgvector is connected and embedding generated, query database
-    if (queryEmbedding.length > 0) {
-      try {
-        const neonResults = await neonDb.searchKnowledgeVector(queryEmbedding, limit, threshold);
-        if (neonResults.length > 0) {
-          return neonResults;
-        }
-      } catch (err) {
-        console.warn('[KnowledgeService] Neon vector search error:', err);
-      }
-    }
-
-    return [];
+  ): Promise<GovernedKnowledgeRecord[]> {
+    const result = await this.searchWithDiagnostics(queryText, limit, threshold);
+    return result.primaryRecords;
   }
 
   /**
    * List all documents
    */
-  public async listDocuments(category?: string, query?: string, limit?: number) {
-    return await neonDb.getKnowledgeList(category, query, limit);
+  public async listDocuments(category?: string, query?: string, limit?: number, lifecycleStatus?: string) {
+    return await neonDb.getKnowledgeList(category, query, limit, lifecycleStatus);
   }
 
   /**
@@ -195,11 +275,24 @@ class KnowledgeService {
   }
 
   /**
-   * Update document content, title, category, or tags
+   * Update document content, title, category, tags, or governance metadata
    */
   public async updateDocument(
     id: string | number,
-    patch: { title?: string; content?: string; category?: string; tags?: string[] }
+    patch: {
+      title?: string;
+      content?: string;
+      category?: string;
+      tags?: string[];
+      sourceType?: MemorySourceType;
+      sourceRef?: string | null;
+      confidenceStatus?: MemoryConfidenceStatus;
+      impactLevel?: MemoryImpactLevel;
+      lifecycleStatus?: MemoryLifecycleStatus;
+      supersededById?: number | string | null;
+      validUntil?: string | null;
+      lastVerifiedAt?: string | null;
+    }
   ): Promise<boolean> {
     let embedding: number[] | undefined;
     if (patch.title || patch.content) {
@@ -212,6 +305,61 @@ class KnowledgeService {
       ...patch,
       embedding: embedding && embedding.length > 0 ? embedding : undefined,
     });
+  }
+
+  /**
+   * Apply impact- and confidence-weighted supersession between an existing document and a newer record
+   */
+  public async supersedeDocument(params: {
+    oldDocId: string | number;
+    newDocId: string | number;
+    explicitOverride?: boolean;
+  }): Promise<{
+    success: boolean;
+    action: 'auto_supersede' | 'preserve_conflict';
+    reason: string;
+  }> {
+    const docs = await this.listDocuments(undefined, undefined, 250);
+    const oldDoc = docs.find((d) => String(d.id) === String(params.oldDocId));
+    const newDoc = docs.find((d) => String(d.id) === String(params.newDocId));
+    if (!oldDoc || !newDoc) {
+      return {
+        success: false,
+        action: 'preserve_conflict',
+        reason: 'Target document(s) not found in Knowledge Vault.',
+      };
+    }
+
+    const decision = evaluateMemorySupersession(
+      toGovernedRecord(oldDoc as unknown as Record<string, unknown>),
+      toGovernedRecord(newDoc as unknown as Record<string, unknown>),
+      { explicitOwnerOverride: params.explicitOverride }
+    );
+
+    if (decision.action === 'auto_supersede') {
+      const okOld = await neonDb.updateKnowledge(oldDoc.id, {
+        lifecycleStatus: 'superseded',
+        supersededById: newDoc.id,
+        validUntil: new Date().toISOString(),
+      });
+      const okNew = await neonDb.updateKnowledge(newDoc.id, {
+        lifecycleStatus: 'active',
+        lastVerifiedAt: new Date().toISOString(),
+      });
+      return {
+        success: okOld && okNew,
+        action: decision.action,
+        reason: decision.reason,
+      };
+    }
+
+    const okOld = await neonDb.updateKnowledge(oldDoc.id, { lifecycleStatus: 'conflicted' });
+    const okNew = await neonDb.updateKnowledge(newDoc.id, { lifecycleStatus: 'conflicted' });
+    return {
+      success: okOld && okNew,
+      action: decision.action,
+      reason: decision.reason,
+    };
   }
 
   /**

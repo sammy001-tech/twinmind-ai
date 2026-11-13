@@ -46,14 +46,87 @@ const DEFAULT_SETTINGS: AppSettings = {
   webGroundingEnabled: false,
 };
 
+export function mergeHydratedDatabaseSettings(
+  current: AppSettings,
+  dbSettings: Partial<AppSettings>,
+): { merged: AppSettings; dbNeedsBackfill: boolean } {
+  const dbModels =
+    dbSettings.providerModels && typeof dbSettings.providerModels === 'object'
+      ? (dbSettings.providerModels as Record<string, string | undefined>)
+      : {};
+
+  const mergedProviderModels = {
+    gemini:
+      (typeof dbModels.gemini === 'string' && dbModels.gemini.trim()) ||
+      current.providerModels?.gemini ||
+      '',
+    groq:
+      (typeof dbModels.groq === 'string' && dbModels.groq.trim()) ||
+      current.providerModels?.groq ||
+      '',
+    mistral:
+      (typeof dbModels.mistral === 'string' && dbModels.mistral.trim()) ||
+      current.providerModels?.mistral ||
+      '',
+  };
+
+  const activeProvider =
+    typeof dbSettings.activeProvider === 'string' && dbSettings.activeProvider.trim()
+      ? dbSettings.activeProvider
+      : current.activeProvider;
+
+  let activeModel =
+    typeof dbSettings.activeModel === 'string' && dbSettings.activeModel.trim()
+      ? dbSettings.activeModel
+      : current.activeModel;
+
+  if (!activeModel && activeProvider) {
+    activeModel =
+      mergedProviderModels[activeProvider as keyof typeof mergedProviderModels] || '';
+  }
+
+  const pickString = (dbVal: unknown, curVal: string | undefined): string =>
+    typeof dbVal === 'string' && dbVal.trim() ? dbVal : curVal || '';
+
+  const merged: AppSettings = {
+    ...current,
+    ...dbSettings,
+    brandName: pickString(dbSettings.brandName, current.brandName),
+    userName: pickString(dbSettings.userName, current.userName),
+    nickname: pickString(dbSettings.nickname, current.nickname),
+    voice: pickString(dbSettings.voice, current.voice),
+    ttsModel: pickString(dbSettings.ttsModel, current.ttsModel),
+    activeProvider,
+    activeModel,
+    providerModels: mergedProviderModels,
+  };
+
+  const dbNeedsBackfill =
+    (!dbModels.gemini && Boolean(mergedProviderModels.gemini)) ||
+    (!dbModels.groq && Boolean(mergedProviderModels.groq)) ||
+    (!dbModels.mistral && Boolean(mergedProviderModels.mistral)) ||
+    (!dbSettings.activeProvider && Boolean(activeProvider)) ||
+    (!dbSettings.activeModel && Boolean(activeModel));
+
+  return { merged, dbNeedsBackfill };
+}
+
 class SettingsManager {
   private currentSettings: AppSettings;
   private isLoaded = false;
+  private hasHydratedFromDb = false;
+  private operationQueue: Promise<unknown> = Promise.resolve();
 
   constructor() {
     this.currentSettings = { ...DEFAULT_SETTINGS };
     this.loadFromDisk();
     this.isLoaded = true;
+  }
+
+  private enqueueOperation<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.operationQueue.then(task, task);
+    this.operationQueue = run.catch(() => {});
+    return run;
   }
 
   /**
@@ -139,64 +212,26 @@ class SettingsManager {
     };
   }
 
-  /**
-   * Asynchronously hydrate settings from Neon PostgreSQL if connected
-   */
-  public async syncFromDatabase(): Promise<AppSettings> {
+  private async syncFromDatabaseInternal(): Promise<AppSettings> {
     try {
       const dbSettings = await neonDb.getSettings();
       if (dbSettings && typeof dbSettings === 'object') {
         const typedDb = dbSettings as unknown as Partial<AppSettings>;
-        const dbModels = (typedDb.providerModels && typeof typedDb.providerModels === 'object')
-          ? (typedDb.providerModels as Record<string, string | undefined>)
-          : {};
+        const { merged, dbNeedsBackfill } = mergeHydratedDatabaseSettings(
+          this.currentSettings,
+          typedDb,
+        );
 
-        // Merge provider models preserving non-empty models from memory/disk if DB has empty string
-        const mergedProviderModels = {
-          gemini: (typeof dbModels.gemini === 'string' && dbModels.gemini.trim())
-            || this.currentSettings.providerModels?.gemini
-            || '',
-          groq: (typeof dbModels.groq === 'string' && dbModels.groq.trim())
-            || this.currentSettings.providerModels?.groq
-            || '',
-          mistral: (typeof dbModels.mistral === 'string' && dbModels.mistral.trim())
-            || this.currentSettings.providerModels?.mistral
-            || '',
-        };
-
-        const activeProvider = (typeof typedDb.activeProvider === 'string' && typedDb.activeProvider.trim())
-          ? typedDb.activeProvider
-          : this.currentSettings.activeProvider;
-
-        let activeModel = (typeof typedDb.activeModel === 'string' && typedDb.activeModel.trim())
-          ? typedDb.activeModel
-          : this.currentSettings.activeModel;
-
-        if (!activeModel && activeProvider) {
-          activeModel = mergedProviderModels[activeProvider as keyof typeof mergedProviderModels] || '';
-        }
-
-        this.currentSettings = {
-          ...this.currentSettings,
-          ...typedDb,
-          activeProvider,
-          activeModel,
-          providerModels: mergedProviderModels,
-        };
-
+        this.currentSettings = merged;
+        this.hasHydratedFromDb = true;
         this.saveToDisk();
 
-        // If in-memory settings had models that database was missing, sync back to database
-        const dbNeedsUpdate =
-          (!dbModels.gemini && Boolean(mergedProviderModels.gemini)) ||
-          (!dbModels.groq && Boolean(mergedProviderModels.groq)) ||
-          (!dbModels.mistral && Boolean(mergedProviderModels.mistral)) ||
-          (!typedDb.activeProvider && Boolean(activeProvider)) ||
-          (!typedDb.activeModel && Boolean(activeModel));
-
-        if (dbNeedsUpdate) {
+        if (dbNeedsBackfill) {
           await neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>);
         }
+      } else if (neonDb.isDatabaseConnected()) {
+        // Connected DB simply has no global_settings row yet; mark hydrated so subsequent saves don't stall.
+        this.hasHydratedFromDb = true;
       }
     } catch (err) {
       console.warn('[SettingsManager] Could not sync settings from Neon DB:', err);
@@ -205,137 +240,160 @@ class SettingsManager {
   }
 
   /**
+   * Asynchronously hydrate settings from Neon PostgreSQL if connected
+   */
+  public syncFromDatabase(): Promise<AppSettings> {
+    return this.enqueueOperation(() => this.syncFromDatabaseInternal());
+  }
+
+  /**
    * Atomic update of settings across Memory, Disk, and Neon DB
    */
-  public async updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
-    const rawPatchModels = (patch.providerModels && typeof patch.providerModels === 'object')
-      ? (patch.providerModels as Record<string, string | undefined>)
-      : {};
-
-    const updatedProviderModels = {
-      gemini: (typeof rawPatchModels.gemini === 'string' && rawPatchModels.gemini.trim())
-        || (patch.providerModels && 'gemini' in patch.providerModels ? patch.providerModels.gemini : this.currentSettings.providerModels?.gemini)
-        || '',
-      groq: (typeof rawPatchModels.groq === 'string' && rawPatchModels.groq.trim())
-        || (patch.providerModels && 'groq' in patch.providerModels ? patch.providerModels.groq : this.currentSettings.providerModels?.groq)
-        || '',
-      mistral: (typeof rawPatchModels.mistral === 'string' && rawPatchModels.mistral.trim())
-        || (patch.providerModels && 'mistral' in patch.providerModels ? patch.providerModels.mistral : this.currentSettings.providerModels?.mistral)
-        || '',
-    };
-
-    // If an activeModel was specified for a specific provider
-    if (typeof patch.activeModel === 'string' && patch.activeModel.trim()) {
-      const targetProvider = patch.activeProvider || this.currentSettings.activeProvider;
-      if (targetProvider === 'gemini' || targetProvider === 'groq' || targetProvider === 'mistral') {
-        updatedProviderModels[targetProvider] = patch.activeModel.trim();
+  public updateSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+    return this.enqueueOperation(async () => {
+      // Ensure DB state is hydrated BEFORE merging partial patches (prevents early boot writes
+      // such as activeThreadId or themeMode from overwriting persisted Neon settings with empty defaults).
+      if (!this.hasHydratedFromDb && neonDb.getActiveUrl().url) {
+        await this.syncFromDatabaseInternal();
       }
-    }
 
-    const activeProvider = (typeof patch.activeProvider === 'string' && patch.activeProvider.trim())
-      ? patch.activeProvider
-      : this.currentSettings.activeProvider;
+      const rawPatchModels = (patch.providerModels && typeof patch.providerModels === 'object')
+        ? (patch.providerModels as Record<string, string | undefined>)
+        : {};
 
-    // If activeProvider changed or is set, resolve activeModel
-    let activeModel = typeof patch.activeModel === 'string' && patch.activeModel.trim()
-      ? patch.activeModel.trim()
-      : this.currentSettings.activeModel;
+      const updatedProviderModels = {
+        gemini: (typeof rawPatchModels.gemini === 'string' && rawPatchModels.gemini.trim())
+          || (patch.providerModels && 'gemini' in patch.providerModels ? patch.providerModels.gemini : this.currentSettings.providerModels?.gemini)
+          || '',
+        groq: (typeof rawPatchModels.groq === 'string' && rawPatchModels.groq.trim())
+          || (patch.providerModels && 'groq' in patch.providerModels ? patch.providerModels.groq : this.currentSettings.providerModels?.groq)
+          || '',
+        mistral: (typeof rawPatchModels.mistral === 'string' && rawPatchModels.mistral.trim())
+          || (patch.providerModels && 'mistral' in patch.providerModels ? patch.providerModels.mistral : this.currentSettings.providerModels?.mistral)
+          || '',
+      };
 
-    if (activeProvider && !activeModel) {
-      if (activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral') {
-        activeModel = updatedProviderModels[activeProvider] || '';
+      // If an activeModel was specified for a specific provider
+      if (typeof patch.activeModel === 'string' && patch.activeModel.trim()) {
+        const targetProvider = patch.activeProvider || this.currentSettings.activeProvider;
+        if (targetProvider === 'gemini' || targetProvider === 'groq' || targetProvider === 'mistral') {
+          updatedProviderModels[targetProvider] = patch.activeModel.trim();
+        }
       }
-    }
 
-    // Ignore client-sent masks so an unchanged secret cannot be replaced with its display placeholder.
-    const filteredPatch = { ...patch } as Partial<AppSettings> & { telegramToken?: string };
-    const isMasked = (val?: string) => typeof val === 'string' && (val.includes('...') || val === '********');
+      const activeProvider = (typeof patch.activeProvider === 'string' && patch.activeProvider.trim())
+        ? patch.activeProvider
+        : this.currentSettings.activeProvider;
 
-    if (isMasked(filteredPatch.customGeminiKey)) delete filteredPatch.customGeminiKey;
-    if (isMasked(filteredPatch.customGroqKey)) delete filteredPatch.customGroqKey;
-    if (isMasked(filteredPatch.customMistralKey)) delete filteredPatch.customMistralKey;
-    if (isMasked(filteredPatch.customTavilyKey)) delete filteredPatch.customTavilyKey;
-    if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
-    if (isMasked(filteredPatch.telegramToken)) delete filteredPatch.telegramToken;
+      const providerSwitched =
+        typeof patch.activeProvider === 'string' &&
+        patch.activeProvider.trim().length > 0 &&
+        patch.activeProvider !== this.currentSettings.activeProvider;
 
-    if ('soulTuning' in filteredPatch) {
-      const validation = validateSoulTuningInput(filteredPatch.soulTuning, this.currentSettings.soulTuning);
-      if (!validation.valid) {
-        throw new Error((validation as { valid: false; error: string }).error);
+      // Resolve activeModel cleanly, avoiding stale models from a previously active provider
+      let activeModel = typeof patch.activeModel === 'string' && patch.activeModel.trim()
+        ? patch.activeModel.trim()
+        : providerSwitched
+          ? ''
+          : this.currentSettings.activeModel;
+
+      if (activeProvider && !activeModel) {
+        if (activeProvider === 'gemini' || activeProvider === 'groq' || activeProvider === 'mistral') {
+          activeModel = updatedProviderModels[activeProvider] || '';
+        }
       }
-      filteredPatch.soulTuning = validation.config;
-    }
 
-    if ('thinkingLevel' in filteredPatch && filteredPatch.thinkingLevel !== undefined) {
-      if (!isValidThinkingLevel(filteredPatch.thinkingLevel)) {
-        throw new Error('INVALID_THINKING_LEVEL: thinking level must be "low", "medium", or "high"');
-      }
-    }
+      // Ignore client-sent masks so an unchanged secret cannot be replaced with its display placeholder.
+      const filteredPatch = { ...patch } as Partial<AppSettings> & { telegramToken?: string };
+      const isMasked = (val?: string) => typeof val === 'string' && (val.includes('...') || val === '********');
 
-    const nextSettings: AppSettings = {
-      ...this.currentSettings,
-      ...filteredPatch,
-      ...(activeProvider ? { activeProvider } : {}),
-      activeModel,
-      providerModels: updatedProviderModels,
-    };
-    const durableFields = [
-      'activeProvider',
-      'activeModel',
-      'providerModels',
-      'customGeminiKey',
-      'customGroqKey',
-      'customMistralKey',
-      'customTavilyKey',
-      'twilioAccountSid',
-      'twilioAuthToken',
-      'twilioWhatsAppNumber',
-      'userPhoneNumber',
-      'telegramToken',
-      'telegramMode',
-      'telegramWebhookUrl',
-      'telegramOwnerId',
-      'telegramOwnerUsername',
-      'telegramPairingCode',
-      'soulTuning',
-      'thinkingLevel',
-      'webGroundingEnabled',
-    ] as const;
-    const requiresDurableWrite = durableFields.some((field) =>
-      Object.prototype.hasOwnProperty.call(filteredPatch, field)
-    );
+      if (isMasked(filteredPatch.customGeminiKey)) delete filteredPatch.customGeminiKey;
+      if (isMasked(filteredPatch.customGroqKey)) delete filteredPatch.customGroqKey;
+      if (isMasked(filteredPatch.customMistralKey)) delete filteredPatch.customMistralKey;
+      if (isMasked(filteredPatch.customTavilyKey)) delete filteredPatch.customTavilyKey;
+      if (isMasked(filteredPatch.twilioAuthToken)) delete filteredPatch.twilioAuthToken;
+      if (isMasked(filteredPatch.telegramToken)) delete filteredPatch.telegramToken;
 
-    // Credentials and integration configuration must survive restarts. Never acknowledge a
-    // durable setting unless Neon confirms the write; do not commit it to memory first.
-    if (requiresDurableWrite) {
-      const connected = await neonDb.ensureConnected();
-      if (!connected) {
-        throw new Error(
-          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
-        );
+      if ('soulTuning' in filteredPatch) {
+        const validation = validateSoulTuningInput(filteredPatch.soulTuning, this.currentSettings.soulTuning);
+        if (!validation.valid) {
+          throw new Error((validation as { valid: false; error: string }).error);
+        }
+        filteredPatch.soulTuning = validation.config;
       }
-      const persisted = await neonDb.saveSettings(nextSettings as unknown as Record<string, unknown>);
-      if (!persisted) {
-        throw new Error(
-          'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
-        );
+
+      if ('thinkingLevel' in filteredPatch && filteredPatch.thinkingLevel !== undefined) {
+        if (!isValidThinkingLevel(filteredPatch.thinkingLevel)) {
+          throw new Error('INVALID_THINKING_LEVEL: thinking level must be "low", "medium", or "high"');
+        }
       }
+
+      const nextSettings: AppSettings = {
+        ...this.currentSettings,
+        ...filteredPatch,
+        ...(activeProvider ? { activeProvider } : {}),
+        activeModel,
+        providerModels: updatedProviderModels,
+      };
+      const durableFields = [
+        'activeProvider',
+        'activeModel',
+        'providerModels',
+        'customGeminiKey',
+        'customGroqKey',
+        'customMistralKey',
+        'customTavilyKey',
+        'twilioAccountSid',
+        'twilioAuthToken',
+        'twilioWhatsAppNumber',
+        'userPhoneNumber',
+        'telegramToken',
+        'telegramMode',
+        'telegramWebhookUrl',
+        'telegramOwnerId',
+        'telegramOwnerUsername',
+        'telegramPairingCode',
+        'soulTuning',
+        'thinkingLevel',
+        'webGroundingEnabled',
+      ] as const;
+      const requiresDurableWrite = durableFields.some((field) =>
+        Object.prototype.hasOwnProperty.call(filteredPatch, field)
+      );
+
+      // Credentials and integration configuration must survive restarts. Never acknowledge a
+      // durable setting unless Neon confirms the write; do not commit it to memory first.
+      if (requiresDurableWrite) {
+        const connected = await neonDb.ensureConnected();
+        if (!connected) {
+          throw new Error(
+            'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
+          );
+        }
+        const persisted = await neonDb.saveSettings(nextSettings as unknown as Record<string, unknown>);
+        if (!persisted) {
+          throw new Error(
+            'CREDENTIAL_PERSISTENCE_UNAVAILABLE: Credentials and integration settings require a healthy Neon PostgreSQL connection; no change was applied.',
+          );
+        }
+        this.hasHydratedFromDb = true;
+        this.currentSettings = nextSettings;
+        this.saveToDisk();
+        return this.getSettings();
+      }
+
       this.currentSettings = nextSettings;
       this.saveToDisk();
+
+      // Non-secret preferences may still be saved locally when Neon is unavailable.
+      try {
+        await neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>);
+      } catch (err) {
+        console.warn('[SettingsManager] Neon DB save error:', err);
+      }
+
       return this.getSettings();
-    }
-
-    this.currentSettings = nextSettings;
-    this.saveToDisk();
-
-    // Non-secret preferences may still be saved locally when Neon is unavailable.
-    try {
-      await neonDb.saveSettings(this.currentSettings as unknown as Record<string, unknown>);
-    } catch (err) {
-      console.warn('[SettingsManager] Neon DB save error:', err);
-    }
-
-    return this.getSettings();
+    });
   }
 
   /**

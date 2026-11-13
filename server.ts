@@ -38,7 +38,15 @@ import {
 import { scanDuplicateVaultDocuments } from './server/services/vaultMemoryUpdateService.ts';
 import { scheduledCheckinService, validateScheduledCheckinInput } from './server/services/scheduledCheckinService.ts';
 import { buildArtifactPreview } from './server/services/artifactPreviewService.ts';
-import type { AutonomousMemoryEvent } from './src/types/index.ts';
+import { memoryService } from './server/services/memoryService.ts';
+import { normalizeInstructionScope, normalizeProjectKey } from './server/services/instructionRegistryService.ts';
+import { buildVerificationEnvelope, type ExecutedToolInput } from './server/services/verificationEnvelopeService.ts';
+import type {
+  AutonomousMemoryEvent,
+  InstructionResolutionManifest,
+  RetrievedMemoryDiagnostic,
+  VerificationEnvelope,
+} from './src/types/index.ts';
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -900,6 +908,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       customMistralKey,
       customTavilyKey,
       thinkingLevel,
+      projectKey: requestedProjectKey,
     } = req.body;
 
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
@@ -911,6 +920,11 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     const firstUserMsg = messages.find((m: { role: string }) => m.role === 'user');
     const effectiveThreadTitle =
       threadTitle || (firstUserMsg?.content ? firstUserMsg.content.slice(0, 48) : '');
+    const resolvedBodyProjectKey = requestedProjectKey !== undefined
+      ? normalizeProjectKey(requestedProjectKey)
+      : (neonDb.isDatabaseConnected()
+          ? await neonDb.getThreadProjectKey(effectiveThreadId).catch(() => null)
+          : null);
 
     // Ensure thread exists in Neon database
 
@@ -946,15 +960,41 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Semantic vector knowledge recall via Neon pgvector
+    // Governed semantic vector knowledge recall & deterministic scoped instruction resolution
     const queryUserMsg = [...messages].reverse().find((m: { role: string; content: string }) => m.role === 'user');
-    let recalledKnowledge: Array<{ title: string; content: string; category?: string; similarity?: number }> = [];
+    let recalledKnowledge: Array<{
+      id?: string | number;
+      title: string;
+      content: string;
+      category?: string;
+      similarity?: number;
+      confidenceStatus?: string;
+      lifecycleStatus?: string;
+      sourceType?: string;
+      impactLevel?: string;
+    }> = [];
+    let retrievalDiagnostics: RetrievedMemoryDiagnostic[] = [];
     if (queryUserMsg && queryUserMsg.content) {
       try {
-        recalledKnowledge = await knowledgeService.search(queryUserMsg.content, 3, 0.45);
+        const diagResult = await knowledgeService.searchWithDiagnostics(queryUserMsg.content, 5, 0.42);
+        recalledKnowledge = diagResult.primaryRecords;
+        retrievalDiagnostics = diagResult.diagnostics;
       } catch (kErr) {
         console.warn('Vector knowledge recall warning in chat:', kErr);
       }
+    }
+
+    let resolvedInstructionManifest: InstructionResolutionManifest | undefined;
+    let resolvedLearnedPromptBlock = '';
+    try {
+      const instResult = await memoryService.resolveInstructionsForThread({
+        threadId: effectiveThreadId,
+        projectKey: resolvedBodyProjectKey,
+      });
+      resolvedInstructionManifest = instResult.manifest;
+      resolvedLearnedPromptBlock = instResult.promptBlock;
+    } catch (iErr) {
+      console.warn('Instruction registry resolution warning in chat:', iErr);
     }
 
     // Cancel work when the response stream is abandoned, not when the request body finishes reading.
@@ -1004,6 +1044,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       recalledKnowledge,
       pinnedDocs,
       activeThreadTitle: effectiveThreadTitle,
+      learnedContext: resolvedLearnedPromptBlock,
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: effectiveThinkingLevel,
       communicationStyleDirective,
@@ -1027,6 +1068,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
           model: targetModel,
           threadId: effectiveThreadId,
           threadTitle: effectiveThreadTitle,
+          projectKey: resolvedBodyProjectKey,
           userContext: {
             nickname: effectiveNickname,
             voice: effectiveVoice,
@@ -1036,12 +1078,17 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       })}\n\n`
     );
 
+    if (resolvedInstructionManifest) {
+      res.write(`data: ${JSON.stringify({ instructionManifest: resolvedInstructionManifest })}\n\n`);
+    }
+
     if (autonomousMemoryEvent) {
       res.write(`data: ${JSON.stringify({ autonomousMemory: autonomousMemoryEvent })}\n\n`);
     }
 
-    // Track full reply for database persistence
+    // Track full reply & tool traces for verification envelope and database persistence
     let fullReply = '';
+    let executedToolsForEnvelope: ExecutedToolInput[] = [];
 
     // Keep-alive heartbeat every 10s to prevent proxy timeouts
     const heartbeatTimer = setInterval(() => {
@@ -1170,6 +1217,14 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       // Store artifacts for the save step
       (req as any)._artifacts = artifacts;
+      executedToolsForEnvelope = swarmSession.traces.flatMap((trace) =>
+        trace.tools.map((t) => ({
+          toolName: t.toolName,
+          args: t.input,
+          result: t.output,
+          timestamp: t.timestamp,
+        }))
+      );
     } else {
       // Autonomous execution via multi-provider TwinAgentService (Gemini, Groq, Mistral) with live provider streaming
       let streamedLive = false;
@@ -1179,6 +1234,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         audioData: lastAudioData,
         channel: (channel as any) || 'web',
         threadId: effectiveThreadId,
+        projectKey: resolvedBodyProjectKey,
         pinnedDocs,
         conversationHistory,
         userName: effectiveUserName,
@@ -1193,6 +1249,12 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
         signal: abortController.signal,
         providerOverride: targetProvider as any,
         modelOverride: targetModel,
+        onInstructionManifest: (manifest) => {
+          resolvedInstructionManifest = manifest;
+          if (!res.writableEnded) {
+            res.write(`data: ${JSON.stringify({ instructionManifest: manifest })}\n\n`);
+          }
+        },
         onTextChunk: (delta) => {
           if (!res.writableEnded && delta) {
             streamedLive = true;
@@ -1220,6 +1282,13 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
 
       clearInterval(heartbeatTimer);
       fullReply = turnResult.reply || fullReply;
+      executedToolsForEnvelope = turnResult.toolsExecuted || [];
+      if (turnResult.retrievalDiagnostics && turnResult.retrievalDiagnostics.length > 0) {
+        retrievalDiagnostics = turnResult.retrievalDiagnostics;
+      }
+      if (turnResult.instructionManifest) {
+        resolvedInstructionManifest = turnResult.instructionManifest;
+      }
 
       // Only surface generated files that passed real format and saved-file validation.
       const artifactToolResults = turnResult.toolsExecuted.filter((tool) => tool.toolName === 'generateArtifact');
@@ -1300,6 +1369,27 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       console.warn('[ContradictionDetector] Evaluation warning:', cErr);
     }
 
+    // Build & emit structured server-side VerificationEnvelope (evidence provenance + 4-state tool ledger)
+    const verificationEnvelope: VerificationEnvelope = buildVerificationEnvelope({
+      userPrompt: lastUserQuery,
+      replyText: fullReply,
+      toolsExecuted: executedToolsForEnvelope,
+      memoryDiagnostics: retrievalDiagnostics,
+      pinnedDocs,
+      researchAttemptExpected: isSwarmRequested,
+      beliefConflict: detectedConflict
+        ? {
+            existingDocId: detectedConflict.existingDocId,
+            existingTitle: detectedConflict.existingTitle,
+            explanation: detectedConflict.explanation,
+          }
+        : null,
+    });
+
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ verificationEnvelope })}\n\n`);
+    }
+
     // If retrying or replacing an assistant turn, prune the old assistant turn durably
     const numericReplaceAssistantDbId = Number(replaceAssistantDbId);
     if (Number.isSafeInteger(numericReplaceAssistantDbId) && numericReplaceAssistantDbId > 0) {
@@ -1364,6 +1454,8 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
             artifacts: (req as any)._artifacts || [],
             beliefConflict: detectedConflict || undefined,
             autonomousMemory: autonomousMemoryEvent || undefined,
+            verificationEnvelope,
+            instructionManifest: resolvedInstructionManifest || undefined,
           },
         });
       } catch (dbErr) {
@@ -1374,7 +1466,12 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     // Persist the thread record and surface the result; missing database state is not reported as saved.
     let threadPersisted = false;
     try {
-      threadPersisted = await neonDb.saveThread({ id: effectiveThreadId, title: effectiveThreadTitle, channel });
+      threadPersisted = await neonDb.saveThread({
+        id: effectiveThreadId,
+        title: effectiveThreadTitle,
+        channel,
+        project_key: resolvedBodyProjectKey,
+      });
     } catch (dbErr) {
       console.warn('[NeonDB] Thread persistence failed:', dbErr instanceof Error ? dbErr.message : 'unknown error');
     }
@@ -2548,7 +2645,8 @@ app.get('/api/knowledge', async (req: Request, res: Response) => {
   try {
     const category = req.query.category as string | undefined;
     const query = req.query.query as string | undefined;
-    const docs = await knowledgeService.listDocuments(category, query);
+    const lifecycleStatus = req.query.lifecycleStatus as string | undefined;
+    const docs = await knowledgeService.listDocuments(category, query, undefined, lifecycleStatus);
     res.json({ success: true, documents: docs });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to list knowledge docs' });
@@ -2557,12 +2655,36 @@ app.get('/api/knowledge', async (req: Request, res: Response) => {
 
 app.post('/api/knowledge', async (req: Request, res: Response) => {
   try {
-    const { title, content, category, tags } = req.body;
+    const {
+      title,
+      content,
+      category,
+      tags,
+      sourceType,
+      sourceRef,
+      confidenceStatus,
+      impactLevel,
+      lifecycleStatus,
+      validFrom,
+      validUntil,
+    } = req.body;
     if (!title || !content) {
       res.status(400).json({ error: 'Title and content are required' });
       return;
     }
-    const result = await knowledgeService.addDocument({ title, content, category, tags });
+    const result = await knowledgeService.addDocument({
+      title,
+      content,
+      category,
+      tags,
+      sourceType,
+      sourceRef,
+      confidenceStatus,
+      impactLevel,
+      lifecycleStatus,
+      validFrom,
+      validUntil,
+    });
     res.json(result);
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to save knowledge document' });
@@ -2572,9 +2694,22 @@ app.post('/api/knowledge', async (req: Request, res: Response) => {
 app.patch('/api/knowledge/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { title, content, category, tags } = req.body || {};
+    const {
+      title,
+      content,
+      category,
+      tags,
+      sourceType,
+      sourceRef,
+      confidenceStatus,
+      impactLevel,
+      lifecycleStatus,
+      supersededById,
+      validUntil,
+      lastVerifiedAt,
+    } = req.body || {};
 
-    const patch: { title?: string; content?: string; category?: string; tags?: string[] } = {};
+    const patch: Record<string, unknown> = {};
     if (title !== undefined) {
       if (typeof title !== 'string' || !title.trim()) {
         res.status(400).json({ success: false, error: 'Title must be a non-empty string' });
@@ -2603,13 +2738,21 @@ app.patch('/api/knowledge/:id', async (req: Request, res: Response) => {
       }
       patch.tags = tags.map((t) => String(t).trim()).filter(Boolean);
     }
+    if (sourceType !== undefined) patch.sourceType = sourceType;
+    if (sourceRef !== undefined) patch.sourceRef = sourceRef;
+    if (confidenceStatus !== undefined) patch.confidenceStatus = confidenceStatus;
+    if (impactLevel !== undefined) patch.impactLevel = impactLevel;
+    if (lifecycleStatus !== undefined) patch.lifecycleStatus = lifecycleStatus;
+    if (supersededById !== undefined) patch.supersededById = supersededById;
+    if (validUntil !== undefined) patch.validUntil = validUntil;
+    if (lastVerifiedAt !== undefined) patch.lastVerifiedAt = lastVerifiedAt;
 
     if (Object.keys(patch).length === 0) {
-      res.status(400).json({ success: false, error: 'At least one field (title, content, category, tags) is required' });
+      res.status(400).json({ success: false, error: 'At least one updatable field is required' });
       return;
     }
 
-    const updated = await knowledgeService.updateDocument(id, patch);
+    const updated = await knowledgeService.updateDocument(id, patch as any);
     if (!updated) {
       res.status(404).json({ success: false, error: 'Document not found or database unavailable' });
       return;
@@ -2646,6 +2789,38 @@ app.post('/api/knowledge/search', async (req: Request, res: Response) => {
     res.json({ success: true, results });
   } catch (err: unknown) {
     res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Vector search failed' });
+  }
+});
+
+app.post('/api/knowledge/diagnostics', async (req: Request, res: Response) => {
+  try {
+    const { query, limit = 5, threshold = 0.35 } = req.body || {};
+    if (!query || typeof query !== 'string' || !query.trim()) {
+      res.status(400).json({ success: false, error: 'Test query is required.' });
+      return;
+    }
+    const diag = await knowledgeService.searchWithDiagnostics(query.trim(), Number(limit), Number(threshold));
+    res.json({ success: true, ...diag });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Retrieval diagnostic failed' });
+  }
+});
+
+app.post('/api/knowledge/conflicts/supersede', async (req: Request, res: Response) => {
+  try {
+    const { oldDocId, newDocId, explicitOverride = false } = req.body || {};
+    if (!oldDocId || !newDocId) {
+      res.status(400).json({ success: false, error: 'oldDocId and newDocId are required.' });
+      return;
+    }
+    const outcome = await knowledgeService.supersedeDocument({
+      oldDocId,
+      newDocId,
+      explicitOverride: Boolean(explicitOverride),
+    });
+    res.json(outcome);
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Supersession failed' });
   }
 });
 
@@ -2844,6 +3019,16 @@ app.post('/api/persona-memories', async (req: Request, res: Response) => {
   const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
   const rawPriority = req.body?.priority !== undefined ? Number(req.body.priority) : 2;
   const priority = Number.isSafeInteger(rawPriority) && rawPriority >= 1 && rawPriority <= 10 ? rawPriority : 2;
+  const scope = normalizeInstructionScope(req.body?.scope);
+  const projectKey = normalizeProjectKey(req.body?.projectKey ?? req.body?.project_key);
+  const threadId = typeof req.body?.threadId === 'string' && req.body.threadId.trim()
+    ? req.body.threadId.trim()
+    : typeof req.body?.thread_id === 'string' && req.body.thread_id.trim()
+      ? req.body.thread_id.trim()
+      : null;
+  const rawExpiresAt = req.body?.expiresAt ?? req.body?.expires_at ?? null;
+  const expiresAt = typeof rawExpiresAt === 'string' && rawExpiresAt.trim() ? rawExpiresAt.trim() : null;
+  const isActive = req.body?.isActive !== undefined ? Boolean(req.body.isActive) : (req.body?.is_active !== undefined ? Boolean(req.body.is_active) : true);
 
   if (!ALLOWED_PERSONA_CATEGORIES.has(category)) {
     res.status(400).json({ success: false, error: 'category must be preference, opinion, correction, or feedback.' });
@@ -2853,9 +3038,23 @@ app.post('/api/persona-memories', async (req: Request, res: Response) => {
     res.status(400).json({ success: false, error: 'content is required.' });
     return;
   }
+  if (scope === 'project' && !projectKey) {
+    res.status(400).json({ success: false, error: 'project_key is required for project-scoped instructions.' });
+    return;
+  }
 
   try {
-    const id = await neonDb.savePersonaMemory({ category, content, priority, metadata: { source: 'owner_ui' } });
+    const id = await neonDb.savePersonaMemory({
+      category: category as any,
+      content,
+      priority,
+      scope,
+      project_key: projectKey,
+      thread_id: threadId,
+      expires_at: expiresAt,
+      is_active: isActive,
+      metadata: { source: 'owner_ui' },
+    });
     if (!id) {
       res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Failed to save active rule to database.' });
       return;
@@ -2877,7 +3076,7 @@ app.patch('/api/persona-memories/:id', async (req: Request, res: Response) => {
     return;
   }
 
-  const patch: { category?: string; content?: string; priority?: number } = {};
+  const patch: Record<string, unknown> = {};
   if (req.body?.category !== undefined) {
     const cat = String(req.body.category).trim().toLowerCase();
     if (!ALLOWED_PERSONA_CATEGORIES.has(cat)) {
@@ -2902,13 +3101,34 @@ app.patch('/api/persona-memories/:id', async (req: Request, res: Response) => {
     }
     patch.priority = p;
   }
+  if (req.body?.scope !== undefined) {
+    patch.scope = normalizeInstructionScope(req.body.scope);
+  }
+  if (req.body?.projectKey !== undefined || req.body?.project_key !== undefined) {
+    patch.project_key = normalizeProjectKey(req.body.projectKey ?? req.body.project_key);
+  }
+  if (req.body?.threadId !== undefined || req.body?.thread_id !== undefined) {
+    const rawTid = req.body.threadId ?? req.body.thread_id;
+    patch.thread_id = typeof rawTid === 'string' && rawTid.trim() ? rawTid.trim() : null;
+  }
+  if (req.body?.expiresAt !== undefined || req.body?.expires_at !== undefined) {
+    const rawExp = req.body.expiresAt ?? req.body.expires_at;
+    patch.expires_at = typeof rawExp === 'string' && rawExp.trim() ? rawExp.trim() : null;
+  }
+  if (req.body?.isActive !== undefined || req.body?.is_active !== undefined) {
+    patch.is_active = Boolean(req.body.isActive ?? req.body.is_active);
+  }
+  if (req.body?.supersededById !== undefined || req.body?.superseded_by_id !== undefined) {
+    const rawSup = req.body.supersededById ?? req.body.superseded_by_id;
+    patch.superseded_by_id = rawSup === null ? null : Number(rawSup);
+  }
 
   if (Object.keys(patch).length === 0) {
-    res.status(400).json({ success: false, error: 'At least one field (category, content, priority) is required.' });
+    res.status(400).json({ success: false, error: 'At least one updatable field is required.' });
     return;
   }
 
-  const updated = await neonDb.updatePersonaMemory(id, patch);
+  const updated = await neonDb.updatePersonaMemory(id, patch as any);
   if (!updated) {
     res.status(404).json({ success: false, error: 'Active rule not found.' });
     return;
@@ -2932,6 +3152,53 @@ app.delete('/api/persona-memories/:id', async (req: Request, res: Response) => {
     return;
   }
   res.json({ success: true, id });
+});
+
+// Thread Scoped Instructions & Project Binding Endpoints
+app.get('/api/threads/:id/instructions', async (req: Request, res: Response) => {
+  const threadId = req.params.id?.trim();
+  if (!threadId) {
+    res.status(400).json({ success: false, error: 'Thread ID is required.' });
+    return;
+  }
+  try {
+    const explicitProjectKey = typeof req.query.projectKey === 'string'
+      ? normalizeProjectKey(req.query.projectKey)
+      : undefined;
+    const resolved = await memoryService.resolveInstructionsForThread({
+      threadId,
+      projectKey: explicitProjectKey,
+    });
+    res.json({ success: true, manifest: resolved.manifest });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to resolve thread instructions' });
+  }
+});
+
+app.put('/api/threads/:id/project', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const threadId = req.params.id?.trim();
+  if (!threadId) {
+    res.status(400).json({ success: false, error: 'Thread ID is required.' });
+    return;
+  }
+  const rawProjectKey = req.body?.projectKey ?? req.body?.project_key ?? null;
+  const projectKey = rawProjectKey === null || rawProjectKey === '' ? null : normalizeProjectKey(rawProjectKey);
+  const ok = await neonDb.setThreadProjectKey(
+    threadId,
+    projectKey,
+    typeof req.body?.threadTitle === 'string' ? req.body.threadTitle : 'Scoped Conversation',
+    typeof req.body?.channel === 'string' ? req.body.channel : 'web'
+  );
+  if (!ok) {
+    res.status(503).json({ success: false, code: 'PERSISTENCE_FAILED', error: 'Failed to save thread project binding.' });
+    return;
+  }
+  const resolved = await memoryService.resolveInstructionsForThread({ threadId, projectKey });
+  res.json({ success: true, threadId, projectKey, manifest: resolved.manifest });
 });
 
 // Thread-Pinned Reference Documents Endpoints

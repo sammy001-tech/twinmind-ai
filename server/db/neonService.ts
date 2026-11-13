@@ -60,6 +60,7 @@ export interface ChatThreadRecord {
   channel: string;
   journey_id?: number | null;
   journey_title?: string | null;
+  project_key?: string | null;
   created_at: string;
   updated_at: string;
   message_count?: number;
@@ -620,7 +621,18 @@ class NeonDatabaseService {
         );
 
         ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS journey_id INTEGER REFERENCES learning_journeys(id) ON DELETE SET NULL;
+        ALTER TABLE chat_threads ADD COLUMN IF NOT EXISTS project_key VARCHAR(128);
         CREATE INDEX IF NOT EXISTS idx_chat_threads_journey ON chat_threads(journey_id);
+        CREATE INDEX IF NOT EXISTS idx_chat_threads_project_key ON chat_threads(project_key);
+
+        -- Persistent Instruction Registry columns for persona_memories
+        ALTER TABLE persona_memories ADD COLUMN IF NOT EXISTS scope VARCHAR(24) NOT NULL DEFAULT 'permanent';
+        ALTER TABLE persona_memories ADD COLUMN IF NOT EXISTS project_key VARCHAR(128);
+        ALTER TABLE persona_memories ADD COLUMN IF NOT EXISTS thread_id VARCHAR(64);
+        ALTER TABLE persona_memories ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE persona_memories ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+        ALTER TABLE persona_memories ADD COLUMN IF NOT EXISTS superseded_by_id INTEGER REFERENCES persona_memories(id) ON DELETE SET NULL;
+        CREATE INDEX IF NOT EXISTS idx_persona_memories_scope ON persona_memories(scope, is_active, project_key);
 
         CREATE TABLE IF NOT EXISTS thread_pinned_docs (
           id SERIAL PRIMARY KEY,
@@ -687,6 +699,25 @@ class NeonDatabaseService {
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
           );
         `);
+      }
+
+      // Memory Governance & Temporal Provenance columns for twin_knowledge
+      try {
+        await this.pool.query(`
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS source_type VARCHAR(32) NOT NULL DEFAULT 'legacy_import';
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS source_ref TEXT;
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS confidence_status VARCHAR(24) NOT NULL DEFAULT 'confirmed';
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS impact_level VARCHAR(16) NOT NULL DEFAULT 'medium';
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(24) NOT NULL DEFAULT 'active';
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS superseded_by_id INTEGER REFERENCES twin_knowledge(id) ON DELETE SET NULL;
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS valid_from TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS valid_until TIMESTAMP WITH TIME ZONE;
+          ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMP WITH TIME ZONE;
+          CREATE INDEX IF NOT EXISTS idx_twin_knowledge_lifecycle ON twin_knowledge(lifecycle_status, confidence_status);
+          CREATE INDEX IF NOT EXISTS idx_twin_knowledge_superseded_by ON twin_knowledge(superseded_by_id);
+        `);
+      } catch (govErr) {
+        console.warn('[NeonDB] Knowledge governance migration warning:', govErr);
       }
 
       // Auto-backfill chat_threads for any existing conversations that don't have a thread entry yet
@@ -1115,7 +1146,7 @@ class NeonDatabaseService {
     if (this.pool && this.isConnected) {
       try {
         let query = `
-          SELECT t.id, t.title, t.channel, t.journey_id, j.title AS journey_title, t.created_at, t.updated_at,
+          SELECT t.id, t.title, t.channel, t.journey_id, j.title AS journey_title, t.project_key, t.created_at, t.updated_at,
                  COUNT(c.id) AS message_count,
                  (SELECT content FROM conversations WHERE session_id = t.id ORDER BY created_at DESC LIMIT 1) AS last_message
           FROM chat_threads t
@@ -1127,7 +1158,7 @@ class NeonDatabaseService {
           query += ` WHERE t.channel = $1`;
           params.push(channel);
         }
-        query += ` GROUP BY t.id, t.title, t.channel, t.journey_id, j.title, t.created_at, t.updated_at ORDER BY t.updated_at DESC`;
+        query += ` GROUP BY t.id, t.title, t.channel, t.journey_id, j.title, t.project_key, t.created_at, t.updated_at ORDER BY t.updated_at DESC`;
 
         const res = await this.pool.query(query, params);
         if (res.rows.length > 0) {
@@ -1137,6 +1168,7 @@ class NeonDatabaseService {
             channel: r.channel,
             journey_id: r.journey_id !== null && r.journey_id !== undefined ? Number(r.journey_id) : null,
             journey_title: r.journey_title || null,
+            project_key: r.project_key || null,
             created_at: r.created_at,
             updated_at: r.updated_at,
             message_count: parseInt(r.message_count || '0', 10),
@@ -1149,6 +1181,40 @@ class NeonDatabaseService {
     }
 
     return [];
+  }
+
+  public async getThreadProjectKey(threadId: string): Promise<string | null> {
+    if (!this.pool || !this.isConnected || !threadId.trim()) return null;
+    try {
+      const res = await this.pool.query(
+        'SELECT project_key FROM chat_threads WHERE id = $1 LIMIT 1',
+        [threadId.trim()]
+      );
+      return res.rows[0]?.project_key || null;
+    } catch {
+      return null;
+    }
+  }
+
+  public async setThreadProjectKey(
+    threadId: string,
+    projectKey: string | null,
+    fallbackTitle = 'Scoped Conversation',
+    channel = 'web'
+  ): Promise<boolean> {
+    if (!this.pool || !this.isConnected || !threadId.trim()) return false;
+    try {
+      await this.pool.query(
+        `INSERT INTO chat_threads (id, title, channel, project_key, updated_at)
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET project_key = $4, updated_at = CURRENT_TIMESTAMP`,
+        [threadId.trim(), fallbackTitle.slice(0, 48), channel, projectKey]
+      );
+      return true;
+    } catch (err) {
+      console.error('[NeonDB] Error setting thread project_key:', err);
+      return false;
+    }
   }
 
   public async ensureThread(thread: { id: string; title: string; channel: string }): Promise<boolean> {
@@ -1309,15 +1375,18 @@ class NeonDatabaseService {
     }
   }
 
-  public async saveThread(thread: { id: string; title: string; channel?: string }): Promise<boolean> {
+  public async saveThread(thread: { id: string; title: string; channel?: string; project_key?: string | null }): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
     const channel = thread.channel || 'web';
     try {
       await this.pool.query(
-        `INSERT INTO chat_threads (id, title, channel, updated_at)
-         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-         ON CONFLICT (id) DO UPDATE SET title = $2, updated_at = CURRENT_TIMESTAMP`,
-        [thread.id, thread.title, channel]
+        `INSERT INTO chat_threads (id, title, channel, project_key, updated_at)
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+         ON CONFLICT (id) DO UPDATE SET
+           title = $2,
+           project_key = COALESCE($4, chat_threads.project_key),
+           updated_at = CURRENT_TIMESTAMP`,
+        [thread.id, thread.title, channel, thread.project_key ?? null]
       );
       return true;
     } catch (err) {
@@ -2233,6 +2302,15 @@ class NeonDatabaseService {
     tags?: string[];
     embedding?: number[];
     metadata?: Record<string, unknown>;
+    sourceType?: string;
+    sourceRef?: string | null;
+    confidenceStatus?: string;
+    impactLevel?: string;
+    lifecycleStatus?: string;
+    supersededById?: number | null;
+    validFrom?: string | null;
+    validUntil?: string | null;
+    lastVerifiedAt?: string | null;
   }): Promise<{ id: number; success: boolean }> {
     if (!this.pool || !this.isConnected) {
       return { id: 0, success: false };
@@ -2242,23 +2320,49 @@ class NeonDatabaseService {
       const category = item.category || 'personal_note';
       const tags = JSON.stringify(item.tags || []);
       const metadata = JSON.stringify(item.metadata || {});
+      const sourceType = item.sourceType || 'direct_directive';
+      const sourceRef = item.sourceRef ?? null;
+      const confidenceStatus = item.confidenceStatus || 'confirmed';
+      const impactLevel = item.impactLevel || 'medium';
+      const lifecycleStatus = item.lifecycleStatus || 'active';
+      const supersededById = item.supersededById ?? null;
+      const validFrom = item.validFrom || new Date().toISOString();
+      const validUntil = item.validUntil ?? null;
+      const lastVerifiedAt = item.lastVerifiedAt || (confidenceStatus === 'confirmed' ? new Date().toISOString() : null);
 
       if (item.embedding && item.embedding.length > 0) {
-        // Format embedding as pgvector literal: '[0.123, -0.456, ...]'
         const vectorStr = `[${item.embedding.join(',')}]`;
         const res = await this.pool.query(
-          `INSERT INTO twin_knowledge (title, content, category, tags, embedding, metadata, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `INSERT INTO twin_knowledge (
+             title, content, category, tags, embedding, metadata,
+             source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+             superseded_by_id, valid_from, valid_until, last_verified_at,
+             created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
            RETURNING id;`,
-          [item.title, item.content, category, tags, vectorStr, metadata]
+          [
+            item.title, item.content, category, tags, vectorStr, metadata,
+            sourceType, sourceRef, confidenceStatus, impactLevel, lifecycleStatus,
+            supersededById, validFrom, validUntil, lastVerifiedAt,
+          ]
         );
         return { id: res.rows[0].id, success: true };
       } else {
         const res = await this.pool.query(
-          `INSERT INTO twin_knowledge (title, content, category, tags, metadata, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `INSERT INTO twin_knowledge (
+             title, content, category, tags, metadata,
+             source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+             superseded_by_id, valid_from, valid_until, last_verified_at,
+             created_at, updated_at
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
            RETURNING id;`,
-          [item.title, item.content, category, tags, metadata]
+          [
+            item.title, item.content, category, tags, metadata,
+            sourceType, sourceRef, confidenceStatus, impactLevel, lifecycleStatus,
+            supersededById, validFrom, validUntil, lastVerifiedAt,
+          ]
         );
         return { id: res.rows[0].id, success: true };
       }
@@ -2269,22 +2373,42 @@ class NeonDatabaseService {
   }
 
   /**
-   * Search knowledge base using pgvector cosine distance (<=> operator)
+   * Search knowledge base using pgvector cosine distance (<=> operator) returning governed metadata
    */
   public async searchKnowledgeVector(
     embedding: number[],
     limit = 5,
     threshold = 0.4
-  ): Promise<Array<{ id: number; title: string; content: string; category: string; tags: string[]; similarity: number }>> {
+  ): Promise<Array<{
+    id: number;
+    title: string;
+    content: string;
+    category: string;
+    tags: string[];
+    similarity: number;
+    sourceType: string;
+    sourceRef: string | null;
+    confidenceStatus: string;
+    impactLevel: string;
+    lifecycleStatus: string;
+    supersededById: number | null;
+    validFrom: string | null;
+    validUntil: string | null;
+    lastVerifiedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>> {
     if (!this.pool || !this.isConnected || !embedding || embedding.length === 0) {
       return [];
     }
 
     try {
       const vectorStr = `[${embedding.join(',')}]`;
-      // Cosine similarity = 1 - (embedding <=> target_vector)
       const res = await this.pool.query(
         `SELECT id, title, content, category, tags,
+                source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+                superseded_by_id, valid_from, valid_until, last_verified_at,
+                created_at, updated_at,
                 (1 - (embedding <=> $1::vector)) as similarity
          FROM twin_knowledge
          WHERE embedding IS NOT NULL
@@ -2302,6 +2426,17 @@ class NeonDatabaseService {
           category: r.category,
           tags: Array.isArray(r.tags) ? r.tags : [],
           similarity: Number(r.similarity),
+          sourceType: r.source_type || 'legacy_import',
+          sourceRef: r.source_ref || null,
+          confidenceStatus: r.confidence_status || 'confirmed',
+          impactLevel: r.impact_level || 'medium',
+          lifecycleStatus: r.lifecycle_status || 'active',
+          supersededById: r.superseded_by_id ?? null,
+          validFrom: r.valid_from || r.created_at || null,
+          validUntil: r.valid_until || null,
+          lastVerifiedAt: r.last_verified_at || null,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
         }));
     } catch (err) {
       console.warn('[NeonDB] pgvector search warning (falling back if vector extension not present):', err);
@@ -2310,22 +2445,50 @@ class NeonDatabaseService {
   }
 
   /**
-   * Retrieve all knowledge documents with optional text filtering
+   * Retrieve knowledge documents with optional category/query/lifecycle filtering
    */
   public async getKnowledgeList(
     category?: string,
     query?: string,
-    limit = 50
-  ): Promise<Array<{ id: number; title: string; content: string; category: string; tags: string[]; hasEmbedding: boolean; createdAt: string }>> {
+    limit = 50,
+    lifecycleStatus?: string
+  ): Promise<Array<{
+    id: number;
+    title: string;
+    content: string;
+    category: string;
+    tags: string[];
+    hasEmbedding: boolean;
+    sourceType: string;
+    sourceRef: string | null;
+    confidenceStatus: string;
+    impactLevel: string;
+    lifecycleStatus: string;
+    supersededById: number | null;
+    validFrom: string | null;
+    validUntil: string | null;
+    lastVerifiedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>> {
     if (!this.pool || !this.isConnected) return [];
 
     try {
-      let sql = 'SELECT id, title, content, category, tags, (embedding IS NOT NULL) as has_embedding, created_at FROM twin_knowledge WHERE 1=1';
+      let sql = `SELECT id, title, content, category, tags, (embedding IS NOT NULL) as has_embedding,
+                        source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+                        superseded_by_id, valid_from, valid_until, last_verified_at,
+                        created_at, updated_at
+                 FROM twin_knowledge WHERE 1=1`;
       const params: unknown[] = [];
 
       if (category && category !== 'all') {
         params.push(category);
         sql += ` AND category = $${params.length}`;
+      }
+
+      if (lifecycleStatus && lifecycleStatus !== 'all') {
+        params.push(lifecycleStatus);
+        sql += ` AND lifecycle_status = $${params.length}`;
       }
 
       if (query && query.trim()) {
@@ -2334,7 +2497,7 @@ class NeonDatabaseService {
       }
 
       params.push(limit);
-      sql += ` ORDER BY created_at DESC LIMIT $${params.length}`;
+      sql += ` ORDER BY updated_at DESC, created_at DESC LIMIT $${params.length}`;
 
       const res = await this.pool.query(sql, params);
       return res.rows.map((r) => ({
@@ -2344,7 +2507,17 @@ class NeonDatabaseService {
         category: r.category,
         tags: Array.isArray(r.tags) ? r.tags : [],
         hasEmbedding: Boolean(r.has_embedding),
+        sourceType: r.source_type || 'legacy_import',
+        sourceRef: r.source_ref || null,
+        confidenceStatus: r.confidence_status || 'confirmed',
+        impactLevel: r.impact_level || 'medium',
+        lifecycleStatus: r.lifecycle_status || 'active',
+        supersededById: r.superseded_by_id ?? null,
+        validFrom: r.valid_from || r.created_at || null,
+        validUntil: r.valid_until || null,
+        lastVerifiedAt: r.last_verified_at || null,
         createdAt: r.created_at,
+        updatedAt: r.updated_at,
       }));
     } catch (err) {
       console.error('[NeonDB] Error fetching knowledge list:', err);
@@ -2368,11 +2541,25 @@ class NeonDatabaseService {
   }
 
   /**
-   * Update a knowledge document title, content, category, tags, or embedding
+   * Update a knowledge document title, content, category, tags, embedding, or governance fields
    */
   public async updateKnowledge(
     id: number | string,
-    patch: { title?: string; content?: string; category?: string; tags?: string[]; embedding?: number[] }
+    patch: {
+      title?: string;
+      content?: string;
+      category?: string;
+      tags?: string[];
+      embedding?: number[];
+      sourceType?: string;
+      sourceRef?: string | null;
+      confidenceStatus?: string;
+      impactLevel?: string;
+      lifecycleStatus?: string;
+      supersededById?: number | string | null;
+      validUntil?: string | null;
+      lastVerifiedAt?: string | null;
+    }
   ): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
 
@@ -2399,6 +2586,38 @@ class NeonDatabaseService {
       if (patch.embedding && patch.embedding.length > 0) {
         params.push(`[${patch.embedding.join(',')}]`);
         updates.push(`embedding = $${params.length}::vector`);
+      }
+      if (patch.sourceType !== undefined) {
+        params.push(patch.sourceType);
+        updates.push(`source_type = $${params.length}`);
+      }
+      if (patch.sourceRef !== undefined) {
+        params.push(patch.sourceRef);
+        updates.push(`source_ref = $${params.length}`);
+      }
+      if (patch.confidenceStatus !== undefined) {
+        params.push(patch.confidenceStatus);
+        updates.push(`confidence_status = $${params.length}`);
+      }
+      if (patch.impactLevel !== undefined) {
+        params.push(patch.impactLevel);
+        updates.push(`impact_level = $${params.length}`);
+      }
+      if (patch.lifecycleStatus !== undefined) {
+        params.push(patch.lifecycleStatus);
+        updates.push(`lifecycle_status = $${params.length}`);
+      }
+      if (patch.supersededById !== undefined) {
+        params.push(patch.supersededById);
+        updates.push(`superseded_by_id = $${params.length}`);
+      }
+      if (patch.validUntil !== undefined) {
+        params.push(patch.validUntil);
+        updates.push(`valid_until = $${params.length}`);
+      }
+      if (patch.lastVerifiedAt !== undefined) {
+        params.push(patch.lastVerifiedAt);
+        updates.push(`last_verified_at = $${params.length}`);
       }
 
       const res = await this.pool.query(
@@ -2585,22 +2804,43 @@ class NeonDatabaseService {
     }
   }
   /**
-   * Persist a learned persona trait, preference, or correction
+   * Persist a learned persona trait, preference, correction, or scoped instruction
    */
   public async savePersonaMemory(memory: {
     category: 'preference' | 'opinion' | 'correction' | 'feedback';
     content: string;
     priority?: number;
+    scope?: 'permanent' | 'project' | 'temporary';
+    project_key?: string | null;
+    thread_id?: string | null;
+    expires_at?: string | null;
+    is_active?: boolean;
+    superseded_by_id?: number | null;
     metadata?: Record<string, unknown>;
   }): Promise<number | null> {
     if (!this.pool || !this.isConnected) return null;
 
     try {
+      const scope = memory.scope || 'permanent';
+      const isActive = memory.is_active !== false;
       const res = await this.pool.query(
-        `INSERT INTO persona_memories (category, content, priority, metadata)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO persona_memories (
+           category, content, priority, scope, project_key, thread_id, expires_at, is_active, superseded_by_id, metadata
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING id`,
-        [memory.category, memory.content, memory.priority || 1, JSON.stringify(memory.metadata || {})]
+        [
+          memory.category,
+          memory.content,
+          memory.priority || 1,
+          scope,
+          memory.project_key ?? null,
+          memory.thread_id ?? null,
+          memory.expires_at ?? null,
+          isActive,
+          memory.superseded_by_id ?? null,
+          JSON.stringify(memory.metadata || {}),
+        ]
       );
       return res.rows[0]?.id || null;
     } catch (err) {
@@ -2610,15 +2850,22 @@ class NeonDatabaseService {
   }
 
   /**
-   * Retrieve all learned persona memories
+   * Retrieve all learned persona memories / instructions
    */
   public async getPersonaMemories(limit = 100): Promise<Array<{
     id: number;
     category: string;
     content: string;
     priority: number;
+    scope: 'permanent' | 'project' | 'temporary';
+    project_key: string | null;
+    thread_id: string | null;
+    expires_at: string | null;
+    is_active: boolean;
+    superseded_by_id: number | null;
     metadata: Record<string, unknown>;
     created_at: string;
+    updated_at?: string;
   }>> {
     if (!this.pool || !this.isConnected) return [];
 
@@ -2627,7 +2874,15 @@ class NeonDatabaseService {
         'SELECT * FROM persona_memories ORDER BY priority DESC, created_at DESC LIMIT $1',
         [limit]
       );
-      return res.rows;
+      return res.rows.map((r) => ({
+        ...r,
+        scope: r.scope || 'permanent',
+        project_key: r.project_key ?? null,
+        thread_id: r.thread_id ?? null,
+        expires_at: r.expires_at ?? null,
+        is_active: r.is_active !== false,
+        superseded_by_id: r.superseded_by_id ?? null,
+      }));
     } catch (err) {
       console.error('[NeonDB] Error fetching persona memories:', err);
       return [];
@@ -2648,12 +2903,23 @@ class NeonDatabaseService {
       return false;
     }
   }
+
   /**
-   * Update a specific persona memory
+   * Update a specific persona memory or instruction metadata
    */
   public async updatePersonaMemory(
     id: number,
-    patch: { category?: string; content?: string; priority?: number }
+    patch: {
+      category?: string;
+      content?: string;
+      priority?: number;
+      scope?: 'permanent' | 'project' | 'temporary';
+      project_key?: string | null;
+      thread_id?: string | null;
+      expires_at?: string | null;
+      is_active?: boolean;
+      superseded_by_id?: number | null;
+    }
   ): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
     try {
@@ -2671,6 +2937,30 @@ class NeonDatabaseService {
         params.push(patch.priority);
         sets.push(`priority = $${params.length}`);
       }
+      if (patch.scope !== undefined) {
+        params.push(patch.scope);
+        sets.push(`scope = $${params.length}`);
+      }
+      if (patch.project_key !== undefined) {
+        params.push(patch.project_key);
+        sets.push(`project_key = $${params.length}`);
+      }
+      if (patch.thread_id !== undefined) {
+        params.push(patch.thread_id);
+        sets.push(`thread_id = $${params.length}`);
+      }
+      if (patch.expires_at !== undefined) {
+        params.push(patch.expires_at);
+        sets.push(`expires_at = $${params.length}`);
+      }
+      if (patch.is_active !== undefined) {
+        params.push(patch.is_active);
+        sets.push(`is_active = $${params.length}`);
+      }
+      if (patch.superseded_by_id !== undefined) {
+        params.push(patch.superseded_by_id);
+        sets.push(`superseded_by_id = $${params.length}`);
+      }
       if (sets.length === 1) return false;
       const res = await this.pool.query(
         `UPDATE persona_memories SET ${sets.join(', ')} WHERE id = $1`,
@@ -2680,6 +2970,18 @@ class NeonDatabaseService {
     } catch (err) {
       console.error('[NeonDB] Error updating persona memory:', err);
       return false;
+    }
+  }
+
+  public async deactivateExpiredPersonaMemories(ids: number[]): Promise<void> {
+    if (!this.pool || !this.isConnected || ids.length === 0) return;
+    try {
+      await this.pool.query(
+        'UPDATE persona_memories SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = ANY($1::int[]) AND is_active = TRUE',
+        [ids]
+      );
+    } catch (err) {
+      console.warn('[NeonDB] Failed to deactivate expired temporary rules:', err);
     }
   }
 

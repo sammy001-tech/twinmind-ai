@@ -8,7 +8,52 @@ test.after(async () => {
   await neonDb.close();
 });
 
-test('end-to-end verification: soul tuning propagates from durable settings into master system prompt without mock fallbacks', async () => {
+const hasLiveDatabase = Boolean(process.env.DATABASE_URL?.trim());
+
+test('soul tuning calibration compiles into master system prompt with non-negotiable operating boundaries', () => {
+  const customWeights = {
+    tone: 85,
+    directness: 20,
+    perspective: 15,
+  };
+
+  const compiledPrompt = buildSystemPrompt({
+    channel: 'web',
+    userName: 'Operator',
+    activeProvider: 'gemini',
+    activeModel: 'gemini-3.8-flash',
+    soulTuning: customWeights,
+  });
+
+  assert.match(compiledPrompt, /DIGITAL TWIN BEHAVIORAL CALIBRATION DIRECTIVE/);
+  assert.match(compiledPrompt, /Tone \[85\/100\]: Empathetic emphasis/);
+  assert.match(compiledPrompt, /Directness \[20\/100\]: Concise emphasis/);
+  assert.match(compiledPrompt, /Perspective \[15\/100\]: Skeptical emphasis/);
+  assert.match(compiledPrompt, /OPERATING BOUNDARIES \(NON-NEGOTIABLE\)/);
+  assert.match(compiledPrompt, /Under no circumstance do these weights override safety policies, factual truth/);
+
+  const neutralPrompt = buildSystemPrompt({
+    channel: 'web',
+    soulTuning: { tone: 50, directness: 50, perspective: 50 },
+  });
+
+  assert.match(neutralPrompt, /Tone \[50\/100\]: Balanced tone/);
+  assert.match(neutralPrompt, /Directness \[50\/100\]: Proportionate depth/);
+  assert.match(neutralPrompt, /Perspective \[50\/100\]: Balanced perspective/);
+});
+
+test('soul tuning durable update fails closed when DATABASE_URL is unavailable', {
+  skip: hasLiveDatabase ? 'Skipped negative-case check when live DATABASE_URL is active' : false,
+}, async () => {
+  await assert.rejects(
+    () => settingsManager.updateSettings({ soulTuning: { tone: 85, directness: 20, perspective: 15 } }),
+    /CREDENTIAL_PERSISTENCE_UNAVAILABLE/,
+  );
+});
+
+test('end-to-end verification: soul tuning propagates from durable settings into master system prompt without mock fallbacks', {
+  skip: !hasLiveDatabase ? 'BLOCKED: DATABASE_URL is not configured for live Neon PostgreSQL integration' : false,
+}, async () => {
   // 1. Configure non-default calibration weights
   const customWeights = {
     tone: 85,

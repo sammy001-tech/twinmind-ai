@@ -17,6 +17,9 @@ import {
   FileText,
   Loader2,
   Pin,
+  FolderGit2,
+  ScrollText,
+  Clock,
 } from 'lucide-react';
 
 
@@ -44,6 +47,11 @@ interface ChatInputProps {
   isPinningDoc?: boolean;
   voiceConversationMode?: boolean;
   onToggleVoiceConversationMode?: () => void;
+  activeProjectKey?: string | null;
+  onSetProjectKey?: (projectKey: string | null) => Promise<void> | void;
+  onCreateTempRule?: (content: string, expiresMinutes?: number | null) => Promise<void> | void;
+  onOpenRulesDrawer?: () => void;
+  appliedRulesCount?: number;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -63,6 +71,11 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   isPinningDoc = false,
   voiceConversationMode = false,
   onToggleVoiceConversationMode,
+  activeProjectKey = null,
+  onSetProjectKey,
+  onCreateTempRule,
+  onOpenRulesDrawer,
+  appliedRulesCount,
 }) => {
   const [text, setText] = useState('');
   const [requestVoiceNote, setRequestVoiceNote] = useState(false);
@@ -84,6 +97,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   } | null>(null);
   const [isParsingDocument, setIsParsingDocument] = useState(false);
   const [documentError, setDocumentError] = useState<string | null>(null);
+  const [isProjectPopoverOpen, setIsProjectPopoverOpen] = useState(false);
+  const [projectDraft, setProjectDraft] = useState(activeProjectKey || '');
+  const [isSavingProject, setIsSavingProject] = useState(false);
+  const [isTempRulePopoverOpen, setIsTempRulePopoverOpen] = useState(false);
+  const [tempRuleText, setTempRuleText] = useState('');
+  const [tempRuleExpiryMinutes, setTempRuleExpiryMinutes] = useState<number | null>(120);
+  const [isSavingTempRule, setIsSavingTempRule] = useState(false);
+
+  useEffect(() => {
+    setProjectDraft(activeProjectKey || '');
+  }, [activeProjectKey]);
 
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -345,6 +369,180 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
       {/* Floating Composer Container */}
       <div className="relative bg-white/95 dark:bg-slate-900/95 border border-slate-200/90 dark:border-slate-800/90 rounded-2xl shadow-xl dark:shadow-2xl backdrop-blur-xl transition-all focus-within:border-amber-500/50 focus-within:ring-1 focus-within:ring-amber-500/30">
+        {(onSetProjectKey || onOpenRulesDrawer || onCreateTempRule) && (
+          <div className="px-3 py-1.5 border-b border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2 text-[11px] relative">
+            <div className="flex items-center gap-2 min-w-0">
+              {onSetProjectKey && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsProjectPopoverOpen((prev) => !prev);
+                    setIsTempRulePopoverOpen(false);
+                  }}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border transition truncate max-w-[180px] ${
+                    activeProjectKey
+                      ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-700 dark:text-indigo-300 font-semibold'
+                      : 'bg-slate-100/80 dark:bg-slate-800/70 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                  title="Select project instruction scope for this thread"
+                >
+                  <FolderGit2 className="w-3 h-3 shrink-0" />
+                  <span className="truncate">
+                    {activeProjectKey ? `Project: ${activeProjectKey}` : 'Scope: Global'}
+                  </span>
+                </button>
+              )}
+
+              {onOpenRulesDrawer && (
+                <button
+                  type="button"
+                  onClick={onOpenRulesDrawer}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100/80 dark:bg-slate-800/70 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition"
+                  title="Inspect applied, overridden, and excluded rules for this conversation"
+                >
+                  <ScrollText className="w-3 h-3 text-emerald-500 shrink-0" />
+                  <span>Rules</span>
+                  {appliedRulesCount !== undefined && (
+                    <span className="font-mono tabular-nums text-[10px] opacity-80">
+                      ({appliedRulesCount})
+                    </span>
+                  )}
+                </button>
+              )}
+            </div>
+
+            {onCreateTempRule && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsTempRulePopoverOpen((prev) => !prev);
+                  setIsProjectPopoverOpen(false);
+                }}
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 hover:underline shrink-0"
+              >
+                <Clock className="w-3 h-3" />
+                <span>+ Session Rule</span>
+              </button>
+            )}
+
+            {/* Project Binding Popover */}
+            {isProjectPopoverOpen && onSetProjectKey && (
+              <div className="absolute bottom-full left-2 mb-1.5 z-50 w-72 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                    Thread Project Scope
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsProjectPopoverOpen(false)}
+                    className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={projectDraft}
+                  onChange={(e) => setProjectDraft(e.target.value)}
+                  placeholder="e.g. twinmind-ai, uniace"
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    disabled={isSavingProject}
+                    onClick={async () => {
+                      setIsSavingProject(true);
+                      try {
+                        setProjectDraft('');
+                        await onSetProjectKey(null);
+                        setIsProjectPopoverOpen(false);
+                      } finally {
+                        setIsSavingProject(false);
+                      }
+                    }}
+                    className="text-[11px] text-slate-500 hover:text-rose-500"
+                  >
+                    Global only
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSavingProject}
+                    onClick={async () => {
+                      setIsSavingProject(true);
+                      try {
+                        await onSetProjectKey(projectDraft.trim() || null);
+                        setIsProjectPopoverOpen(false);
+                      } finally {
+                        setIsSavingProject(false);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold disabled:opacity-50"
+                  >
+                    {isSavingProject ? 'Saving...' : 'Bind Project'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Temporary Session Rule Popover */}
+            {isTempRulePopoverOpen && onCreateTempRule && (
+              <div className="absolute bottom-full right-2 mb-1.5 z-50 w-72 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                    Add Temporary Session Rule
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsTempRulePopoverOpen(false)}
+                    className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <textarea
+                  rows={2}
+                  value={tempRuleText}
+                  onChange={(e) => setTempRuleText(e.target.value)}
+                  placeholder="e.g., Walk through this topic with 1 practice question at the end."
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <select
+                    value={tempRuleExpiryMinutes === null ? 'none' : String(tempRuleExpiryMinutes)}
+                    onChange={(e) =>
+                      setTempRuleExpiryMinutes(e.target.value === 'none' ? null : Number(e.target.value))
+                    }
+                    className="px-2 py-1 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
+                  >
+                    <option value="60">Expires in 1h</option>
+                    <option value="120">Expires in 2h</option>
+                    <option value="1440">Expires in 24h</option>
+                    <option value="none">Session (no timer)</option>
+                  </select>
+                  <button
+                    type="button"
+                    disabled={isSavingTempRule || !tempRuleText.trim()}
+                    onClick={async () => {
+                      if (!tempRuleText.trim()) return;
+                      setIsSavingTempRule(true);
+                      try {
+                        await onCreateTempRule(tempRuleText.trim(), tempRuleExpiryMinutes);
+                        setTempRuleText('');
+                        setIsTempRulePopoverOpen(false);
+                      } finally {
+                        setIsSavingTempRule(false);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-semibold disabled:opacity-50"
+                  >
+                    {isSavingTempRule ? 'Adding...' : 'Apply Rule'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
         
         {/* Attached Image/Photo Preview Chip */}
         {selectedImage && (

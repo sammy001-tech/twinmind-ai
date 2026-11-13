@@ -134,7 +134,8 @@ Output JSON only.`;
    * Scans all stored knowledge documents in the vault to identify mutual contradictions or tensions.
    */
   public async scanVaultConflicts(): Promise<BeliefConflict[]> {
-    const docs = await knowledgeService.listDocuments(undefined, undefined, 50);
+    const allDocs = await knowledgeService.listDocuments(undefined, undefined, 50);
+    const docs = allDocs.filter((d) => d.lifecycleStatus !== 'superseded');
     if (docs.length < 2) return [];
 
     const client = this.getAiClient();
@@ -206,8 +207,9 @@ If no conflicts exist, return {"conflicts": []}. Output JSON only.`;
   public async resolveConflict(params: {
     conflictId: string;
     docId: string | number;
-    action: 'update' | 'retire' | 'evolve';
+    action: 'update' | 'retire' | 'evolve' | 'supersede';
     newStatement?: string;
+    supersededById?: number | string;
   }): Promise<{ success: boolean; message: string }> {
     const { docId, action, newStatement = '' } = params;
 
@@ -215,8 +217,22 @@ If no conflicts exist, return {"conflicts": []}. Output JSON only.`;
       return { success: false, message: 'Document ID is required to resolve conflict.' };
     }
 
-    if (!['update', 'retire', 'evolve'].includes(action)) {
+    if (!['update', 'retire', 'evolve', 'supersede'].includes(action)) {
       return { success: false, message: `Invalid resolution action: ${action}` };
+    }
+
+    if (action === 'supersede') {
+      const updated = await knowledgeService.updateDocument(docId, {
+        lifecycleStatus: 'superseded',
+        supersededById: params.supersededById ?? null,
+        validUntil: new Date().toISOString(),
+      });
+      return {
+        success: updated,
+        message: updated
+          ? `Memory record #${docId} was marked superseded and excluded from primary factual recall while preserving audit lineage.`
+          : `Failed to supersede record #${docId}.`,
+      };
     }
 
     if (action === 'retire') {
@@ -244,6 +260,9 @@ If no conflicts exist, return {"conflicts": []}. Output JSON only.`;
 
       const updated = await knowledgeService.updateDocument(docId, {
         content: updatedContent,
+        confidenceStatus: 'confirmed',
+        lifecycleStatus: 'active',
+        lastVerifiedAt: new Date().toISOString(),
       });
 
       return {
@@ -259,6 +278,9 @@ If no conflicts exist, return {"conflicts": []}. Output JSON only.`;
 
       const updated = await knowledgeService.updateDocument(docId, {
         content: evolvedContent,
+        confidenceStatus: 'confirmed',
+        lifecycleStatus: 'active',
+        lastVerifiedAt: new Date().toISOString(),
       });
 
       return {

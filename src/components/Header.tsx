@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, HistoricalInteractionMetadata, CommunicationStyleAnalysis } from '../types/index.ts';
+import { ChannelType, HistoricalInteractionMetadata, CommunicationStyleAnalysis, InstructionResolutionManifest } from '../types/index.ts';
 import { ThemeMode } from '../hooks/useTheme.ts';
 import {
   MessageSquare,
@@ -27,6 +27,7 @@ import {
   Info,
   AlertTriangle,
   ShieldCheck,
+  ScrollText,
 } from 'lucide-react';
 import { NavigationTab } from './BottomNav.tsx';
 import { useAuthSession } from '../contexts/AuthSessionContext.tsx';
@@ -66,6 +67,9 @@ interface HeaderProps {
   styleAnalysis?: CommunicationStyleAnalysis | null;
   vaultConflictCount?: number;
   onOpenKnowledgeVault?: () => void;
+  instructionManifest?: InstructionResolutionManifest | null;
+  activeProjectKey?: string | null;
+  onOpenRulesDrawer?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -100,6 +104,9 @@ export const Header: React.FC<HeaderProps> = ({
   styleAnalysis,
   vaultConflictCount = 0,
   onOpenKnowledgeVault,
+  instructionManifest,
+  activeProjectKey,
+  onOpenRulesDrawer,
 }) => {
   const displayName = nickname.trim() || userName.trim();
   const authSession = useAuthSession();
@@ -352,6 +359,32 @@ export const Header: React.FC<HeaderProps> = ({
                 )}
               </button>
             )}
+            {onOpenRulesDrawer && (
+              <button
+                type="button"
+                onClick={onOpenRulesDrawer}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700/70 transition active:scale-95 relative"
+                title={
+                  activeProjectKey
+                    ? `Active Rules (${instructionManifest?.applied.length ?? 0}) · Project: ${activeProjectKey}`
+                    : `Inspect Applied Rules (${instructionManifest?.applied.length ?? 0})`
+                }
+              >
+                <ScrollText className="w-4 h-4 text-emerald-500 shrink-0" />
+                <div className="flex flex-col items-start leading-none">
+                  <span className="text-[10px] font-bold uppercase tracking-wider">Rules</span>
+                  <span className="text-[9px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    {instructionManifest ? `${instructionManifest.applied.length} applied` : 'Inspect'}
+                  </span>
+                </div>
+                {instructionManifest && instructionManifest.overridden.length > 0 && (
+                  <span
+                    className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-500 border-2 border-white dark:border-slate-950"
+                    title={`${instructionManifest.overridden.length} overridden rule(s)`}
+                  />
+                )}
+              </button>
+            )}
           </div>
 
           {/* Primary Action Capsule (New Chat, Voice, Overflow ⋮) */}
@@ -425,6 +458,25 @@ export const Header: React.FC<HeaderProps> = ({
                           onOpenSettings={onOpenSettingsModal}
                         />
                       </div>
+                    )}
+
+                    {onOpenRulesDrawer && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onOpenRulesDrawer();
+                          setIsMoreMenuOpen(false);
+                        }}
+                        className="w-full text-left px-2.5 py-1.5 rounded-xl text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between gap-2 transition"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <ScrollText className="w-3.5 h-3.5 text-emerald-500" />
+                          <span>Conversation Rules</span>
+                        </span>
+                        <span className="font-mono tabular-nums text-[10px] text-slate-500">
+                          {instructionManifest ? instructionManifest.applied.length : ''}
+                        </span>
+                      </button>
                     )}
 
                     {onOpenKnowledgeVault && (

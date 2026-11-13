@@ -27,6 +27,7 @@ import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { ArtifactCard } from './ArtifactCard.tsx';
 import { BeliefConflictCard } from './BeliefConflictCard.tsx';
 import { AutonomousMemoryBadge } from './AutonomousMemoryBadge.tsx';
+import { MessageEvidencePanel } from './MessageEvidencePanel.tsx';
 import { getMessageContentView } from '../utils/chatMessagePresentation.ts';
 import { useContentComplexity } from '../hooks/useContentComplexity.ts';
 
@@ -431,6 +432,14 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           </div>
         )}
 
+        {!isUser && message.verificationEnvelope && !isEditing && (
+          <MessageEvidencePanel
+            envelope={message.verificationEnvelope}
+            variant="banners"
+            onOpenKnowledgeVault={onOpenKnowledgeVault}
+          />
+        )}
+
         {isEditing ? (
           editBox
         ) : (
@@ -508,6 +517,14 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
           <div className="mt-3 w-full min-w-0">
             <BeliefConflictCard conflict={message.beliefConflict} />
           </div>
+        )}
+
+        {!isUser && message.verificationEnvelope && !isEditing && (
+          <MessageEvidencePanel
+            envelope={message.verificationEnvelope}
+            variant="drawer"
+            onOpenKnowledgeVault={onOpenKnowledgeVault}
+          />
         )}
 
 

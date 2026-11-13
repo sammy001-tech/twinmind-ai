@@ -168,7 +168,28 @@ test('fetchAndIngestWebPage blocks non-public / loopback addresses (SSRF prevent
   );
 });
 
-test('end-to-end ingestion: ingests text document into Neon pgvector Knowledge Vault and verifies retrieval', async () => {
+const hasLiveDatabase = Boolean(process.env.DATABASE_URL?.trim());
+
+test('ingestDocumentChunks fails honestly when DATABASE_URL is unavailable', {
+  skip: hasLiveDatabase ? 'Skipped negative-case check when live DATABASE_URL is active' : false,
+}, async () => {
+  const result = await ingestDocumentChunks({
+    title: 'Unavailable DB Negative Case',
+    content: 'Verifies ZeroMock behavior: no document is reported created when Neon PostgreSQL is unconfigured.',
+    category: 'reference',
+    tags: ['test', 'negative_case'],
+    source: 'file',
+    format: 'text',
+    sourceReference: 'negative.txt',
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.documentsCreated, 0);
+});
+
+test('end-to-end ingestion: ingests text document into Neon pgvector Knowledge Vault and verifies retrieval', {
+  skip: !hasLiveDatabase ? 'BLOCKED: DATABASE_URL is not configured for live Neon PostgreSQL integration' : false,
+}, async () => {
   const testTitle = `E2E Ingestion Test Doc ${Date.now()}`;
   const testContent = `This is a verified test document for the TwinMind Knowledge Ingestion pipeline. It details how knowledge is chunked and embedded via Gemini 768-dimensional embeddings and stored into Neon PostgreSQL. Unique identifier: ${Date.now()}`;
 

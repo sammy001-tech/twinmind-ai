@@ -13,7 +13,58 @@ test.after(async () => {
   await neonDb.close();
 });
 
-test('end-to-end thinking presets: dynamic resolution, database persistence, and system prompt calibration', async () => {
+const hasLiveDatabase = Boolean(process.env.DATABASE_URL?.trim());
+
+test('thinking presets resolve dynamically and compile calibrated master system prompts', () => {
+  const executivePreset = THINKING_PRESETS.find((p) => p.id === 'executive')!;
+  assert.ok(executivePreset, 'Executive preset must exist');
+  assert.equal(resolveActiveThinkingPreset(executivePreset.weights)?.id, 'executive');
+  const execBadge = formatThinkingModeBadge(executivePreset.weights);
+  assert.equal(execBadge.icon, '🎯');
+  assert.equal(execBadge.label, 'Executive');
+  const execPrompt = buildSystemPrompt({ channel: 'web', soulTuning: executivePreset.weights });
+  assert.match(execPrompt, /Tone \[20\/100\]: Analytical emphasis/);
+  assert.match(execPrompt, /Directness \[15\/100\]: Concise emphasis/);
+  assert.match(execPrompt, /Perspective \[50\/100\]: Balanced perspective/);
+
+  const redTeamPreset = THINKING_PRESETS.find((p) => p.id === 'red_team')!;
+  assert.equal(resolveActiveThinkingPreset(redTeamPreset.weights)?.id, 'red_team');
+  const redBadge = formatThinkingModeBadge(redTeamPreset.weights);
+  assert.equal(redBadge.icon, '🛡️');
+  assert.equal(redBadge.label, 'Red Team');
+  const redPrompt = buildSystemPrompt({ channel: 'web', soulTuning: redTeamPreset.weights });
+  assert.match(redPrompt, /Tone \[15\/100\]: Analytical emphasis/);
+  assert.match(redPrompt, /Directness \[25\/100\]: Concise emphasis/);
+  assert.match(redPrompt, /Perspective \[10\/100\]: Skeptical emphasis/);
+
+  const visionaryPreset = THINKING_PRESETS.find((p) => p.id === 'visionary')!;
+  assert.equal(resolveActiveThinkingPreset(visionaryPreset.weights)?.id, 'visionary');
+  const visBadge = formatThinkingModeBadge(visionaryPreset.weights);
+  assert.equal(visBadge.icon, '💡');
+  assert.equal(visBadge.label, 'Visionary');
+  const visPrompt = buildSystemPrompt({ channel: 'web', soulTuning: visionaryPreset.weights });
+  assert.match(visPrompt, /Perspective \[90\/100\]: Visionary emphasis/);
+
+  const neutralPreset = THINKING_PRESETS.find((p) => p.id === 'neutral')!;
+  assert.equal(resolveActiveThinkingPreset(neutralPreset.weights)?.id, 'neutral');
+  const neutralBadge = formatThinkingModeBadge(neutralPreset.weights);
+  assert.equal(neutralBadge.icon, '⚖️');
+  assert.equal(neutralBadge.label, 'Neutral');
+});
+
+test('thinking preset durable persistence fails closed when DATABASE_URL is unavailable', {
+  skip: hasLiveDatabase ? 'Skipped negative-case check when live DATABASE_URL is active' : false,
+}, async () => {
+  const executivePreset = THINKING_PRESETS.find((p) => p.id === 'executive')!;
+  await assert.rejects(
+    () => settingsManager.updateSettings({ soulTuning: executivePreset.weights }),
+    /CREDENTIAL_PERSISTENCE_UNAVAILABLE/,
+  );
+});
+
+test('end-to-end thinking presets: dynamic resolution, database persistence, and system prompt calibration', {
+  skip: !hasLiveDatabase ? 'BLOCKED: DATABASE_URL is not configured for live Neon PostgreSQL integration' : false,
+}, async () => {
   // 1. Executive Briefing Preset
   const executivePreset = THINKING_PRESETS.find((p) => p.id === 'executive')!;
   assert.ok(executivePreset, 'Executive preset must exist');

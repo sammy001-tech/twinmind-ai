@@ -38,14 +38,14 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   activeProvider: string;
-  onProviderChange: (provider: string) => void;
+  onProviderChange: (provider: string) => void | Promise<void>;
   providerModels: {
     gemini: string;
     groq: string;
     mistral: string;
   };
-  onSelectProviderModel: (provider: string, model: string) => void;
-  onSelectModelAndActivate?: (provider: 'gemini' | 'groq' | 'mistral', model: string) => void;
+  onSelectProviderModel: (provider: string, model: string) => void | Promise<void>;
+  onSelectModelAndActivate?: (provider: 'gemini' | 'groq' | 'mistral', model: string) => void | Promise<void>;
   voice: string;
   onVoiceChange: (voice: string) => void;
   ttsModel?: string;
@@ -67,10 +67,11 @@ interface SettingsModalProps {
   voiceSpeed?: number;
   onVoiceSpeedChange?: (speed: number) => void;
   brandName?: string;
-  onSaveBrandName?: (brand: string) => void;
+  onSaveBrandName?: (brand: string) => void | Promise<void>;
   userName?: string;
   nickname?: string;
-  onSaveName?: (name: string, nick: string) => void;
+  onSaveName?: (name: string, nick: string) => void | Promise<void>;
+  onSaveIdentity?: (identity: { brandName: string; userName: string; nickname: string }) => void | Promise<void>;
   thinkingLevel?: ThinkingLevel;
   onThinkingLevelChange?: (level: ThinkingLevel) => void | Promise<void>;
   isEmbedded?: boolean;
@@ -111,6 +112,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   userName = '',
   nickname = '',
   onSaveName,
+  onSaveIdentity,
   thinkingLevel = 'low',
   onThinkingLevelChange,
   isEmbedded = false,
@@ -139,6 +141,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [nameInput, setNameInput] = useState(userName);
   const [nickInput, setNickInput] = useState(nickname);
   const [isSavingIdentity, setIsSavingIdentity] = useState(false);
+  const [identityFeedback, setIdentityFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    setBrandInput(brandName);
+  }, [brandName, isOpen]);
+
+  useEffect(() => {
+    setNameInput(userName);
+  }, [userName, isOpen]);
+
+  useEffect(() => {
+    setNickInput(nickname);
+  }, [nickname, isOpen]);
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const [groqKeyInput, setGroqKeyInput] = useState('');
@@ -1017,21 +1032,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return 'No credential detected in the deployment environment or saved Settings. Enter a key and save it to Neon.';
   };
 
-  const handleSelectModel = (provider: 'gemini' | 'groq' | 'mistral', modelId: string) => {
+  const handleSelectModel = async (provider: 'gemini' | 'groq' | 'mistral', modelId: string) => {
     const liveModels = modelsByProvider[provider];
     if (!liveStatus[provider] || !liveModels.some((candidate) => candidate.id === modelId)) {
       setErrorMsg(`Cannot activate "${modelId}": this identifier is not present in the current live ${provider.toUpperCase()} catalogue.`);
       return;
     }
 
-    if (onSelectModelAndActivate) {
-      onSelectModelAndActivate(provider, modelId);
-    } else {
-      onSelectProviderModel(provider, modelId);
-      onProviderChange(provider);
+    setErrorMsg(null);
+    try {
+      if (onSelectModelAndActivate) {
+        await onSelectModelAndActivate(provider, modelId);
+      } else {
+        await onSelectProviderModel(provider, modelId);
+        await onProviderChange(provider);
+      }
+      setFeedbackToast(`Selected live model "${modelId}" for ${provider.toUpperCase()}`);
+      setTimeout(() => setFeedbackToast(null), 3000);
+    } catch (err: unknown) {
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : `Failed to persist "${modelId}" for ${provider.toUpperCase()}. Check Neon PostgreSQL connectivity.`,
+      );
     }
-    setFeedbackToast(`Selected live model "${modelId}" for ${provider.toUpperCase()}`);
-    setTimeout(() => setFeedbackToast(null), 3000);
   };
 
   const handleApplyCustomModel = (e: React.FormEvent) => {
@@ -1041,7 +1065,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       return;
     }
     if (customModelInput.trim()) {
-      handleSelectModel(selectedProviderTab, customModelInput.trim());
+      void handleSelectModel(selectedProviderTab, customModelInput.trim());
     }
   };
 
@@ -1356,19 +1380,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       <div className="p-4 sm:p-5 overflow-y-auto space-y-5">
         {/* App Branding & Identity Section (Database Stored) */}
         <div className="p-4 rounded-xl bg-slate-50/90 dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-amber-500 dark:text-amber-400" />
               <h3 className="text-xs font-semibold text-slate-900 dark:text-white">
                 App Branding &amp; Identity Configuration
               </h3>
             </div>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 font-mono">
-              Database Synced
-            </span>
+            {dbStatus?.connected ? (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 font-mono">
+                Neon DB Synced
+              </span>
+            ) : dbStatus ? (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-700 dark:text-rose-300 font-mono">
+                DB Disconnected · Won&apos;t Survive Restart
+              </span>
+            ) : (
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-500/15 text-slate-600 dark:text-slate-300 font-mono">
+                Checking DB...
+              </span>
+            )}
           </div>
           <p className="text-[11px] text-slate-600 dark:text-slate-400">
-            Configure the application brand name displayed in the header and workspace, along with your user identity. All changes persist to the backend database.
+            Configure the application brand name displayed in the header and workspace, along with your user identity. Durable cross-restart persistence requires a connected Neon PostgreSQL <code className="font-mono">DATABASE_URL</code>.
           </p>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
@@ -1412,33 +1446,61 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {identityFeedback && (
+            <div
+              className={`rounded-lg border px-2.5 py-1.5 text-[11px] ${
+                identityFeedback.type === 'error'
+                  ? 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
+                  : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+              }`}
+            >
+              {identityFeedback.text}
+            </div>
+          )}
+
           <div className="flex justify-end pt-1">
             <button
               type="button"
               disabled={isSavingIdentity}
               onClick={async () => {
                 setIsSavingIdentity(true);
+                setIdentityFeedback(null);
                 try {
                   const trimmedBrand = brandInput.trim() || 'TwinMind AI';
                   const trimmedName = nameInput.trim();
                   const trimmedNick = nickInput.trim();
-                  onSaveBrandName?.(trimmedBrand);
-                  onSaveName?.(trimmedName, trimmedNick);
-                  const res = await fetch('/api/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                  if (onSaveIdentity) {
+                    await onSaveIdentity({
                       brandName: trimmedBrand,
                       userName: trimmedName,
                       nickname: trimmedNick,
-                    }),
-                  });
-                  if (res.ok) {
-                    setFeedbackToast('Brand & identity saved to database successfully');
-                    setTimeout(() => setFeedbackToast(null), 3500);
+                    });
+                  } else {
+                    const res = await fetch('/api/settings', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        brandName: trimmedBrand,
+                        userName: trimmedName,
+                        nickname: trimmedNick,
+                      }),
+                    });
+                    const data = await res.json().catch(() => null);
+                    if (!res.ok || data?.success === false) {
+                      throw new Error(data?.error || `Save failed (HTTP ${res.status})`);
+                    }
+                    await onSaveBrandName?.(trimmedBrand);
+                    await onSaveName?.(trimmedName, trimmedNick);
                   }
+                  const msg = dbStatus?.connected
+                    ? 'Brand & identity saved to Neon database.'
+                    : 'Saved to local workspace file only (Neon DATABASE_URL not connected; container restarts will clear local disk).';
+                  setIdentityFeedback({ type: 'success', text: msg });
+                  setFeedbackToast(msg);
+                  setTimeout(() => setFeedbackToast(null), 3500);
                 } catch (err) {
-                  console.warn('Failed to save brand to database:', err);
+                  const msg = err instanceof Error ? err.message : 'Failed to save brand & identity.';
+                  setIdentityFeedback({ type: 'error', text: msg });
                 } finally {
                   setIsSavingIdentity(false);
                 }
@@ -1509,6 +1571,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Active Model Summary Banner */}
         <div className="p-4 rounded-xl bg-gradient-to-r from-amber-500/10 via-indigo-500/10 to-slate-100 dark:from-amber-950/40 dark:via-indigo-950/30 dark:to-slate-950/40 border border-amber-300 dark:border-amber-500/40 space-y-3">
+          {dbStatus && !dbStatus.connected && (
+            <div className="rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-800 dark:text-rose-200 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+              <span>
+                <strong>Neon PostgreSQL is not connected</strong> (<code>DATABASE_URL</code> is {dbStatus.configured ? 'unreachable' : 'unset'}). Active provider, selected models, and API keys cannot persist across server restarts until a valid <code>DATABASE_URL</code> secret is configured.
+              </span>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-800 dark:text-rose-200 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <span className="text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400 block mb-0.5">
@@ -1516,10 +1594,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </span>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-sm sm:text-base font-bold text-slate-900 dark:text-white">
-                  {activeModel}
+                  {activeModel || <span className="text-slate-400 dark:text-slate-500 font-normal">No active model selected</span>}
                 </span>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 uppercase font-semibold">
-                  {activeProvider}
+                  {activeProvider || 'none'}
                 </span>
               </div>
             </div>
@@ -1527,7 +1605,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <div className="flex items-center gap-1.5 bg-white dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-lg p-1 text-xs">
               <span className="text-[11px] text-slate-500 dark:text-slate-400 px-1">Switch Provider:</span>
               <button
-                onClick={() => onProviderChange('gemini')}
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  void Promise.resolve(onProviderChange('gemini')).catch((err) => {
+                    setErrorMsg(err instanceof Error ? err.message : 'Failed to switch provider.');
+                  });
+                }}
                 className={`px-2 py-1 rounded text-xs font-medium transition ${
                   activeProvider === 'gemini'
                     ? 'bg-indigo-600 text-white font-bold'
@@ -1537,7 +1621,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 Gemini
               </button>
               <button
-                onClick={() => onProviderChange('groq')}
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  void Promise.resolve(onProviderChange('groq')).catch((err) => {
+                    setErrorMsg(err instanceof Error ? err.message : 'Failed to switch provider.');
+                  });
+                }}
                 className={`px-2 py-1 rounded text-xs font-medium transition ${
                   activeProvider === 'groq'
                     ? 'bg-emerald-600 text-white font-bold'
@@ -1547,7 +1637,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 Groq
               </button>
               <button
-                onClick={() => onProviderChange('mistral')}
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  void Promise.resolve(onProviderChange('mistral')).catch((err) => {
+                    setErrorMsg(err instanceof Error ? err.message : 'Failed to switch provider.');
+                  });
+                }}
                 className={`px-2 py-1 rounded text-xs font-medium transition ${
                   activeProvider === 'mistral'
                     ? 'bg-amber-600 text-slate-950 font-bold'
@@ -1576,7 +1672,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
               <div className="font-mono text-xs font-semibold text-slate-900 dark:text-white truncate mt-0.5">
-                {providerModels.gemini}
+                {providerModels.gemini || <span className="text-slate-400 dark:text-slate-500 font-normal">Not selected</span>}
               </div>
             </div>
 
@@ -1595,7 +1691,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
               <div className="font-mono text-xs font-semibold text-slate-900 dark:text-white truncate mt-0.5">
-                {providerModels.groq}
+                {providerModels.groq || <span className="text-slate-400 dark:text-slate-500 font-normal">Not selected</span>}
               </div>
             </div>
 
@@ -1614,7 +1710,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
               <div className="font-mono text-xs font-semibold text-slate-900 dark:text-white truncate mt-0.5">
-                {providerModels.mistral}
+                {providerModels.mistral || <span className="text-slate-400 dark:text-slate-500 font-normal">Not selected</span>}
               </div>
             </div>
           </div>

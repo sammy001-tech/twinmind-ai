@@ -1,7 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { neonDb } from '../db/neonService.ts';
 import { settingsManager } from '../db/settingsService.ts';
-import type { AutonomousMemoryEvent } from '../../src/types/index.ts';
+import {
+  normalizeInstructionScope,
+  normalizeProjectKey,
+  resolveInstructions,
+  type InstructionResolutionContext,
+} from './instructionRegistryService.ts';
+import type {
+  AutonomousMemoryEvent,
+  InstructionResolutionManifest,
+  InstructionScope,
+  PersonaMemoryRecord,
+} from '../../src/types/index.ts';
 
 export type PersonaMemoryCategory = 'preference' | 'opinion' | 'correction' | 'feedback';
 
@@ -20,6 +31,12 @@ export interface ExtractedMemoryCandidate {
 
 export interface PersonaMemory extends ExtractedMemoryCandidate {
   id: number;
+  scope?: InstructionScope;
+  project_key?: string | null;
+  thread_id?: string | null;
+  expires_at?: string | null;
+  is_active?: boolean;
+  superseded_by_id?: number | null;
   metadata: Record<string, unknown>;
   created_at: string;
 }
@@ -29,6 +46,12 @@ export interface ExistingPersonaRule {
   category: string;
   content: string;
   priority: number;
+  scope?: InstructionScope;
+  project_key?: string | null;
+  thread_id?: string | null;
+  expires_at?: string | null;
+  is_active?: boolean;
+  superseded_by_id?: number | null;
 }
 
 export type ActiveRuleOperation =
@@ -56,11 +79,25 @@ export interface ActiveRuleStore {
     category: PersonaMemoryCategory;
     content: string;
     priority?: number;
+    scope?: InstructionScope;
+    project_key?: string | null;
+    thread_id?: string | null;
+    expires_at?: string | null;
+    is_active?: boolean;
     metadata?: Record<string, unknown>;
   }) => Promise<number | null>;
   updateRule: (
     id: number,
-    patch: { category?: PersonaMemoryCategory; content?: string; priority?: number }
+    patch: {
+      category?: PersonaMemoryCategory;
+      content?: string;
+      priority?: number;
+      scope?: InstructionScope;
+      project_key?: string | null;
+      thread_id?: string | null;
+      expires_at?: string | null;
+      is_active?: boolean;
+    }
   ) => Promise<boolean>;
   deleteRule: (id: number) => Promise<boolean>;
 }
@@ -467,6 +504,10 @@ export interface ManageActiveRulesToolInput {
   category?: unknown;
   content?: unknown;
   priority?: unknown;
+  scope?: unknown;
+  projectKey?: unknown;
+  threadId?: unknown;
+  expiresAt?: unknown;
 }
 
 const neonActiveRuleStore: ActiveRuleStore = {
@@ -591,6 +632,11 @@ export async function executeManageActiveRules(
     };
   }
 
+  const scope = raw.scope !== undefined ? normalizeInstructionScope(raw.scope) : undefined;
+  const projectKey = raw.projectKey !== undefined ? normalizeProjectKey(raw.projectKey) : undefined;
+  const threadId = typeof raw.threadId === 'string' && raw.threadId.trim() ? raw.threadId.trim() : undefined;
+  const expiresAt = typeof raw.expiresAt === 'string' && raw.expiresAt.trim() ? raw.expiresAt.trim() : undefined;
+
   if (action === 'update') {
     const target = findTargetRule();
     if (!target) {
@@ -612,7 +658,16 @@ export async function executeManageActiveRules(
         ? raw.priority
         : target.priority;
 
-    const ok = await store.updateRule(target.id, { category, content, priority });
+    const ok = await store.updateRule(target.id, {
+      category,
+      content,
+      priority,
+      ...(scope !== undefined ? { scope } : {}),
+      ...(projectKey !== undefined ? { project_key: projectKey } : {}),
+      ...(threadId !== undefined ? { thread_id: threadId } : {}),
+      ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+      is_active: true,
+    });
     if (!ok) {
       return {
         status: 'error',
@@ -654,7 +709,16 @@ export async function executeManageActiveRules(
 
   const existingSimilar = existing.find((r) => computeRuleTokenSimilarity(r.content, content) >= 0.72);
   if (existingSimilar) {
-    const ok = await store.updateRule(existingSimilar.id, { category, content, priority });
+    const ok = await store.updateRule(existingSimilar.id, {
+      category,
+      content,
+      priority,
+      ...(scope !== undefined ? { scope } : {}),
+      ...(projectKey !== undefined ? { project_key: projectKey } : {}),
+      ...(threadId !== undefined ? { thread_id: threadId } : {}),
+      ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
+      is_active: true,
+    });
     if (!ok) {
       return {
         status: 'error',
@@ -684,10 +748,16 @@ export async function executeManageActiveRules(
     };
   }
 
+  const effectiveScope: InstructionScope = scope || 'permanent';
   const insertedId = await store.addRule({
     category,
     content,
     priority,
+    scope: effectiveScope,
+    project_key: projectKey ?? null,
+    thread_id: threadId ?? null,
+    expires_at: expiresAt ?? null,
+    is_active: true,
     metadata: { source: 'in_turn_tool' },
   });
   if (!insertedId || insertedId <= 0) {
@@ -794,45 +864,40 @@ class MemoryService {
   }
 
   /**
-   * Get all learned persona context formatted with explicit [Rule #id] markers
-   * so in-turn updates and removals target exact database IDs.
+   * Deterministically resolve Permanent > Project > Temporary instructions for the active thread,
+   * automatically expiring stale temporary rules and returning both prompt block & inspection manifest.
    */
-  public async getLearnedPersonaContext(): Promise<string> {
-    const memories = await neonDb.getPersonaMemories(50);
-    if (memories.length === 0) return '';
+  public async resolveInstructionsForThread(
+    context: InstructionResolutionContext = {}
+  ): Promise<{ manifest: InstructionResolutionManifest; promptBlock: string }> {
+    const rows = await neonDb.getPersonaMemories(150);
+    let projectKey = context.projectKey;
+    if (projectKey === undefined && context.threadId) {
+      projectKey = await neonDb.getThreadProjectKey(context.threadId).catch(() => null);
+    }
 
-    const categories = {
-      correction: [] as string[],
-      preference: [] as string[],
-      opinion: [] as string[],
-      feedback: [] as string[],
-    };
-
-    memories.forEach((m) => {
-      if (categories[m.category as keyof typeof categories]) {
-        categories[m.category as keyof typeof categories].push(`[Rule #${m.id}] ${m.content}`);
+    const { manifest, expiredIds, promptBlock } = resolveInstructions(
+      rows as unknown as PersonaMemoryRecord[],
+      {
+        threadId: context.threadId,
+        projectKey,
+        now: context.now,
       }
-    });
+    );
 
-    let context = '\n\n======================================================\n';
-    context += 'EVOLVING PERSONA KNOWLEDGE & ACTIVE RULES (LEARNED FROM INTERACTIONS)\n';
-    context += '======================================================\n';
-    context += 'These are EXPLICIT corrections and preferences shared by your counterpart. They override any generic persona rules. Use manageActiveRules with the Rule #id when the user revises or withdraws one:\n';
-
-    if (categories.correction.length > 0) {
-      context += '\nCORE CORRECTIONS (CRITICAL):\n- ' + categories.correction.join('\n- ');
-    }
-    if (categories.preference.length > 0) {
-      context += '\nUSER PREFERENCES:\n- ' + categories.preference.join('\n- ');
-    }
-    if (categories.opinion.length > 0) {
-      context += '\nVALUES & OPINIONS:\n- ' + categories.opinion.join('\n- ');
-    }
-    if (categories.feedback.length > 0) {
-      context += '\nFEEDBACK HISTORY (STYLE GUIDES):\n- ' + categories.feedback.join('\n- ');
+    if (expiredIds.length > 0) {
+      void neonDb.deactivateExpiredPersonaMemories(expiredIds);
     }
 
-    return context;
+    return { manifest, promptBlock };
+  }
+
+  /**
+   * Backward-compatible getter delegating to deterministic scoped resolution
+   */
+  public async getLearnedPersonaContext(context: InstructionResolutionContext = {}): Promise<string> {
+    const { promptBlock } = await this.resolveInstructionsForThread(context);
+    return promptBlock;
   }
 }
 

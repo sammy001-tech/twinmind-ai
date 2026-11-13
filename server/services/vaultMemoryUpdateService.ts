@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { knowledgeService } from '../db/knowledgeService.ts';
-import type { AutonomousMemoryEvent } from '../../src/types/index.ts';
+import { inferImpactLevelFromCategory } from './memoryGovernanceService.ts';
+import type {
+  AutonomousMemoryEvent,
+  MemoryConfidenceStatus,
+  MemoryImpactLevel,
+  MemoryLifecycleStatus,
+  MemorySourceType,
+} from '../../src/types/index.ts';
 
 export type VaultUpdateCategory =
   | 'personal_note'
@@ -45,13 +52,26 @@ export interface VaultMemoryStore {
   listDocuments: (category?: string, query?: string, limit?: number) => Promise<VaultDocumentRecord[]>;
   updateDocument: (
     id: string | number,
-    patch: { title?: string; content?: string; category?: string; tags?: string[] }
+    patch: {
+      title?: string;
+      content?: string;
+      category?: string;
+      tags?: string[];
+      lastVerifiedAt?: string | null;
+      lifecycleStatus?: MemoryLifecycleStatus;
+      confidenceStatus?: MemoryConfidenceStatus;
+    }
   ) => Promise<boolean>;
   addDocument: (params: {
     title: string;
     content: string;
     category?: string;
     tags?: string[];
+    sourceType?: MemorySourceType;
+    confidenceStatus?: MemoryConfidenceStatus;
+    impactLevel?: MemoryImpactLevel;
+    lifecycleStatus?: MemoryLifecycleStatus;
+    lastVerifiedAt?: string | null;
   }) => Promise<{ id: string | number; success: boolean; hasEmbedding?: boolean }>;
   deleteDocument: (id: string | number) => Promise<boolean>;
 }
@@ -528,6 +548,9 @@ export async function executeVaultMemoryUpdate(
       const updatedOk = await store.updateDocument(matchedDoc.id, {
         title: matchedDoc.title,
         content: updatedContent,
+        confidenceStatus: 'confirmed',
+        lifecycleStatus: 'active',
+        lastVerifiedAt: new Date().toISOString(),
       });
 
       if (!updatedOk) {
@@ -579,6 +602,11 @@ export async function executeVaultMemoryUpdate(
     content: `- **Rule / Note (${dateStamp}):** ${input.memoryEntry}`,
     category: input.category,
     tags: extractSignificantTokens(input.topic).slice(0, 4),
+    sourceType: 'in_turn_synthesis',
+    confidenceStatus: 'confirmed',
+    impactLevel: inferImpactLevelFromCategory(input.category, input.tier),
+    lifecycleStatus: 'active',
+    lastVerifiedAt: new Date().toISOString(),
   });
 
   if (!created || !created.success || !created.id) {

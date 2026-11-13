@@ -19,6 +19,11 @@ import {
   type VisualEvidencePackage,
   type ImageAttachment,
 } from './visionCapabilityService.ts';
+import type {
+  InstructionResolutionManifest,
+  MemoryImpactLevel,
+  RetrievedMemoryDiagnostic,
+} from '../../src/types/index.ts';
 
 const Type = {
   OBJECT: 'OBJECT',
@@ -254,6 +259,18 @@ export const GEMINI_TWIN_TOOLS: any[] = [
         priority: {
           type: Type.NUMBER,
           description: 'Optional priority 1 (lowest) to 5 (highest)',
+        },
+        scope: {
+          type: Type.STRING,
+          description: 'Optional scope: "permanent" (global durable), "project" (project-isolated), or "temporary" (session-bound)',
+        },
+        projectKey: {
+          type: Type.STRING,
+          description: 'Optional normalized project key when scope is "project" (e.g. "twinmind-ai")',
+        },
+        expiresAt: {
+          type: Type.STRING,
+          description: 'Optional ISO-8601 expiry timestamp when scope is "temporary"',
         },
       },
       required: ['action'],
@@ -520,6 +537,18 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
             type: 'number',
             description: 'Optional priority 1 (lowest) to 5 (highest)',
           },
+          scope: {
+            type: 'string',
+            description: 'Optional scope: "permanent", "project", or "temporary"',
+          },
+          projectKey: {
+            type: 'string',
+            description: 'Optional normalized project key when scope is "project"',
+          },
+          expiresAt: {
+            type: 'string',
+            description: 'Optional ISO-8601 expiry timestamp when scope is "temporary"',
+          },
         },
         required: ['action'],
       },
@@ -552,11 +581,13 @@ export interface TwinAgentTurnOptions {
   modelOverride?: string;
   thinkingLevel?: 'low' | 'medium' | 'high';
   threadId?: string;
+  projectKey?: string | null;
   pinnedDocs?: Array<{ file_name: string; format: string; content: string; char_count?: number }>;
   signal?: AbortSignal;
   onTextChunk?: (chunk: string) => void;
   onToolStart?: (toolName: string, args: Record<string, unknown>, toolId: string) => void;
   onToolComplete?: (toolName: string, result: unknown, toolId: string) => void;
+  onInstructionManifest?: (manifest: InstructionResolutionManifest) => void;
 }
 
 export interface SuggestedAction {
@@ -569,6 +600,14 @@ export interface TwinAgentTurnResult {
   reply: string;
   toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }>;
   recalledKnowledge: Array<{ id: string | number; title: string; content: string; category: string; similarity?: number }>;
+  retrievalDiagnostics?: RetrievedMemoryDiagnostic[];
+  memoryConflicts?: Array<{
+    existingDocId: number | string;
+    title: string;
+    explanation: string;
+    impactLevel: MemoryImpactLevel;
+  }>;
+  instructionManifest?: InstructionResolutionManifest;
   provider: string;
   model: string;
   suggestedActions?: SuggestedAction[];
@@ -1663,20 +1702,53 @@ Respond in valid JSON:
       'Live model resolution',
     );
 
-    // 1. Explicit Concurrent Retrieval: Vault + Learned Context + Calibration Metrics
-    let recalledKnowledge: Array<{ id: string | number; title: string; content: string; category: string; similarity?: number }> = [];
+    // 1. Explicit Concurrent Retrieval: Governed Vault Diagnostics + Deterministic Instruction Registry + Calibration + History
+    let recalledKnowledge: Array<{
+      id: string | number;
+      title: string;
+      content: string;
+      category: string;
+      similarity?: number;
+      confidenceStatus?: string;
+      lifecycleStatus?: string;
+      sourceType?: string;
+      impactLevel?: string;
+      validFrom?: string | null;
+      lastVerifiedAt?: string | null;
+    }> = [];
+    let retrievalDiagnostics: RetrievedMemoryDiagnostic[] = [];
+    let memoryConflicts: Array<{
+      existingDocId: number | string;
+      title: string;
+      explanation: string;
+      impactLevel: MemoryImpactLevel;
+    }> = [];
     let learnedContext = '';
+    let instructionManifest: InstructionResolutionManifest | undefined;
     let calibrationContext = '';
     let historicalContext = '';
     try {
-      const [k, p, c, h] = await Promise.all([
-        knowledgeService.search(userPrompt, 3, 0.45).catch(() => []),
-        memoryService.getLearnedPersonaContext().catch(() => ''),
+      const [kDiag, instRes, c, h] = await Promise.all([
+        knowledgeService
+          .searchWithDiagnostics(userPrompt, 5, 0.42)
+          .catch(() => ({ primaryRecords: [], diagnostics: [], conflictsDetected: [] })),
+        memoryService
+          .resolveInstructionsForThread({ threadId: options.threadId, projectKey: options.projectKey })
+          .catch(() => ({ manifest: undefined, promptBlock: '' })),
         calibrationService.getCalibrationContext().catch(() => ''),
-        historicalAwarenessService.getLastInteractionMetadata().then(m => historicalAwarenessService.formatHistoricalContext(m)).catch(() => '')
+        historicalAwarenessService
+          .getLastInteractionMetadata()
+          .then((m) => historicalAwarenessService.formatHistoricalContext(m))
+          .catch(() => ''),
       ]);
-      recalledKnowledge = k;
-      learnedContext = p;
+      recalledKnowledge = kDiag.primaryRecords;
+      retrievalDiagnostics = kDiag.diagnostics;
+      memoryConflicts = kDiag.conflictsDetected;
+      learnedContext = instRes.promptBlock;
+      instructionManifest = instRes.manifest;
+      if (instructionManifest) {
+        options.onInstructionManifest?.(instructionManifest);
+      }
       calibrationContext = c;
       historicalContext = h;
     } catch (kErr) {
@@ -1842,6 +1914,10 @@ Respond in valid JSON:
           category: args.category,
           content: args.content,
           priority: args.priority,
+          scope: args.scope,
+          projectKey: args.projectKey ?? options.projectKey,
+          threadId: options.threadId,
+          expiresAt: args.expiresAt,
         });
       } else if (name === 'generateArtifact') {
         const { specialistSwarmService } = await import('./specialistSwarmService.ts');
@@ -2135,6 +2211,9 @@ Respond in valid JSON:
             reply: finalReply,
             toolsExecuted,
             recalledKnowledge,
+            retrievalDiagnostics,
+            memoryConflicts,
+            instructionManifest,
             provider,
             model,
             suggestedActions,
@@ -2204,6 +2283,9 @@ Respond in valid JSON:
         reply: finalReply,
         toolsExecuted,
         recalledKnowledge,
+        retrievalDiagnostics,
+        memoryConflicts,
+        instructionManifest,
         provider,
         model,
         suggestedActions,
@@ -2317,6 +2399,9 @@ Respond in valid JSON:
             reply: finalReply,
             toolsExecuted,
             recalledKnowledge,
+            retrievalDiagnostics,
+            memoryConflicts,
+            instructionManifest,
             provider,
             model,
             suggestedActions,
@@ -2360,6 +2445,9 @@ Respond in valid JSON:
         reply: finalReply,
         toolsExecuted,
         recalledKnowledge,
+        retrievalDiagnostics,
+        memoryConflicts,
+        instructionManifest,
         provider,
         model,
         suggestedActions,

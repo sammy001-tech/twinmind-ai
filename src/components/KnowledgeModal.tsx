@@ -4,6 +4,12 @@ import {
   BeliefConflict,
   PersonaMemoryRecord,
   VaultDuplicateCluster,
+  InstructionScope,
+  MemoryConfidenceStatus,
+  MemoryImpactLevel,
+  MemoryLifecycleStatus,
+  MemorySourceType,
+  RetrievedMemoryDiagnostic,
 } from '../types/index.ts';
 import { KnowledgeGraphView } from './KnowledgeGraphView.tsx';
 import { BeliefConflictCard } from './BeliefConflictCard.tsx';
@@ -34,6 +40,10 @@ import {
   Pencil,
   Shield,
   Layers,
+  Power,
+  Clock,
+  FolderGit2,
+  Activity,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { BeliefEvolutionTimeline } from './BeliefEvolutionTimeline.tsx';
@@ -97,23 +107,40 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [rules, setRules] = useState<PersonaMemoryRecord[]>([]);
   const [rulesLoading, setRulesLoading] = useState(false);
   const [rulesError, setRulesError] = useState<string | null>(null);
+  const [ruleScopeFilter, setRuleScopeFilter] = useState<'all' | 'permanent' | 'project' | 'temporary' | 'inactive'>('all');
   const [newRuleCategory, setNewRuleCategory] = useState<'preference' | 'correction' | 'feedback' | 'opinion'>('preference');
   const [newRuleContent, setNewRuleContent] = useState('');
   const [newRulePriority, setNewRulePriority] = useState(2);
+  const [newRuleScope, setNewRuleScope] = useState<InstructionScope>('permanent');
+  const [newRuleProjectKey, setNewRuleProjectKey] = useState('');
+  const [newRuleExpiryPreset, setNewRuleExpiryPreset] = useState<'none' | '60' | '360' | '1440' | '10080'>('1440');
   const [isCreatingRule, setIsCreatingRule] = useState(false);
   const [editingRuleId, setEditingRuleId] = useState<number | null>(null);
   const [editRuleCategory, setEditRuleCategory] = useState('preference');
   const [editRuleContent, setEditRuleContent] = useState('');
   const [editRulePriority, setEditRulePriority] = useState(2);
+  const [editRuleScope, setEditRuleScope] = useState<InstructionScope>('permanent');
+  const [editRuleProjectKey, setEditRuleProjectKey] = useState('');
+  const [editRuleExpiryPreset, setEditRuleExpiryPreset] = useState<'keep' | 'none' | '60' | '360' | '1440' | '10080'>('keep');
   const [isSavingRule, setIsSavingRule] = useState(false);
+  const [togglingRuleId, setTogglingRuleId] = useState<number | null>(null);
 
-  // Duplicate Audit state
+  // Duplicate Audit & Retrieval Diagnostics state
   const [duplicateClusters, setDuplicateClusters] = useState<VaultDuplicateCluster[]>([]);
   const [isScanningDuplicates, setIsScanningDuplicates] = useState(false);
   const [showDuplicatesPanel, setShowDuplicatesPanel] = useState(false);
   const [duplicatesFeedback, setDuplicatesFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [mergingClusterId, setMergingClusterId] = useState<string | number | null>(null);
   const [confirmDeleteDocId, setConfirmDeleteDocId] = useState<string | number | null>(null);
+  const [lifecycleFilter, setLifecycleFilter] = useState<'all' | MemoryLifecycleStatus>('all');
+  const [showDiagnosticsPanel, setShowDiagnosticsPanel] = useState(false);
+  const [diagQuery, setDiagQuery] = useState('');
+  const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+  const [diagnosticsResult, setDiagnosticsResult] = useState<{
+    diagnostics: RetrievedMemoryDiagnostic[];
+    conflictsDetected: Array<{ existingDocId?: number | string; title: string; explanation: string; impactLevel?: MemoryImpactLevel }>;
+  } | null>(null);
 
   const handleScanConflicts = async () => {
     setIsScanningConflicts(true);
@@ -159,6 +186,9 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [isCustomCategory, setIsCustomCategory] = useState(false);
   const [customCategoryName, setCustomCategoryName] = useState('');
   const [tagsInput, setTagsInput] = useState('');
+  const [confidenceInput, setConfidenceInput] = useState<MemoryConfidenceStatus>('confirmed');
+  const [impactInput, setImpactInput] = useState<MemoryImpactLevel>('medium');
+  const [sourceTypeInput, setSourceTypeInput] = useState<MemorySourceType>('direct_directive');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -168,6 +198,10 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [editContent, setEditContent] = useState('');
   const [editCategory, setEditCategory] = useState('personal_note');
   const [editTags, setEditTags] = useState('');
+  const [editConfidence, setEditConfidence] = useState<MemoryConfidenceStatus>('confirmed');
+  const [editImpact, setEditImpact] = useState<MemoryImpactLevel>('medium');
+  const [editSourceType, setEditSourceType] = useState<MemorySourceType>('direct_directive');
+  const [editLifecycle, setEditLifecycle] = useState<MemoryLifecycleStatus>('active');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
@@ -420,9 +454,17 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
       setRulesError('Rule content cannot be empty.');
       return;
     }
+    if (newRuleScope === 'project' && !newRuleProjectKey.trim()) {
+      setRulesError('Project key is required when creating a project-scoped rule.');
+      return;
+    }
     setIsCreatingRule(true);
     setRulesError(null);
     try {
+      const expiresAt =
+        newRuleScope === 'temporary' && newRuleExpiryPreset !== 'none'
+          ? new Date(Date.now() + Number(newRuleExpiryPreset) * 60_000).toISOString()
+          : null;
       const res = await fetch('/api/persona-memories', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -430,6 +472,9 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
           category: newRuleCategory,
           content: newRuleContent.trim(),
           priority: newRulePriority,
+          scope: newRuleScope,
+          projectKey: newRuleScope === 'project' ? newRuleProjectKey.trim() : null,
+          expiresAt,
         }),
       });
       const data = await res.json().catch(() => null);
@@ -437,6 +482,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
         throw new Error(data?.error || 'Failed to save active rule.');
       }
       setNewRuleContent('');
+      if (newRuleScope === 'project') setNewRuleProjectKey('');
       await fetchRules();
     } catch (err: unknown) {
       setRulesError(err instanceof Error ? err.message : 'Failed to create rule.');
@@ -450,6 +496,9 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
     setEditRuleCategory(rule.category);
     setEditRuleContent(rule.content);
     setEditRulePriority(rule.priority);
+    setEditRuleScope((rule.scope as InstructionScope) || 'permanent');
+    setEditRuleProjectKey(rule.project_key || '');
+    setEditRuleExpiryPreset('keep');
     setRulesError(null);
   };
 
@@ -458,17 +507,31 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
       setRulesError('Rule content cannot be empty.');
       return;
     }
+    if (editRuleScope === 'project' && !editRuleProjectKey.trim()) {
+      setRulesError('Project key is required for project-scoped rules.');
+      return;
+    }
     setIsSavingRule(true);
     setRulesError(null);
     try {
+      const payload: Record<string, unknown> = {
+        category: editRuleCategory,
+        content: editRuleContent.trim(),
+        priority: editRulePriority,
+        scope: editRuleScope,
+        projectKey: editRuleScope === 'project' ? editRuleProjectKey.trim() : null,
+      };
+      if (editRuleScope !== 'temporary') {
+        payload.expiresAt = null;
+      } else if (editRuleExpiryPreset === 'none') {
+        payload.expiresAt = null;
+      } else if (editRuleExpiryPreset !== 'keep') {
+        payload.expiresAt = new Date(Date.now() + Number(editRuleExpiryPreset) * 60_000).toISOString();
+      }
       const res = await fetch(`/api/persona-memories/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          category: editRuleCategory,
-          content: editRuleContent.trim(),
-          priority: editRulePriority,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data?.success) {
@@ -483,6 +546,28 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
     }
   };
 
+  const handleToggleRuleActive = async (rule: PersonaMemoryRecord) => {
+    setTogglingRuleId(rule.id);
+    setRulesError(null);
+    try {
+      const nextActive = rule.is_active === false;
+      const res = await fetch(`/api/persona-memories/${rule.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: nextActive }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to toggle rule activation.');
+      }
+      await fetchRules();
+    } catch (err: unknown) {
+      setRulesError(err instanceof Error ? err.message : 'Failed to update rule status.');
+    } finally {
+      setTogglingRuleId(null);
+    }
+  };
+
   const handleDeleteRule = async (id: number) => {
     setRulesError(null);
     try {
@@ -494,6 +579,35 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
       setRules((prev) => prev.filter((r) => r.id !== id));
     } catch (err: unknown) {
       setRulesError(err instanceof Error ? err.message : 'Failed to delete rule.');
+    }
+  };
+
+  const handleRunDiagnostics = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!diagQuery.trim()) {
+      setDiagnosticsError('Enter a query to inspect Vault retrieval ranking and exclusions.');
+      return;
+    }
+    setIsRunningDiagnostics(true);
+    setDiagnosticsError(null);
+    try {
+      const res = await fetch('/api/knowledge/diagnostics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: diagQuery.trim(), limit: 8, threshold: 0.3 }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to run retrieval diagnostics.');
+      }
+      setDiagnosticsResult({
+        diagnostics: Array.isArray(data.diagnostics) ? data.diagnostics : [],
+        conflictsDetected: Array.isArray(data.conflictsDetected) ? data.conflictsDetected : [],
+      });
+    } catch (err: unknown) {
+      setDiagnosticsError(err instanceof Error ? err.message : 'Diagnostics request failed.');
+    } finally {
+      setIsRunningDiagnostics(false);
     }
   };
 
@@ -613,6 +727,9 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
           content: contentInput.trim(),
           category: finalCategory,
           tags,
+          confidenceStatus: confidenceInput,
+          impactLevel: impactInput,
+          sourceType: sourceTypeInput,
         }),
       });
 
@@ -647,6 +764,10 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
     setEditContent(doc.content);
     setEditCategory(doc.category || 'personal_note');
     setEditTags(Array.isArray(doc.tags) ? doc.tags.join(', ') : '');
+    setEditConfidence(doc.confidenceStatus || 'confirmed');
+    setEditImpact(doc.impactLevel || 'medium');
+    setEditSourceType(doc.sourceType || 'direct_directive');
+    setEditLifecycle(doc.lifecycleStatus || 'active');
     setEditError(null);
   };
 
@@ -678,6 +799,10 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
           content: editContent.trim(),
           category: editCategory.trim().toLowerCase().replace(/\s+/g, '_') || 'personal_note',
           tags: splitTags,
+          confidenceStatus: editConfidence,
+          impactLevel: editImpact,
+          sourceType: editSourceType,
+          lifecycleStatus: editLifecycle,
         }),
       });
 
@@ -701,6 +826,10 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                       content: editContent.trim(),
                       category: editCategory.trim().toLowerCase().replace(/\s+/g, '_') || 'personal_note',
                       tags: splitTags,
+                      confidenceStatus: editConfidence,
+                      impactLevel: editImpact,
+                      sourceType: editSourceType,
+                      lifecycleStatus: editLifecycle,
                     }
                   : d
               )
@@ -740,7 +869,15 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
 
   if (!isOpen) return null;
 
-  const displayList = searchResults !== null ? searchResults : documents;
+  const rawList = searchResults !== null ? searchResults : documents;
+  const displayList = lifecycleFilter === 'all'
+    ? rawList
+    : rawList.filter((d) => (d.lifecycleStatus || 'active') === lifecycleFilter);
+  const filteredRules = rules.filter((r) => {
+    if (ruleScopeFilter === 'inactive') return r.is_active === false;
+    if (ruleScopeFilter === 'all') return true;
+    return r.is_active !== false && ((r.scope as InstructionScope) || 'permanent') === ruleScopeFilter;
+  });
 
   // Build list of category options for select
   const uniqueCategoryNames = Array.from(
@@ -1038,6 +1175,19 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                   <div className="ml-auto flex items-center gap-1.5">
                     <button
                       type="button"
+                      onClick={() => setShowDiagnosticsPanel((prev) => !prev)}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] border transition flex items-center gap-1 ${
+                        showDiagnosticsPanel
+                          ? 'bg-indigo-500/15 border-indigo-500/40 text-indigo-700 dark:text-indigo-300 font-semibold'
+                          : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                      }`}
+                      title="Run retrieval diagnostics to see similarity scores, provenance, and excluded superseded records"
+                    >
+                      <Activity className="w-3 h-3" />
+                      <span>Diagnostics</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => { void handleScanDuplicates(); }}
                       disabled={isScanningDuplicates}
                       className="px-2 py-0.5 rounded-lg text-[11px] bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition flex items-center gap-1 disabled:opacity-50"
@@ -1059,7 +1209,114 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Memory Lifecycle Filter Row */}
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] pt-0.5">
+                  <span className="text-slate-500 dark:text-slate-400">Lifecycle:</span>
+                  {(['all', 'active', 'conflicted', 'superseded', 'unconfirmed'] as const).map((statusKey) => (
+                    <button
+                      key={statusKey}
+                      type="button"
+                      onClick={() => setLifecycleFilter(statusKey)}
+                      className={`px-2 py-0.5 rounded-md border capitalize transition ${
+                        lifecycleFilter === statusKey
+                          ? 'bg-slate-800 text-white border-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:border-slate-100 font-semibold'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      {statusKey}
+                    </button>
+                  ))}
+                </div>
               </form>
+
+              {/* Retrieval Diagnostics Panel */}
+              {showDiagnosticsPanel && (
+                <div className="p-3.5 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/20 border border-indigo-300/60 dark:border-indigo-700/40 space-y-3 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                      <h4 className="font-bold text-slate-900 dark:text-white">
+                        Memory Retrieval &amp; Supersession Diagnostics
+                      </h4>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowDiagnosticsPanel(false)}
+                      className="p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                      aria-label="Close diagnostics panel"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleRunDiagnostics} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={diagQuery}
+                      onChange={(e) => setDiagQuery(e.target.value)}
+                      placeholder="Test query (e.g., 'Did we decide to use Neon or Firebase?')"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isRunningDiagnostics}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition disabled:opacity-50"
+                    >
+                      {isRunningDiagnostics ? 'Inspecting...' : 'Run Diagnostic'}
+                    </button>
+                  </form>
+
+                  {diagnosticsError && (
+                    <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-700 dark:text-rose-300">
+                      {diagnosticsError}
+                    </div>
+                  )}
+
+                  {diagnosticsResult && (
+                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                      {diagnosticsResult.diagnostics.length === 0 ? (
+                        <p className="text-[11px] text-slate-500">
+                          No matching Vault records exceeded the similarity threshold for this query.
+                        </p>
+                      ) : (
+                        diagnosticsResult.diagnostics.map((d) => (
+                          <div
+                            key={String(d.id)}
+                            className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="font-semibold text-slate-900 dark:text-white truncate">
+                                  {d.title}
+                                </span>
+                                {d.similarity !== undefined && (
+                                  <span className="font-mono tabular-nums text-[10px] text-emerald-600 dark:text-emerald-400">
+                                    {Math.round(d.similarity * 100)}%
+                                  </span>
+                                )}
+                              </div>
+                              <span
+                                className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold shrink-0 ${
+                                  d.includedInPrompt
+                                    ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                    : 'bg-slate-500/10 text-slate-600 dark:text-slate-300 border-slate-500/25'
+                                }`}
+                              >
+                                {d.includedInPrompt ? 'Included' : 'Excluded'}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 capitalize">
+                              {d.confidenceStatus} · {d.sourceType.replace(/_/g, ' ')} · {d.impactLevel} impact · {d.lifecycleStatus}
+                            </div>
+                            <p className="text-[11px] text-slate-700 dark:text-slate-300">{d.reason}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Duplicate & Near-Duplicate Vault Audit Panel */}
               {showDuplicatesPanel && (
@@ -1258,15 +1515,61 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                               />
                             </div>
 
-                            <textarea
-                              value={editContent}
-                              onChange={(e) => setEditContent(e.target.value)}
-                              rows={5}
-                              placeholder="Memory content..."
-                              className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-                            />
+                              <textarea
+                                value={editContent}
+                                onChange={(e) => setEditContent(e.target.value)}
+                                rows={5}
+                                placeholder="Memory content..."
+                                className="w-full px-2.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+                              />
 
-                            {editError && (
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                <select
+                                  value={editConfidence}
+                                  onChange={(e) => setEditConfidence(e.target.value as MemoryConfidenceStatus)}
+                                  className="px-2 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
+                                  aria-label="Confidence status"
+                                >
+                                  <option value="confirmed">Confirmed</option>
+                                  <option value="provisional">Provisional</option>
+                                  <option value="inferred">Inferred</option>
+                                </select>
+                                <select
+                                  value={editImpact}
+                                  onChange={(e) => setEditImpact(e.target.value as MemoryImpactLevel)}
+                                  className="px-2 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
+                                  aria-label="Impact level"
+                                >
+                                  <option value="low">Low impact</option>
+                                  <option value="medium">Medium impact</option>
+                                  <option value="high">High impact</option>
+                                </select>
+                                <select
+                                  value={editLifecycle}
+                                  onChange={(e) => setEditLifecycle(e.target.value as MemoryLifecycleStatus)}
+                                  className="px-2 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
+                                  aria-label="Lifecycle status"
+                                >
+                                  <option value="active">Active</option>
+                                  <option value="conflicted">Conflicted</option>
+                                  <option value="superseded">Superseded</option>
+                                  <option value="unconfirmed">Unconfirmed</option>
+                                </select>
+                                <select
+                                  value={editSourceType}
+                                  onChange={(e) => setEditSourceType(e.target.value as MemorySourceType)}
+                                  className="px-2 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-[11px] text-slate-700 dark:text-slate-200"
+                                  aria-label="Source provenance"
+                                >
+                                  <option value="direct_directive">Direct directive</option>
+                                  <option value="imported_doc">Imported doc</option>
+                                  <option value="in_turn_synthesis">In-turn synthesis</option>
+                                  <option value="web_research">Web research</option>
+                                  <option value="legacy_import">Legacy import</option>
+                                </select>
+                              </div>
+
+                              {editError && (
                               <div className="p-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[11px] text-red-600 dark:text-red-400">
                                 {editError}
                               </div>
@@ -1306,21 +1609,46 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                                     </span>
                                   )}
                                   {doc.similarity !== undefined && (
-                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold">
+                                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold tabular-nums">
                                       {Math.round(doc.similarity * 100)}% match
                                     </span>
                                   )}
+                                  {doc.lifecycleStatus === 'conflicted' && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActiveTab('conflicts');
+                                        void handleScanConflicts();
+                                      }}
+                                      className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/40 bg-amber-500/15 text-amber-700 dark:text-amber-300 font-semibold"
+                                    >
+                                      Conflicted · Review
+                                    </button>
+                                  )}
+                                  {doc.lifecycleStatus === 'superseded' && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded border border-slate-400/40 bg-slate-500/10 text-slate-600 dark:text-slate-300 font-mono">
+                                      Superseded{doc.supersededById ? ` by #${doc.supersededById}` : ''}
+                                    </span>
+                                  )}
                                 </div>
-                                <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 flex-wrap">
-                                  <span className={`capitalize px-1.5 py-0.2 rounded ${color.bg} ${color.text} ${color.border} border font-medium`}>
+                                <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 flex-wrap">
+                                  <span className={`capitalize px-1.5 py-0.2 rounded ${color.bg} ${color.text} ${color.border} border font-medium text-[10px]`}>
                                     {doc.category.replace(/_/g, ' ')}
                                   </span>
-                                  {doc.createdAt && (
-                                    <span>{new Date(doc.createdAt).toLocaleDateString()}</span>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="capitalize">{doc.confidenceStatus || 'confirmed'}</span>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="capitalize">{(doc.sourceType || 'direct_directive').replace(/_/g, ' ')}</span>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="capitalize">{doc.impactLevel || 'medium'} impact</span>
+                                  {(doc.lastVerifiedAt || doc.updatedAt || doc.createdAt) && (
+                                    <>
+                                      <span aria-hidden="true">·</span>
+                                      <span className="font-mono tabular-nums text-[10px]">
+                                        {new Date(doc.lastVerifiedAt || doc.updatedAt || doc.createdAt || '').toLocaleDateString()}
+                                      </span>
+                                    </>
                                   )}
-                                  <span className="text-emerald-400/80 font-mono">
-                                    vector(768)
-                                  </span>
                                 </div>
                               </div>
 
@@ -1432,11 +1760,22 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
 
               {/* Create Active Rule Form */}
               <form onSubmit={handleCreateRule} className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 space-y-2.5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <select
+                    value={newRuleScope}
+                    onChange={(e) => setNewRuleScope(e.target.value as InstructionScope)}
+                    className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200 font-medium"
+                    aria-label="Rule scope"
+                  >
+                    <option value="permanent">Scope: Permanent (Global)</option>
+                    <option value="project">Scope: Project-Specific</option>
+                    <option value="temporary">Scope: Temporary Session</option>
+                  </select>
                   <select
                     value={newRuleCategory}
                     onChange={(e) => setNewRuleCategory(e.target.value as any)}
                     className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200"
+                    aria-label="Rule category"
                   >
                     <option value="preference">preference</option>
                     <option value="correction">correction</option>
@@ -1447,43 +1786,97 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                     value={newRulePriority}
                     onChange={(e) => setNewRulePriority(Number(e.target.value))}
                     className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200"
+                    aria-label="Rule priority"
                   >
                     {[1, 2, 3, 4, 5].map((p) => (
                       <option key={p} value={p}>Priority {p} {p === 5 ? '(Highest)' : p === 1 ? '(Lowest)' : ''}</option>
                     ))}
                   </select>
                 </div>
+
+                {newRuleScope === 'project' && (
+                  <div className="flex items-center gap-2">
+                    <FolderGit2 className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                    <input
+                      type="text"
+                      value={newRuleProjectKey}
+                      onChange={(e) => setNewRuleProjectKey(e.target.value)}
+                      placeholder="Project key (e.g., twinmind-ai, uniace)..."
+                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white"
+                    />
+                  </div>
+                )}
+
+                {newRuleScope === 'temporary' && (
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                    <select
+                      value={newRuleExpiryPreset}
+                      onChange={(e) => setNewRuleExpiryPreset(e.target.value as any)}
+                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-800 dark:text-slate-200"
+                    >
+                      <option value="60">Auto-expire in 1 hour</option>
+                      <option value="360">Auto-expire in 6 hours</option>
+                      <option value="1440">Auto-expire in 24 hours</option>
+                      <option value="10080">Auto-expire in 7 days</option>
+                      <option value="none">No time limit (manual pause/delete)</option>
+                    </select>
+                  </div>
+                )}
+
                 <textarea
                   value={newRuleContent}
                   onChange={(e) => setNewRuleContent(e.target.value)}
                   rows={2}
-                  placeholder="Add an active rule or preference (e.g., 'Always include concrete code examples when explaining architecture')..."
+                  placeholder="Add an active rule or preference (e.g., 'Always break concepts down step-by-step with practice questions')..."
                   className="w-full px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
-                <div className="flex justify-end">
+                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  <span>Precedence: Permanent &gt; Project &gt; Temporary</span>
                   <button
                     type="submit"
                     disabled={isCreatingRule || !newRuleContent.trim()}
                     className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50"
                   >
                     {isCreatingRule ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
-                    <span>Add Active Rule</span>
+                    <span>Add Scoped Rule</span>
                   </button>
                 </div>
               </form>
+
+              {/* Scope Filter Bar */}
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                {(['all', 'permanent', 'project', 'temporary', 'inactive'] as const).map((scopeKey) => (
+                  <button
+                    key={scopeKey}
+                    type="button"
+                    onClick={() => setRuleScopeFilter(scopeKey)}
+                    className={`px-2.5 py-1 rounded-lg border capitalize transition ${
+                      ruleScopeFilter === scopeKey
+                        ? 'bg-emerald-600 text-white border-emerald-600 font-semibold'
+                        : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                  >
+                    {scopeKey}
+                  </button>
+                ))}
+              </div>
 
               {rulesLoading ? (
                 <div className="py-8 text-center text-xs text-slate-400">
                   <Loader2 className="w-5 h-5 animate-spin mx-auto text-emerald-500 mb-2" />
                   Loading active persona rules...
                 </div>
-              ) : rules.length === 0 ? (
+              ) : filteredRules.length === 0 ? (
                 <div className="p-6 rounded-xl border border-dashed border-slate-300 dark:border-slate-800 text-center text-xs text-slate-500">
-                  No active rules stored yet. Add one above or ask TwinMind to remember a preference.
+                  No rules match this scope filter.
                 </div>
               ) : (
                 <div className="space-y-2.5">
-                  {rules.map((rule) => (
+                  {filteredRules.map((rule) => {
+                    const scope = ((rule.scope as InstructionScope) || 'permanent');
+                    const isActiveRule = rule.is_active !== false;
+                    return (
                     <div
                       key={rule.id}
                       id={`vault-rule-${rule.id}`}
@@ -1491,11 +1884,20 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                         focusedRuleId === rule.id
                           ? 'border-emerald-500 ring-2 ring-emerald-500/40'
                           : 'border-slate-200 dark:border-slate-800'
-                      }`}
+                      } ${!isActiveRule ? 'opacity-70' : ''}`}
                     >
                       {editingRuleId === rule.id ? (
                         <div className="space-y-2">
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <select
+                              value={editRuleScope}
+                              onChange={(e) => setEditRuleScope(e.target.value as InstructionScope)}
+                              className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                            >
+                              <option value="permanent">Permanent</option>
+                              <option value="project">Project</option>
+                              <option value="temporary">Temporary</option>
+                            </select>
                             <select
                               value={editRuleCategory}
                               onChange={(e) => setEditRuleCategory(e.target.value)}
@@ -1516,6 +1918,28 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                               ))}
                             </select>
                           </div>
+                          {editRuleScope === 'project' && (
+                            <input
+                              type="text"
+                              value={editRuleProjectKey}
+                              onChange={(e) => setEditRuleProjectKey(e.target.value)}
+                              placeholder="Project key (e.g., twinmind-ai)"
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                            />
+                          )}
+                          {editRuleScope === 'temporary' && (
+                            <select
+                              value={editRuleExpiryPreset}
+                              onChange={(e) => setEditRuleExpiryPreset(e.target.value as any)}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-xs"
+                            >
+                              <option value="keep">Keep current expiry</option>
+                              <option value="60">Set expiry: 1 hour</option>
+                              <option value="360">Set expiry: 6 hours</option>
+                              <option value="1440">Set expiry: 24 hours</option>
+                              <option value="none">Remove expiry timer</option>
+                            </select>
+                          )}
                           <textarea
                             value={editRuleContent}
                             onChange={(e) => setEditRuleContent(e.target.value)}
@@ -1542,17 +1966,55 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                         </div>
                       ) : (
                         <>
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 text-[10px]">
-                              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold uppercase">
-                                {rule.category}
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-2 text-[11px] flex-wrap">
+                              <span
+                                className={`px-2 py-0.5 rounded border text-[10px] font-semibold capitalize ${
+                                  scope === 'permanent'
+                                    ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                    : scope === 'project'
+                                      ? 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/30'
+                                      : 'bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30'
+                                }`}
+                              >
+                                {scope}
+                                {scope === 'project' && rule.project_key ? `: ${rule.project_key}` : ''}
                               </span>
-                              <span className="text-slate-500 font-mono">Priority {rule.priority}</span>
-                              {rule.created_at && (
-                                <span className="text-slate-400">{new Date(rule.created_at).toLocaleDateString()}</span>
+                              <span className="text-slate-600 dark:text-slate-300 capitalize">{rule.category}</span>
+                              <span aria-hidden="true">·</span>
+                              <span className="text-slate-500 font-mono tabular-nums">P{rule.priority}</span>
+                              {!isActiveRule && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-rose-500 font-semibold">Paused</span>
+                                </>
+                              )}
+                              {rule.superseded_by_id && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-slate-500 font-mono">Superseded by #{rule.superseded_by_id}</span>
+                                </>
+                              )}
+                              {rule.expires_at && (
+                                <>
+                                  <span aria-hidden="true">·</span>
+                                  <span className="text-amber-600 dark:text-amber-400 font-mono tabular-nums">
+                                    Exp {new Date(rule.expires_at).toLocaleString()}
+                                  </span>
+                                </>
                               )}
                             </div>
                             <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={togglingRuleId === rule.id}
+                                onClick={() => { void handleToggleRuleActive(rule); }}
+                                className="px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[10px] font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-slate-800 flex items-center gap-1 transition disabled:opacity-50"
+                                title={isActiveRule ? 'Deactivate rule' : 'Reactivate rule'}
+                              >
+                                <Power className="w-3 h-3" />
+                                <span>{isActiveRule ? 'Pause' : 'Activate'}</span>
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => handleStartEditRule(rule)}
@@ -1577,7 +2039,8 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                         </>
                       )}
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               )}
             </div>
@@ -1803,6 +2266,52 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                       placeholder="e.g., architecture, leverage, saas"
                       className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                     />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Confidence Status
+                    </label>
+                    <select
+                      value={confidenceInput}
+                      onChange={(e) => setConfidenceInput(e.target.value as MemoryConfidenceStatus)}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="confirmed">Confirmed (Authoritative)</option>
+                      <option value="provisional">Provisional</option>
+                      <option value="inferred">Inferred</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Impact Tier
+                    </label>
+                    <select
+                      value={impactInput}
+                      onChange={(e) => setImpactInput(e.target.value as MemoryImpactLevel)}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="low">Low (Auto-supersede safe)</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High (Preserve conflicts)</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                      Source Provenance
+                    </label>
+                    <select
+                      value={sourceTypeInput}
+                      onChange={(e) => setSourceTypeInput(e.target.value as MemorySourceType)}
+                      className="w-full bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="direct_directive">Direct user directive</option>
+                      <option value="imported_doc">Imported document</option>
+                      <option value="web_research">Web research</option>
+                      <option value="in_turn_synthesis">In-turn synthesis</option>
+                    </select>
                   </div>
                 </div>
 

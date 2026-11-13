@@ -66,7 +66,10 @@ export function classifyResponseContent(text: string): ContentVisualMetadata {
         else if (t.type === 'list') {
           stats.lists++;
           stats.listItems += (t as Tokens.List).items?.length || 0;
-        } else if ((t as any).type === 'blockKatex') {
+        } else if (
+          (t as any).type === 'blockKatex' ||
+          ((t as any).type === 'inlineKatex' && Boolean((t as any).displayMode))
+        ) {
           stats.mathBlocks++;
         }
 
@@ -90,13 +93,21 @@ export function classifyResponseContent(text: string): ContentVisualMetadata {
 
   // Determine complexity
   let complexity: ResponseComplexity = 'low';
-  const complexityScore = 
-    stats.headings * 2.0 + 
-    stats.tables * 5.0 + 
-    stats.codeBlocks * 4.0 + 
-    stats.lists * 1.5 + 
-    stats.listItems * 0.5 + 
-    stats.mathBlocks * 3.0 +
+  const distinctModalities = [
+    stats.tables > 0,
+    stats.codeBlocks > 0,
+    stats.mathBlocks > 0,
+    stats.lists > 0,
+  ].filter(Boolean).length;
+
+  const complexityScore =
+    stats.headings * 2.5 +
+    stats.tables * 5.0 +
+    stats.codeBlocks * 4.5 +
+    stats.lists * 1.5 +
+    stats.listItems * 0.5 +
+    stats.mathBlocks * 4.0 +
+    (distinctModalities >= 3 ? 3 : 0) +
     (text.length > 1000 ? 5 : 0);
 
   if (complexityScore > 40) complexity = 'ultra';

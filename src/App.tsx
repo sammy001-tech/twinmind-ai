@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel, HistoricalInteractionMetadata, CommunicationStyleAnalysis, ThreadPinnedDoc } from './types/index.ts';
+import { ChannelType, ChatMessage, PromptTemplate, AppSettings, ChatThread, SwarmSessionState, SoulTuningConfig, ThinkingLevel, HistoricalInteractionMetadata, CommunicationStyleAnalysis, ThreadPinnedDoc, InstructionResolutionManifest } from './types/index.ts';
 import { Header } from './components/Header.tsx';
 import { ChatMessageItem, GroupedChatMessageList } from './components/ChatMessage.tsx';
 import { ArtifactStorageNotice } from './components/ArtifactStorageNotice.tsx';
@@ -20,6 +20,7 @@ import { CustomPromptModal } from './components/CustomPromptModal.tsx';
 import { EmptyState } from './components/EmptyState.tsx';
 import { VoiceRecorderModal } from './components/VoiceRecorderModal.tsx';
 import { CommunicationStyleWidget } from './components/CommunicationStyleWidget.tsx';
+import { ThreadRulesDrawer } from './components/ThreadRulesDrawer.tsx';
 import { useTheme, ThemeMode } from './hooks/useTheme.ts';
 import {
   Sparkles,
@@ -174,6 +175,13 @@ export default function App() {
   const [pinnedDocs, setPinnedDocs] = useState<ThreadPinnedDoc[]>([]);
   const [isPinningDoc, setIsPinningDoc] = useState<boolean>(false);
 
+  // Persistent Instruction Registry & Contextual Rules Drawer State
+  const [activeThreadInstructionManifest, setActiveThreadInstructionManifest] =
+    useState<InstructionResolutionManifest | null>(null);
+  const [isRulesDrawerOpen, setIsRulesDrawerOpen] = useState(false);
+  const [rulesDrawerLoading, setRulesDrawerLoading] = useState(false);
+  const [rulesDrawerError, setRulesDrawerError] = useState<string | null>(null);
+
   const handleAutoPlayVoiceChange = (val: boolean) => {
     setAutoPlayVoice(val);
     syncSettingsToServer({ autoPlayVoice: val });
@@ -199,9 +207,36 @@ export default function App() {
     syncSettingsToServer({ customPrompts: updated });
   };
 
-  const handleSaveBrandName = (newBrand: string) => {
+  const handleSaveBrandName = async (newBrand: string) => {
+    const prevBrand = brandName;
     setBrandName(newBrand);
-    syncSettingsToServer({ brandName: newBrand });
+    const result = await syncSettingsToServer({ brandName: newBrand });
+    if (!result.ok) {
+      setBrandName(prevBrand);
+      throw new Error(result.error || 'Failed to save brand name.');
+    }
+  };
+
+  const handleSaveIdentity = async (identity: {
+    brandName: string;
+    userName: string;
+    nickname: string;
+  }) => {
+    const prev = { brandName, userName, nickname };
+    setBrandName(identity.brandName);
+    setUserName(identity.userName);
+    setNickname(identity.nickname);
+    const result = await syncSettingsToServer({
+      brandName: identity.brandName,
+      userName: identity.userName,
+      nickname: identity.nickname,
+    });
+    if (!result.ok) {
+      setBrandName(prev.brandName);
+      setUserName(prev.userName);
+      setNickname(prev.nickname);
+      throw new Error(result.error || 'Failed to save brand & identity.');
+    }
   };
 
   const [telegramStatus, setTelegramStatus] = useState<{
@@ -211,32 +246,51 @@ export default function App() {
   }>({ isRunning: false, hasToken: false, isPaired: false });
 
   // Synchronize any setting change directly to Neon PostgreSQL database via /api/settings
-  const syncSettingsToServer = async (patch: Partial<AppSettings>) => {
+  const syncSettingsToServer = async (
+    patch: Partial<AppSettings>,
+  ): Promise<{ ok: boolean; error?: string; settings?: AppSettings }> => {
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.settings?.providerModels) {
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success !== false) {
+        if (data?.settings?.providerModels) {
           setProviderModels(data.settings.providerModels);
         }
+        if (typeof data?.settings?.activeProvider === 'string') {
+          setActiveProvider(data.settings.activeProvider);
+        }
+        return { ok: true, settings: data?.settings };
       }
+      const errMsg =
+        typeof data?.error === 'string' && data.error.trim()
+          ? data.error
+          : `Settings persistence failed (HTTP ${res.status}).`;
+      console.warn('Settings persistence rejected by server:', errMsg);
+      return { ok: false, error: errMsg };
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Network error syncing settings.';
       console.warn('Failed to sync settings to database:', err);
+      return { ok: false, error: errMsg };
     }
   };
 
   const handleThemeModeChange = (mode: ThemeMode) => {
     setThemeMode(mode);
-    syncSettingsToServer({ themeMode: mode });
+    void syncSettingsToServer({ themeMode: mode });
   };
 
   const handleThinkingLevelChange = async (level: ThinkingLevel) => {
+    const prev = thinkingLevel;
     setThinkingLevel(level);
-    await syncSettingsToServer({ thinkingLevel: level });
+    const result = await syncSettingsToServer({ thinkingLevel: level });
+    if (!result.ok) {
+      setThinkingLevel(prev);
+      setErrorMessage(result.error || 'Failed to persist thinking level.');
+    }
   };
 
   // Load server-persisted unified settings dynamically from Database on mount (no stale local storage)
@@ -410,6 +464,106 @@ export default function App() {
     }
   };
 
+  const loadThreadInstructions = async (threadId: string, projectKeyOverride?: string | null) => {
+    setRulesDrawerLoading(true);
+    setRulesDrawerError(null);
+    try {
+      const query = projectKeyOverride
+        ? `?projectKey=${encodeURIComponent(projectKeyOverride)}`
+        : '';
+      const res = await fetch(`/api/threads/${encodeURIComponent(threadId)}/instructions${query}`);
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Failed to load thread instructions (HTTP ${res.status}).`);
+      }
+      setActiveThreadInstructionManifest(data.manifest || null);
+    } catch (err) {
+      setRulesDrawerError(err instanceof Error ? err.message : 'Unable to resolve active rules.');
+    } finally {
+      setRulesDrawerLoading(false);
+    }
+  };
+
+  const handleSetThreadProjectKey = async (projectKey: string | null) => {
+    const targetThreadId = activeThreadId || `thread-${Date.now()}`;
+    if (!activeThreadId) {
+      setActiveThreadId(targetThreadId);
+      syncSettingsToServer({ activeThreadId: targetThreadId });
+    }
+    const currentTitle = threads.find((t) => t.id === targetThreadId)?.title || 'Scoped Conversation';
+    const res = await fetch(`/api/threads/${encodeURIComponent(targetThreadId)}/project`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectKey,
+        threadTitle: currentTitle,
+        channel,
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || 'Failed to save thread project binding.');
+    }
+    setThreads((prev) => {
+      const exists = prev.some((t) => t.id === targetThreadId);
+      if (!exists) {
+        return [{ id: targetThreadId, title: currentTitle, channel, project_key: data.projectKey ?? null }, ...prev];
+      }
+      return prev.map((t) =>
+        t.id === targetThreadId ? { ...t, project_key: data.projectKey ?? null } : t
+      );
+    });
+    if (data.manifest) {
+      setActiveThreadInstructionManifest(data.manifest);
+    } else {
+      await loadThreadInstructions(targetThreadId, data.projectKey ?? null);
+    }
+  };
+
+  const handleCreateTempRule = async (content: string, expiresMinutes?: number | null) => {
+    const targetThreadId = activeThreadId || `thread-${Date.now()}`;
+    if (!activeThreadId) {
+      setActiveThreadId(targetThreadId);
+      syncSettingsToServer({ activeThreadId: targetThreadId });
+    }
+    const expiresAt =
+      typeof expiresMinutes === 'number' && expiresMinutes > 0
+        ? new Date(Date.now() + expiresMinutes * 60_000).toISOString()
+        : null;
+    const res = await fetch('/api/persona-memories', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        category: 'preference',
+        content,
+        priority: 3,
+        scope: 'temporary',
+        threadId: targetThreadId,
+        expiresAt,
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || 'Failed to create temporary session rule.');
+    }
+    await loadThreadInstructions(targetThreadId);
+  };
+
+  const handleToggleRuleActive = async (ruleId: number, isActive: boolean) => {
+    const res = await fetch(`/api/persona-memories/${ruleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ isActive }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || 'Failed to update rule activation state.');
+    }
+    if (activeThreadId) {
+      await loadThreadInstructions(activeThreadId);
+    }
+  };
+
   // Load messages for a specific conversation thread from Neon DB
   const loadThreadMessages = async (threadId: string) => {
     try {
@@ -434,6 +588,8 @@ export default function App() {
             beliefConflict: m.metadata?.beliefConflict || undefined,
             imageData: m.metadata?.imageData || undefined,
             audioUrl: m.metadata?.audioUrl || undefined,
+            verificationEnvelope: m.metadata?.verificationEnvelope || undefined,
+            instructionManifest: m.metadata?.instructionManifest || undefined,
           }));
           pendingThreadRestoreRef.current = threadId;
           setMessages(loaded);
@@ -446,6 +602,7 @@ export default function App() {
           setActiveThreadId(threadId);
           syncSettingsToServer({ activeThreadId: threadId });
           void loadThreadPinnedDocs(threadId);
+          void loadThreadInstructions(threadId);
         }
       }
     } catch (err) {
@@ -469,6 +626,7 @@ export default function App() {
     setMessages([]);
     setPinnedDocs([]);
     setActiveTab('chat');
+    void loadThreadInstructions(newId, null);
   };
 
   const handlePinDocToCurrentThread = async (doc: { fileName: string; format: string; content: string }) => {
@@ -729,40 +887,66 @@ export default function App() {
   const displayName = nickname.trim() || userName.trim();
   const initialLetter = (userName.trim() || brandName.trim()).charAt(0).toUpperCase();
 
-  const handleSaveNickname = (newName: string, newNickname: string) => {
+  const handleSaveNickname = async (newName: string, newNickname: string) => {
+    const prev = { userName, nickname };
     setUserName(newName);
     setNickname(newNickname);
-    syncSettingsToServer({ userName: newName, nickname: newNickname });
+    const result = await syncSettingsToServer({ userName: newName, nickname: newNickname });
+    if (!result.ok) {
+      setUserName(prev.userName);
+      setNickname(prev.nickname);
+      throw new Error(result.error || 'Failed to save identity.');
+    }
   };
 
-  const handleProviderChange = (p: string) => {
+  const handleProviderChange = async (p: string) => {
+    const prevProvider = activeProvider;
     setActiveProvider(p);
     const targetModel = providerModels[p as keyof typeof providerModels] || '';
-    syncSettingsToServer({
+    const result = await syncSettingsToServer({
       activeProvider: p as 'gemini' | 'groq' | 'mistral',
       activeModel: targetModel,
       providerModels,
     });
+    if (!result.ok) {
+      setActiveProvider(prevProvider);
+      setErrorMessage(result.error || 'Failed to persist provider selection.');
+      throw new Error(result.error || 'Failed to persist provider selection.');
+    }
   };
 
-  const handleSelectProviderModel = (provider: string, model: string) => {
+  const handleSelectProviderModel = async (provider: string, model: string) => {
+    const prevModels = providerModels;
     const updated = { ...providerModels, [provider]: model };
     setProviderModels(updated);
-    syncSettingsToServer({
+    const result = await syncSettingsToServer({
       providerModels: updated,
       ...(provider === activeProvider ? { activeModel: model } : {}),
     });
+    if (!result.ok) {
+      setProviderModels(prevModels);
+      setErrorMessage(result.error || 'Failed to persist selected model.');
+      throw new Error(result.error || 'Failed to persist selected model.');
+    }
   };
 
-  const handleSelectModelAndActivate = (provider: string, model: string) => {
+  const handleSelectModelAndActivate = async (provider: string, model: string) => {
+    const prevModels = providerModels;
+    const prevProvider = activeProvider;
     const updated = { ...providerModels, [provider]: model };
     setProviderModels(updated);
     setActiveProvider(provider);
-    syncSettingsToServer({
+    const result = await syncSettingsToServer({
       activeProvider: provider as 'gemini' | 'groq' | 'mistral',
       activeModel: model,
       providerModels: updated,
     });
+    if (!result.ok) {
+      setProviderModels(prevModels);
+      setActiveProvider(prevProvider);
+      setErrorMessage(result.error || 'Failed to persist active model & provider.');
+      throw new Error(result.error || 'Failed to persist active model & provider.');
+    }
   };
 
   const handleVoiceChange = (newVoice: string) => {
@@ -1019,6 +1203,7 @@ export default function App() {
     };
 
     try {
+      const currentProjectKey = threads.find((t) => t.id === currentThreadId)?.project_key ?? null;
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1033,6 +1218,7 @@ export default function App() {
           userName,
           nickname,
           threadId: currentThreadId,
+          projectKey: currentProjectKey,
           threadTitle: baseMessages.length === 0 ? text.slice(0, 48) : undefined,
           existingUserDbId: retryOptions?.existingUserDbId || (retryOptions?.skipUserAppend ? userMsg.dbId : undefined),
           replaceAssistantDbId: retryOptions?.replaceAssistantDbId,
@@ -1103,6 +1289,25 @@ export default function App() {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantId ? { ...msg, autonomousMemory: parsed.autonomousMemory } : msg
+                  )
+                );
+              }
+              // Pre-generation Persistent Instruction Registry manifest
+              if (parsed.instructionManifest) {
+                setActiveThreadInstructionManifest(parsed.instructionManifest);
+                ensureAssistantMessage({ instructionManifest: parsed.instructionManifest });
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId ? { ...msg, instructionManifest: parsed.instructionManifest } : msg
+                  )
+                );
+              }
+              // Claim-level Evidence & Tool Verification Envelope
+              if (parsed.verificationEnvelope) {
+                ensureAssistantMessage({ verificationEnvelope: parsed.verificationEnvelope });
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantId ? { ...msg, verificationEnvelope: parsed.verificationEnvelope } : msg
                   )
                 );
               }
@@ -1338,6 +1543,23 @@ export default function App() {
                 })
               );
             }
+            if (parsed.instructionManifest) {
+              setActiveThreadInstructionManifest(parsed.instructionManifest);
+              ensureAssistantMessage({ instructionManifest: parsed.instructionManifest });
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId ? { ...msg, instructionManifest: parsed.instructionManifest } : msg
+                )
+              );
+            }
+            if (parsed.verificationEnvelope) {
+              ensureAssistantMessage({ verificationEnvelope: parsed.verificationEnvelope });
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantId ? { ...msg, verificationEnvelope: parsed.verificationEnvelope } : msg
+                )
+              );
+            }
             if (parsed.text) {
               accumulatedContent += parsed.text;
               ensureAssistantMessage({ content: accumulatedContent });
@@ -1536,6 +1758,14 @@ export default function App() {
         styleAnalysis={styleAnalysis}
         vaultConflictCount={vaultConflictCount}
         onOpenKnowledgeVault={() => handleOpenKnowledgeVault()}
+        instructionManifest={activeThreadInstructionManifest}
+        activeProjectKey={activeThread?.project_key ?? null}
+        onOpenRulesDrawer={() => {
+          setIsRulesDrawerOpen(true);
+          if (activeThreadId) {
+            void loadThreadInstructions(activeThreadId, activeThread?.project_key ?? null);
+          }
+        }}
       />
 
       {/* Main Content Area Switched by Navigation Tabs */}
@@ -1726,6 +1956,16 @@ export default function App() {
               isPinningDoc={isPinningDoc}
               voiceConversationMode={voiceConversationMode}
               onToggleVoiceConversationMode={() => setVoiceConversationMode((prev) => !prev)}
+              activeProjectKey={activeThread?.project_key ?? null}
+              onSetProjectKey={handleSetThreadProjectKey}
+              onCreateTempRule={handleCreateTempRule}
+              appliedRulesCount={activeThreadInstructionManifest?.applied.length}
+              onOpenRulesDrawer={() => {
+                setIsRulesDrawerOpen(true);
+                if (activeThreadId) {
+                  void loadThreadInstructions(activeThreadId, activeThread?.project_key ?? null);
+                }
+              }}
             />
           </div>
         )}
@@ -1786,6 +2026,7 @@ export default function App() {
             userName={userName}
             nickname={nickname}
             onSaveName={handleSaveNickname}
+            onSaveIdentity={handleSaveIdentity}
             activeProvider={activeProvider}
             onProviderChange={handleProviderChange}
             providerModels={providerModels}
@@ -1920,6 +2161,25 @@ export default function App() {
         onClose={() => setIsStyleWidgetOpen(false)}
         messages={messages}
         threadId={activeThreadId}
+      />
+
+      {/* Contextual Scoped Instruction Inspection Drawer */}
+      <ThreadRulesDrawer
+        isOpen={isRulesDrawerOpen}
+        onClose={() => setIsRulesDrawerOpen(false)}
+        threadId={activeThreadId}
+        projectKey={activeThread?.project_key ?? null}
+        manifest={activeThreadInstructionManifest}
+        isLoading={rulesDrawerLoading}
+        error={rulesDrawerError}
+        onRefresh={() => {
+          if (activeThreadId) {
+            return loadThreadInstructions(activeThreadId, activeThread?.project_key ?? null);
+          }
+        }}
+        onUpdateProjectKey={handleSetThreadProjectKey}
+        onToggleRuleActive={handleToggleRuleActive}
+        onOpenVaultRules={() => handleOpenKnowledgeVault('rules')}
       />
     </div>
   );
