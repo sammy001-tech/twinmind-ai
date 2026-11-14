@@ -344,6 +344,9 @@ export interface CommunicationStyleAnalysis {
   personaAdaptation: TwinPersonaAdaptation;
   perceivedTraits: PerceivedTrait[];
   keyEmotionalInsights: string[];
+  analysisSource?: 'live_model' | 'deterministic_heuristic';
+  analyzedProvider?: string;
+  analyzedModel?: string;
 }
 
 export interface HistoricalInteractionMetadata {
@@ -575,19 +578,83 @@ export interface ArtifactPreviewSheet {
   truncated: boolean;
 }
 
+export interface ArtifactPreviewArchiveEntry {
+  name: string;
+  sizeBytes: number;
+  compressedBytes?: number;
+  directory?: boolean;
+}
+
 export interface ArtifactPreviewData {
   fileName: string;
   displayName: string;
-  type: 'pdf' | 'md' | 'csv' | 'xlsx';
+  type: 'pdf' | 'md' | 'csv' | 'xlsx' | 'zip';
   mimeType: string;
   sizeBytes: number;
-  previewKind: 'markdown' | 'table' | 'workbook' | 'pdf';
+  previewKind: 'markdown' | 'table' | 'workbook' | 'pdf' | 'archive';
   markdownText?: string;
   headers?: string[];
   rows?: string[][];
   totalRows?: number;
   truncated?: boolean;
   sheets?: ArtifactPreviewSheet[];
+  archiveEntries?: ArtifactPreviewArchiveEntry[];
   inlineUrl?: string;
 }
+
+export type VaultEntityType = 'knowledge_doc' | 'active_rule';
+
+export type VaultRevisionOperation =
+  | 'create'
+  | 'update'
+  | 'supersede'
+  | 'remove_rule'
+  | 'rollback'
+  | 'retire';
+
+export interface VaultDiffLine {
+  type: 'context' | 'add' | 'remove';
+  oldLine?: number;
+  newLine?: number;
+  text: string;
+}
+
+export interface VaultRevisionEntry {
+  id: number;
+  entityType: VaultEntityType;
+  entityId: number;
+  versionNumber: number;
+  operation: VaultRevisionOperation;
+  snapshot: Record<string, unknown>;
+  diffSummary: string;
+  diffLines: VaultDiffLine[];
+  changedFields: string[];
+  reason: string | null;
+  channel: string | null;
+  createdAt: string;
+}
+
+export interface BatchIngestFileResult {
+  filename: string;
+  archiveSource?: string;
+  status: 'ingested' | 'failed';
+  documentsCreated: number;
+  totalCharacters: number;
+  totalChunks: number;
+  format?: string;
+  title?: string;
+  code?: string;
+  error?: string;
+}
+
+export interface BatchIngestResponse {
+  success: boolean;
+  overallStatus: 'success' | 'partial' | 'failed';
+  totalFilesProcessed: number;
+  succeededCount: number;
+  failedCount: number;
+  totalDocumentsCreated: number;
+  results: BatchIngestFileResult[];
+}
+
 

@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import type { ArtifactPreviewData, ArtifactPreviewSheet } from '../../src/types/index.ts';
 
 const MAX_PREVIEW_ROWS = 200;
@@ -77,13 +78,37 @@ export async function buildArtifactPreview(
   artifact: {
     fileName: string;
     displayName: string;
-    type: 'pdf' | 'md' | 'csv' | 'xlsx';
+    type: 'pdf' | 'md' | 'csv' | 'xlsx' | 'zip';
     mimeType: string;
     sizeBytes: number;
     content: Buffer;
   },
   inlineUrl?: string
 ): Promise<ArtifactPreviewData> {
+  if (artifact.type === 'zip') {
+    const zip = await JSZip.loadAsync(artifact.content);
+    const archiveEntries: Array<{ name: string; sizeBytes: number; compressedBytes?: number; directory?: boolean }> = [];
+    for (const [entryName, entry] of Object.entries(zip.files)) {
+      if (entry.dir) continue;
+      const buf = await entry.async('nodebuffer');
+      archiveEntries.push({
+        name: entryName,
+        sizeBytes: buf.length,
+        compressedBytes: (entry as any)._data?.compressedSize ?? undefined,
+        directory: false,
+      });
+    }
+    return {
+      fileName: artifact.fileName,
+      displayName: artifact.displayName,
+      type: 'zip',
+      mimeType: artifact.mimeType,
+      sizeBytes: artifact.sizeBytes,
+      previewKind: 'archive',
+      archiveEntries,
+      inlineUrl,
+    };
+  }
   if (artifact.type === 'md') {
     return {
       fileName: artifact.fileName,

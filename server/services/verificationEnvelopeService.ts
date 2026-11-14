@@ -149,13 +149,16 @@ export function classifyToolExecution(entry: ExecutedToolInput): ToolExecutionLe
     };
   }
 
-  if (entry.toolName === 'generateArtifact') {
+  if (entry.toolName === 'generateArtifact' || entry.toolName === 'generateArtifactBatch') {
     if (res.validationStatus === 'validated' && res.fileName) {
+      const entryCount = Array.isArray(res.entries) ? res.entries.length : 1;
       return {
         toolName: entry.toolName,
         executionStatus: 'succeeded_usable',
-        summary: `Generated & validated ${String(res.fileName)}.`,
-        resultCount: 1,
+        summary: entry.toolName === 'generateArtifactBatch'
+          ? `Generated & validated ZIP bundle ${String(res.fileName)} (${entryCount} file(s)).`
+          : `Generated & validated ${String(res.fileName)}.`,
+        resultCount: entryCount,
         timestamp,
       };
     }

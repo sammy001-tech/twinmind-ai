@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import ExcelJS from 'exceljs';
 import {
   extractTextAndTitleFromHtml,
   chunkDocumentContent,
   parseDocumentBuffer,
   ingestDocumentChunks,
   fetchAndIngestWebPage,
+  format2DTableAsMarkdown,
 } from '../server/services/documentIngestionService.ts';
 import { knowledgeService } from '../server/db/knowledgeService.ts';
 import { neonDb } from '../server/db/neonService.ts';
@@ -124,6 +126,123 @@ test('parseDocumentBuffer correctly parses plain text, markdown, JSON, and CSV',
   assert.equal(pdfResult.title, 'research_paper');
   assert.equal(pdfResult.format, 'pdf');
   assert.ok(pdfResult.content.includes('Verified TwinMind Research Document'));
+});
+
+test('format2DTableAsMarkdown normalizes ragged rows and escapes Markdown pipes', () => {
+  const md = format2DTableAsMarkdown([
+    ['Metric', 'Q1 | Actual'],
+    ['ARR', '$1.2M', 'Verified'],
+  ]);
+  assert.ok(md.includes('| Metric | Q1 \\| Actual | Column 3 |'));
+  assert.ok(md.includes('| ARR | $1.2M | Verified |'));
+});
+
+test('parseDocumentBuffer extracts multi-sheet tables from Excel (.xlsx) and rejects empty workbooks', async () => {
+  const wb = new ExcelJS.Workbook();
+  const s1 = wb.addWorksheet('Revenue');
+  s1.addRow(['Quarter', 'Revenue USD', 'Formula Total']);
+  s1.addRow(['2026 Q1', 120000, { formula: 'B2*1.1', result: 132000 }]);
+  const s2 = wb.addWorksheet('Summary');
+  s2.addRow(['Region', 'Status']);
+  s2.addRow(['EMEA', 'Active']);
+
+  const rawArrayBuffer = await wb.xlsx.writeBuffer();
+  const xlsxBuffer = Buffer.from(rawArrayBuffer);
+
+  const parsed = await parseDocumentBuffer(
+    'financials.xlsx',
+    xlsxBuffer,
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  );
+  assert.equal(parsed.format, 'xlsx');
+  assert.equal(parsed.metadata?.extractionMethod, 'exceljs_structured_tables');
+  assert.equal(parsed.metadata?.tablesExtracted, 2);
+  assert.ok(parsed.content.includes('## Worksheet: Revenue'));
+  assert.ok(parsed.content.includes('| 2026 Q1 | 120000 | 132000 |'));
+  assert.ok(parsed.content.includes('## Worksheet: Summary'));
+
+  const emptyWb = new ExcelJS.Workbook();
+  emptyWb.addWorksheet('Blank');
+  const emptyBuf = Buffer.from(await emptyWb.xlsx.writeBuffer());
+  await assert.rejects(
+    () => parseDocumentBuffer('empty.xlsx', emptyBuf),
+    /XLSX_CONTENT_EMPTY/,
+  );
+});
+
+test('parseDocumentBuffer fails transparently on corrupt .docx and handles scanned PDF & image OCR contracts', async () => {
+  await assert.rejects(
+    () => parseDocumentBuffer('corrupt.docx', Buffer.from('not a valid docx zip', 'utf-8')),
+    /DOCX_PARSE_FAILED/,
+  );
+
+  // Create a minimal 1x1 PNG buffer to test image OCR routing without external network
+  const onePixelPng = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    'base64',
+  );
+
+  await assert.rejects(
+    () =>
+      parseDocumentBuffer('whiteboard.png', onePixelPng, 'image/png', {
+        ocrExtractor: async () => ({
+          status: 'unavailable',
+          errorCode: 'NO_VISION_SPECIALIST_AVAILABLE',
+          errorMessage: 'No vision specialist configured',
+        }),
+      }),
+    /IMAGE_OCR_UNAVAILABLE/,
+  );
+
+  const imageOcrDoc = await parseDocumentBuffer('equation.png', onePixelPng, 'image/png', {
+    ocrExtractor: async () => ({
+      status: 'success',
+      specialistProvider: 'gemini',
+      specialistModel: 'vision-double',
+      rawAnalysis: 'Extracted Equation: E = mc^2\nVisual Uncertainty / Ambiguities: None',
+    }),
+  });
+  assert.equal(imageOcrDoc.format, 'ocr_image');
+  assert.equal(imageOcrDoc.metadata?.extractionMethod, 'vision_specialist_ocr');
+  assert.equal(imageOcrDoc.metadata?.uncertaintyDetected, false);
+  assert.ok(imageOcrDoc.content.includes('E = mc^2'));
+
+  // Blank PDF (0 selectable characters) triggers scanned PDF Vision OCR fallback
+  const { default: PDFDocument } = await import('pdfkit');
+  const blankPdf = new PDFDocument();
+  const blankChunks: Buffer[] = [];
+  blankPdf.on('data', (c: Buffer) => blankChunks.push(c));
+  const blankReady = new Promise<Buffer>((resolve) => {
+    blankPdf.on('end', () => resolve(Buffer.concat(blankChunks)));
+  });
+  blankPdf.end();
+  const blankPdfBuffer = await blankReady;
+
+  await assert.rejects(
+    () =>
+      parseDocumentBuffer('scan.pdf', blankPdfBuffer, 'application/pdf', {
+        ocrExtractor: async () => ({
+          status: 'unavailable',
+          errorCode: 'NO_VISION_SPECIALIST_AVAILABLE',
+          errorMessage: 'No vision specialist configured',
+        }),
+      }),
+    /PDF_OCR_UNAVAILABLE/,
+  );
+
+  const scannedPdfResult = await parseDocumentBuffer('scan.pdf', blankPdfBuffer, 'application/pdf', {
+    ocrExtractor: async (_img, _prompt) => ({
+      status: 'success',
+      specialistProvider: 'gemini',
+      specialistModel: 'vision-double',
+      rawAnalysis: 'Transcribed Scan Line 1: Budget Q4 = $84,000\nVisual Uncertainty / Ambiguities: Blurred stamp in bottom corner',
+    }),
+  });
+  assert.equal(scannedPdfResult.format, 'pdf');
+  assert.equal(scannedPdfResult.metadata?.extractionMethod, 'pdf_vision_ocr_fallback');
+  assert.equal(scannedPdfResult.metadata?.ocrPagesProcessed, 1);
+  assert.equal(scannedPdfResult.metadata?.uncertaintyDetected, true);
+  assert.ok(scannedPdfResult.content.includes('Budget Q4 = $84,000'));
 });
 
 test('parseDocumentBuffer rejects empty buffers and unsupported file extensions explicitly', async () => {

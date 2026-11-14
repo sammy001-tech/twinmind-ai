@@ -1400,7 +1400,11 @@ class TelegramBotManager {
     if (!toolsExecuted || !Array.isArray(toolsExecuted)) return;
 
     for (const tool of toolsExecuted) {
-      if (tool.toolName === 'generateArtifact' && tool.result && (tool.result.fileName || tool.result.filePath)) {
+      if (
+        (tool.toolName === 'generateArtifact' || tool.toolName === 'generateArtifactBatch') &&
+        tool.result &&
+        (tool.result.fileName || tool.result.filePath)
+      ) {
         try {
           const fileName = tool.result.fileName || path.basename(tool.result.filePath || '');
           const cleanName = path.basename(fileName);
@@ -1409,9 +1413,10 @@ class TelegramBotManager {
             : path.join(process.cwd(), 'public', 'artifacts', cleanName);
 
           if (fs.existsSync(fullPath)) {
+            const isZip = cleanName.endsWith('.zip');
             const isExcel = cleanName.endsWith('.xlsx') || cleanName.endsWith('.xls');
             const isPdf = cleanName.endsWith('.pdf');
-            const label = isExcel ? 'Excel Workbook' : isPdf ? 'PDF Document' : 'Document';
+            const label = isZip ? 'ZIP Archive Package' : isExcel ? 'Excel Workbook' : isPdf ? 'PDF Document' : 'Document';
 
             await ctx.replyWithDocument(new InputFile(fullPath, cleanName), {
               caption: `📄 *Generated ${label}*: \`${cleanName}\``,

@@ -5,7 +5,9 @@ import ExcelJS from 'exceljs';
 import {
   generateArtifactBuffer,
   normalizeArtifactFormat,
+  normalizeTextForWinAnsi,
   parseArtifactContent,
+  parsePdfDocumentBlocks,
 } from '../server/services/artifactFormattingService.ts';
 import { getArtifactStorageStatus } from '../server/services/artifactStorageService.ts';
 
@@ -174,5 +176,124 @@ test('rejects prose-only CSV and XLSX instead of fabricating a one-column table'
   await assert.rejects(
     () => generateArtifactBuffer('xlsx', 'The report includes three findings.', 'Findings.xlsx'),
     /ARTIFACT_TABULAR_DATA_REQUIRED/,
+  );
+});
+
+test('parsePdfDocumentBlocks preserves multiple tables, blockquotes, lists, and prose in exact order', () => {
+  const blocks = parsePdfDocumentBlocks([
+    '# Executive Brief',
+    '',
+    'Opening narrative paragraph',
+    'spanning two lines.',
+    '',
+    '| Framework | Pattern |',
+    '| --- | --- |',
+    '| LangGraph | State graph |',
+    '',
+    '> Key insight ≥ 90% reliability.',
+    '',
+    '## Secondary Matrix',
+    '',
+    '| Finding | Metric | Source |',
+    '| --- | --- | --- |',
+    '| Latency | ≤ 200ms | [S1] |',
+    '| Upgrade | free → paid | [S2] |',
+  ].join('\n'));
+
+  assert.deepEqual(blocks.map((b) => b.kind), [
+    'heading',
+    'paragraph',
+    'table',
+    'blockquote',
+    'heading',
+    'table',
+  ]);
+  const tables = blocks.filter((b) => b.kind === 'table');
+  assert.equal(tables.length, 2);
+  assert.deepEqual(tables[1].headers, ['Finding', 'Metric', 'Source']);
+});
+
+test('normalizeTextForWinAnsi cleanly transliterates mathematical and arrow symbols without byte corruption', () => {
+  assert.equal(
+    normalizeTextForWinAnsi('Uptime ≥ 99.9%, latency ≤ 10ms, path free → paid, ratio ≈ 2 × 3'),
+    'Uptime >= 99.9%, latency <= 10ms, path free -> paid, ratio ~ 2 x 3',
+  );
+});
+
+test('multi-table PDF renders all tables, preserves symbols, and produces zero phantom blank pages', async () => {
+  const longSectionRows = Array.from({ length: 24 }, (_, idx) =>
+    `| Framework ${idx + 1} | Orchestration engine number ${idx + 1} supporting ≥ 99.${idx % 10}% SLA and ≤ ${10 + idx}ms dispatch overhead | free → enterprise |`,
+  ).join('\n');
+
+  const markdown = [
+    '# Enterprise Agent Architecture Study',
+    '',
+    'Executive overview establishing baseline architecture criteria before matrix evaluation.',
+    '',
+    '| Component | Capability | Tier |',
+    '| --- | --- | --- |',
+    longSectionRows,
+    '',
+    '## Post-Table Operational Analysis',
+    '',
+    'This post-table paragraph must render across the full page width rather than collapsing into the rightmost table column.',
+    '',
+    '> Evidence note: SLA guarantees ≥ 99.5% require deterministic checkpointing and ≤ 50ms recovery transitions.',
+    '',
+    '| Risk | Mitigation | Threshold |',
+    '| --- | --- | --- |',
+    '| Budget starvation | Reserve artifact generation call slot | ≥ 1 slot |',
+    '| Blank pages | Disable bottom-margin overflow during footer draw | 0 blank pages |',
+    '',
+    '- Verified outcome → zero raw markdown pipes leak into final output.',
+  ].join('\n');
+
+  const generated = await generateArtifactBuffer(
+    'pdf',
+    markdown,
+    'Multi_Table_Report.pdf',
+    new Date('2026-01-02T03:04:05.000Z'),
+  );
+
+  assert.equal(generated.buffer.subarray(0, 5).toString('ascii'), '%PDF-');
+
+  const pdfParseModule = await import('pdf-parse');
+  const ParserClass = (pdfParseModule as any).PDFParse;
+  assert.equal(typeof ParserClass, 'function');
+
+  const parser = new ParserClass({ data: generated.buffer });
+  await parser.load();
+  const parsed = await parser.getText();
+  const fullText = typeof parsed === 'string' ? parsed : (parsed?.text || '');
+  const pages: Array<{ text?: string }> = Array.isArray(parsed?.pages) ? parsed.pages : [];
+
+  // Every generated page must contain substantive content beyond the footer marker
+  assert.ok(pages.length >= 2, 'Expected multi-page report across 24 rows and two tables');
+  for (let i = 0; i < pages.length; i++) {
+    const pageBody = (pages[i]?.text || '')
+      .replace(/TwinMind AI\s*·\s*Multi Table Report\s*·\s*Page\s+\d+\s+of\s+\d+/g, '')
+      .trim();
+    assert.ok(
+      pageBody.length > 20,
+      `Phantom blank/footer-only page detected at page ${i + 1}: "${pageBody}"`,
+    );
+  }
+
+  // Verify second table rendered as structured table text rather than raw markdown pipes
+  assert.ok(fullText.includes('Post-Table Operational Analysis'));
+  assert.ok(fullText.includes('Budget starvation'));
+  assert.ok(fullText.includes('Reserve artifact generation call slot'));
+  assert.doesNotMatch(fullText, /\|\s*---\s*\|/);
+  assert.doesNotMatch(fullText, /\|\s*Risk\s*\|\s*Mitigation\s*\|/);
+
+  // Verify no UTF-16 WinAnsi corruption artifacts ("e / "d / !')
+  assert.doesNotMatch(fullText, /"e|"d|free!'/);
+  assert.ok(
+    fullText.includes('≥') || fullText.includes('>='),
+    'Expected ≥ symbol or clean >= transliteration in PDF text',
+  );
+  assert.ok(
+    fullText.includes('≤') || fullText.includes('<='),
+    'Expected ≤ symbol or clean <= transliteration in PDF text',
   );
 });

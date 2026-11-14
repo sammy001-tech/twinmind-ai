@@ -297,7 +297,7 @@ export class WhatsAppWorker {
     if (turnResult?.toolsExecuted && Array.isArray(turnResult.toolsExecuted)) {
       for (const tool of turnResult.toolsExecuted) {
         const res: any = tool.result || {};
-        if (tool.toolName === 'generateArtifact' && res.fileName) {
+        if ((tool.toolName === 'generateArtifact' || tool.toolName === 'generateArtifactBatch') && res.fileName) {
           try {
             const fileName = res.fileName;
             const publicBaseUrl = (process.env.PUBLIC_APP_URL || '').trim().replace(/\/+$/, '');

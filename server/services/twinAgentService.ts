@@ -10,7 +10,26 @@ import { calibrationService } from './calibrationService.ts';
 import { modelCatalogService } from './modelCatalogService.ts';
 import { historicalAwarenessService } from './historicalAwarenessService.ts';
 import { executeVaultMemoryUpdate } from './vaultMemoryUpdateService.ts';
-import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, resolveBoundedIntegerSetting, resolveResearchSearchDepth } from '../utils/researchEvidence.ts';
+import { communicationStyleService } from './communicationStyleService.ts';
+import { resolveDebateConfiguration, type DebateConfigInput } from './debateConfigService.ts';
+import {
+  inspectAllowlistedSchema,
+  executeReadOnlySqlQuery,
+  executeExternalStructuredQuery,
+  validateReadOnlySqlQuery,
+} from './structuredDataQueryService.ts';
+import {
+  chunkUrlsByBatchLimit,
+  normalizeResearchExtractions,
+  normalizeResearchSearchResults,
+  normalizeResearchUrls,
+  normalizeUrlForProvenanceMatch,
+  partitionExtractionUrls,
+  resolveBoundedIntegerSetting,
+  resolveDynamicAgentExecutionPolicy,
+  resolveResearchSearchDepth,
+  type DynamicAgentExecutionPolicy,
+} from '../utils/researchEvidence.ts';
 import {
   isVisionCapableModel,
   validateImageAttachment,
@@ -71,13 +90,38 @@ export const GEMINI_TWIN_TOOLS: any[] = [
   {
     name: 'runMultiAgentDebate',
     description:
-      'Trigger a rigorous 4-stage multi-agent debate to stress-test high-stakes dilemmas, competing options, business strategies, or major trade-offs.',
+      'Trigger a configurable multi-agent strategic debate to stress-test dilemmas, competing options, or major trade-offs with tunable persona count, debate rounds, focus weighting, and hard constraints.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         dilemma: {
           type: Type.STRING,
           description: 'The strategic dilemma, competing options, or decision trade-off to evaluate',
+        },
+        personaCount: {
+          type: Type.NUMBER,
+          description: 'Optional number of debating personas (bounded by runtime policy, typically 2-4)',
+        },
+        personas: {
+          type: Type.STRING,
+          description: 'Optional JSON array string of custom personas: [{"name":"...","mandate":"...","weight":35}]',
+        },
+        rounds: {
+          type: Type.NUMBER,
+          description: 'Optional number of cross-examination rounds (1-3)',
+        },
+        focusBias: {
+          type: Type.STRING,
+          description: 'Optional focus bias preset: "balanced", "risk_averse", "growth_aggressive", "capital_efficient", "regulatory_first", or "speed_execution"',
+        },
+        focusWeightsJson: {
+          type: Type.STRING,
+          description: 'Optional JSON object string overriding evaluation weights across {"risk","growth","capital","speed","regulatory"}',
+        },
+        constraints: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional list of explicit budget, timeline, staffing, or regulatory constraints that all personas must respect',
         },
       },
       required: ['dilemma'],
@@ -115,7 +159,7 @@ export const GEMINI_TWIN_TOOLS: any[] = [
   {
     name: 'generateArtifact',
     description:
-      'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
+      'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. For multi-sheet Excel workbooks pass JSON {"sheets":[{"name":"Sheet1","content":"..."}]}. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
     parameters: {
       type: Type.OBJECT,
       properties: {
@@ -125,7 +169,7 @@ export const GEMINI_TWIN_TOOLS: any[] = [
         },
         content: {
           type: Type.STRING,
-          description: 'The body content or tabular data to include in the document',
+          description: 'The body content or tabular data (or multi-sheet JSON for xlsx) to include in the document',
         },
         fileName: {
           type: Type.STRING,
@@ -133,6 +177,43 @@ export const GEMINI_TWIN_TOOLS: any[] = [
         },
       },
       required: ['type', 'content', 'fileName'],
+    },
+  },
+  {
+    name: 'generateArtifactBatch',
+    description:
+      'Generate multiple deliverable files (PDF, Excel .xlsx, CSV, or Markdown) simultaneously and bundle them into a single validated downloadable .zip archive package. Preserve source values accurately.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        archiveFileName: {
+          type: Type.STRING,
+          description: "Filename for the resulting ZIP package (e.g., 'Study_Pack.zip')",
+        },
+        items: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              type: {
+                type: Type.STRING,
+                description: "Deliverable format: 'pdf', 'xlsx', 'csv', or 'md'",
+              },
+              fileName: {
+                type: Type.STRING,
+                description: "Individual filename inside the archive (e.g., 'Summary.pdf')",
+              },
+              content: {
+                type: Type.STRING,
+                description: 'Full body content or tabular data (or multi-sheet JSON for xlsx)',
+              },
+            },
+            required: ['type', 'fileName', 'content'],
+          },
+          description: 'Array of deliverable files to build, validate, and bundle inside the ZIP package',
+        },
+      },
+      required: ['archiveFileName', 'items'],
     },
   },
   {
@@ -276,6 +357,50 @@ export const GEMINI_TWIN_TOOLS: any[] = [
       required: ['action'],
     },
   },
+  {
+    name: 'queryStructuredData',
+    description:
+      'Execute a verified structured data operation: inspect live PostgreSQL allowlisted table columns ("schema"), run a read-only parameterized SQL SELECT/WITH query over TwinMind tables ("sql"), or call a public REST JSON / GraphQL API ("external_api"). Never fabricates rows or API data.',
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        mode: {
+          type: Type.STRING,
+          description: 'Required operation mode: "schema", "sql", or "external_api"',
+        },
+        sql: {
+          type: Type.STRING,
+          description: 'Read-only PostgreSQL SELECT or WITH query over allowlisted public tables (when mode is "sql")',
+        },
+        params: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Optional positional SQL parameters ($1, $2, ...) for mode "sql"',
+        },
+        maxRows: {
+          type: Type.NUMBER,
+          description: 'Optional row cap (bounded dynamically up to 200) for mode "sql"',
+        },
+        url: {
+          type: Type.STRING,
+          description: 'Public HTTP(S) REST JSON or GraphQL endpoint URL (when mode is "external_api")',
+        },
+        method: {
+          type: Type.STRING,
+          description: 'HTTP method for external_api: "GET" or "POST"',
+        },
+        graphqlQuery: {
+          type: Type.STRING,
+          description: 'GraphQL query document when targeting a GraphQL endpoint',
+        },
+        variablesJson: {
+          type: Type.STRING,
+          description: 'Optional JSON object string for GraphQL variables or POST request body',
+        },
+      },
+      required: ['mode'],
+    },
+  },
 ];
 
 /**
@@ -324,13 +449,38 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
     function: {
       name: 'runMultiAgentDebate',
       description:
-        'Trigger a rigorous 4-stage multi-agent debate to stress-test high-stakes dilemmas, competing options, business strategies, or major trade-offs.',
+        'Trigger a configurable multi-agent strategic debate to stress-test dilemmas, competing options, or major trade-offs with tunable persona count, debate rounds, focus weighting, and hard constraints.',
       parameters: {
         type: 'object',
         properties: {
           dilemma: {
             type: 'string',
             description: 'The strategic dilemma, competing options, or decision trade-off to evaluate',
+          },
+          personaCount: {
+            type: 'number',
+            description: 'Optional number of debating personas (bounded by runtime policy, typically 2-4)',
+          },
+          personas: {
+            type: 'string',
+            description: 'Optional JSON array string of custom personas: [{"name":"...","mandate":"...","weight":35}]',
+          },
+          rounds: {
+            type: 'number',
+            description: 'Optional number of cross-examination rounds (1-3)',
+          },
+          focusBias: {
+            type: 'string',
+            description: 'Optional focus bias preset: "balanced", "risk_averse", "growth_aggressive", "capital_efficient", "regulatory_first", or "speed_execution"',
+          },
+          focusWeightsJson: {
+            type: 'string',
+            description: 'Optional JSON object string overriding evaluation weights across {"risk","growth","capital","speed","regulatory"}',
+          },
+          constraints: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional list of explicit budget, timeline, staffing, or regulatory constraints that all personas must respect',
           },
         },
         required: ['dilemma'],
@@ -377,7 +527,7 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
     function: {
       name: 'generateArtifact',
       description:
-        'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
+        'Generate a professionally formatted PDF, Excel .xlsx workbook, CSV, or Markdown file from supplied conversation/source content. For multi-sheet Excel workbooks pass JSON {"sheets":[{"name":"Sheet1","content":"..."}]}. Preserve source values; do not invent missing rows or facts. Return success only after the generated file is validated and saved.',
       parameters: {
         type: 'object',
         properties: {
@@ -387,7 +537,7 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
           },
           content: {
             type: 'string',
-            description: 'The body content or tabular data to include in the document',
+            description: 'The body content or tabular data (or multi-sheet JSON for xlsx) to include in the document',
           },
           fileName: {
             type: 'string',
@@ -395,6 +545,46 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
           },
         },
         required: ['type', 'content', 'fileName'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'generateArtifactBatch',
+      description:
+        'Generate multiple deliverable files (PDF, Excel .xlsx, CSV, or Markdown) simultaneously and bundle them into a single validated downloadable .zip archive package. Preserve source values accurately.',
+      parameters: {
+        type: 'object',
+        properties: {
+          archiveFileName: {
+            type: 'string',
+            description: "Filename for the resulting ZIP package (e.g., 'Study_Pack.zip')",
+          },
+          items: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                type: {
+                  type: 'string',
+                  description: "Deliverable format: 'pdf', 'xlsx', 'csv', or 'md'",
+                },
+                fileName: {
+                  type: 'string',
+                  description: "Individual filename inside the archive (e.g., 'Summary.pdf')",
+                },
+                content: {
+                  type: 'string',
+                  description: 'Full body content or tabular data (or multi-sheet JSON for xlsx)',
+                },
+              },
+              required: ['type', 'fileName', 'content'],
+            },
+            description: 'Array of deliverable files to build, validate, and bundle inside the ZIP package',
+          },
+        },
+        required: ['archiveFileName', 'items'],
       },
     },
   },
@@ -554,7 +744,111 @@ export const OPENAI_COMPATIBLE_TWIN_TOOLS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'queryStructuredData',
+      description:
+        'Execute a verified structured data operation: inspect live PostgreSQL allowlisted table columns ("schema"), run a read-only parameterized SQL SELECT/WITH query over TwinMind tables ("sql"), or call a public REST JSON / GraphQL API ("external_api"). Never fabricates rows or API data.',
+      parameters: {
+        type: 'object',
+        properties: {
+          mode: {
+            type: 'string',
+            description: 'Required operation mode: "schema", "sql", or "external_api"',
+          },
+          sql: {
+            type: 'string',
+            description: 'Read-only PostgreSQL SELECT or WITH query over allowlisted public tables (when mode is "sql")',
+          },
+          params: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional positional SQL parameters ($1, $2, ...) for mode "sql"',
+          },
+          maxRows: {
+            type: 'number',
+            description: 'Optional row cap (bounded dynamically up to 200) for mode "sql"',
+          },
+          url: {
+            type: 'string',
+            description: 'Public HTTP(S) REST JSON or GraphQL endpoint URL (when mode is "external_api")',
+          },
+          method: {
+            type: 'string',
+            description: 'HTTP method for external_api: "GET" or "POST"',
+          },
+          graphqlQuery: {
+            type: 'string',
+            description: 'GraphQL query document when targeting a GraphQL endpoint',
+          },
+          variablesJson: {
+            type: 'string',
+            description: 'Optional JSON object string for GraphQL variables or POST request body',
+          },
+        },
+        required: ['mode'],
+      },
+    },
+  },
 ];
+
+export function buildGeminiTwinTools(
+  policy: DynamicAgentExecutionPolicy,
+  options?: { onlyArtifactDelivery?: boolean },
+): any[] {
+  const sourceTools = options?.onlyArtifactDelivery
+    ? GEMINI_TWIN_TOOLS.filter((tool) => tool.name === 'generateArtifact' || tool.name === 'generateArtifactBatch')
+    : GEMINI_TWIN_TOOLS;
+  return sourceTools.map((tool) => {
+    if (tool.name === 'extractWebPages') {
+      return {
+        ...tool,
+        description: `${tool.description} Provider batch size is ${policy.extractBatchLimit} URLs per API batch; additional verified URLs are automatically split into sequential batches within available research budget.`,
+      };
+    }
+    if (tool.name === 'generateArtifact' || tool.name === 'generateArtifactBatch') {
+      return {
+        ...tool,
+        description: `${tool.description} ${policy.deliverableReserveCalls > 0 ? 'One execution slot is reserved for final file delivery so research calls will not starve file generation.' : ''}`.trim(),
+      };
+    }
+    return tool;
+  });
+}
+
+export function buildOpenAiCompatibleTwinTools(
+  policy: DynamicAgentExecutionPolicy,
+  options?: { onlyArtifactDelivery?: boolean },
+): any[] {
+  const sourceTools = options?.onlyArtifactDelivery
+    ? OPENAI_COMPATIBLE_TWIN_TOOLS.filter(
+        (tool) => tool.function?.name === 'generateArtifact' || tool.function?.name === 'generateArtifactBatch',
+      )
+    : OPENAI_COMPATIBLE_TWIN_TOOLS;
+  return sourceTools.map((tool) => {
+    const fnName = tool.function?.name;
+    if (fnName === 'extractWebPages') {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description: `${tool.function.description} Provider batch size is ${policy.extractBatchLimit} URLs per API batch; additional verified URLs are automatically split into sequential batches within available research budget.`,
+        },
+      };
+    }
+    if (fnName === 'generateArtifact' || fnName === 'generateArtifactBatch') {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description: `${tool.function.description} ${policy.deliverableReserveCalls > 0 ? 'One execution slot is reserved for final file delivery so research calls will not starve file generation.' : ''}`.trim(),
+        },
+      };
+    }
+    return tool;
+  });
+}
 
 export interface TwinAgentTurnOptions {
   userPrompt: string;
@@ -1203,15 +1497,21 @@ class TwinAgentService {
    * Extract full page content from validated URLs using the configured live Tavily capability.
    * Only source records returned by the provider are exposed; empty extraction is a failure.
    */
-  public async executeExtractWebPages(urlsValue: unknown, customTavilyKey?: string, signal?: AbortSignal, knownSourcesValue?: unknown): Promise<Record<string, unknown>> {
-    const maxUrls = resolveBoundedIntegerSetting(
+  public async executeExtractWebPages(
+    urlsValue: unknown,
+    customTavilyKey?: string,
+    signal?: AbortSignal,
+    knownSourcesValue?: unknown,
+    batchLimitOverride?: number,
+  ): Promise<Record<string, unknown>> {
+    const batchLimit = batchLimitOverride ?? resolveBoundedIntegerSetting(
       process.env,
       'TWINMIND_RESEARCH_EXTRACT_LIMIT',
-      5,
-      1,
       10,
+      1,
+      20,
     );
-    const urls = normalizeResearchUrls(urlsValue, maxUrls);
+    const urls = normalizeResearchUrls(urlsValue, 100);
     if (urls.length === 0) {
       return {
         status: 'error',
@@ -1234,72 +1534,119 @@ class TwinAgentService {
       };
     }
 
-    try {
-      const response = await callWithBoundedRetry(
-        async () => {
-          const res = await fetch('https://api.tavily.com/extract', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ api_key: tavilyKey, urls }),
-            signal,
-          });
-          if (!res.ok) {
-            const errorText = await res.text().catch(() => '');
-            throw new Error(`Tavily extraction API error (${res.status}): ${errorText || res.statusText}`);
+    const knownNormalizedSources = normalizeResearchSearchResults(knownSourcesValue);
+    const knownSourceByExactUrl = new Map(knownNormalizedSources.map((source) => [source.url, source] as const));
+    const knownSourceByProvenanceKey = new Map(
+      knownNormalizedSources
+        .map((source) => [normalizeUrlForProvenanceMatch(source.url), source] as const)
+        .filter((entry): entry is [string, typeof entry[1]] => Boolean(entry[0])),
+    );
+
+    const batches = chunkUrlsByBatchLimit(urls, batchLimit);
+    const collectedSources: ReturnType<typeof normalizeResearchExtractions> = [];
+    const batchErrors: Array<{ batchIndex: number; urls: string[]; error: string }> = [];
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batchUrls = batches[batchIndex];
+      try {
+        const response = await callWithBoundedRetry(
+          async () => {
+            const res = await fetch('https://api.tavily.com/extract', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ api_key: tavilyKey, urls: batchUrls }),
+              signal,
+            });
+            if (!res.ok) {
+              const errorText = await res.text().catch(() => '');
+              throw new Error(`Tavily extraction API error (${res.status}): ${errorText || res.statusText}`);
+            }
+            return await res.json();
+          },
+          { operationName: `TavilyExtract(batch ${batchIndex + 1}/${batches.length})`, maxRetries: 2, signal },
+        );
+
+        const knownSources = batchUrls.map((url) => {
+          const provenanceKey = normalizeUrlForProvenanceMatch(url);
+          return (
+            knownSourceByExactUrl.get(url) ||
+            (provenanceKey ? knownSourceByProvenanceKey.get(provenanceKey) : undefined) ||
+            { title: '', url, content: '' }
+          );
+        });
+        const extracted = normalizeResearchExtractions(response, knownSources);
+        for (const source of extracted) {
+          if (source.title.trim() && source.content.trim()) {
+            collectedSources.push(source);
           }
-          return await res.json();
-        },
-        { operationName: 'TavilyExtract', maxRetries: 2, signal },
-      );
-
-      const knownSourceByUrl = new Map(
-        normalizeResearchSearchResults(knownSourcesValue).map((source) => [source.url, source] as const),
-      );
-      const knownSources = urls.map((url) => knownSourceByUrl.get(url) || ({ title: '', url, content: '' }));
-      const extracted = normalizeResearchExtractions(response, knownSources);
-      const sources = extracted.filter((source) => source.title.trim() && source.content.trim());
-      if (sources.length === 0) {
-        return {
-          status: 'error',
-          code: 'RESEARCH_EXTRACTION_EMPTY',
-          error: 'The live extraction provider returned no attributable page content.',
-          requestedUrls: urls,
-          sources: [],
-        };
+        }
+      } catch (err: unknown) {
+        batchErrors.push({
+          batchIndex: batchIndex + 1,
+          urls: batchUrls,
+          error: err instanceof Error ? err.message : 'Live source extraction failed.',
+        });
       }
+    }
 
-      return { status: 'success', requestedUrls: urls, sources };
-    } catch (err: unknown) {
+    const deduplicatedSources = Array.from(
+      new Map(collectedSources.map((source) => [source.url, source] as const)).values(),
+    );
+
+    if (deduplicatedSources.length === 0) {
       return {
         status: 'error',
-        code: 'RESEARCH_EXTRACTION_FAILED',
-        error: err instanceof Error ? err.message : 'Live source extraction failed.',
+        code: batchErrors.length > 0 ? 'RESEARCH_EXTRACTION_FAILED' : 'RESEARCH_EXTRACTION_EMPTY',
+        error: batchErrors.length > 0
+          ? batchErrors.map((item) => item.error).join('; ')
+          : 'The live extraction provider returned no attributable page content.',
         requestedUrls: urls,
+        batchesAttempted: batches.length,
         sources: [],
       };
     }
+
+    return {
+      status: 'success',
+      requestedUrls: urls,
+      batchesExecuted: batches.length,
+      sources: deduplicatedSources,
+      ...(batchErrors.length > 0 ? { partialBatchErrors: batchErrors } : {}),
+    };
   }
 
   /**
-   * Deterministic Tool 2: 4-Stage Multi-Agent Debate with Verified Neon Persistence
-   * Dynamic: Accepts user provider and model settings instead of pinning to Gemini.
+   * Deterministic Tool 2: Configurable Multi-Agent Debate with Verified Neon Persistence
+   * Dynamic: Accepts custom personas, cross-exam rounds, focus weights, constraints, and provider/model settings.
    */
   public async executeMultiAgentDebate(
     dilemma: string,
     channel: string,
     provider: string,
-    model: string
+    model: string,
+    rawConfig?: DebateConfigInput,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     const trimmed = (dilemma || '').trim();
     if (!trimmed) {
       return { error: 'Debate dilemma cannot be empty', status: 'invalid_args' };
     }
 
+    const configResolution = resolveDebateConfiguration(rawConfig);
+    if (configResolution.ok === false) {
+      return {
+        status: 'error',
+        code: configResolution.code,
+        error: configResolution.error,
+      };
+    }
+    const config = configResolution.config;
+
     try {
       // Step 1: Concurrent Evidence Grounding (Neon pgvector Vault + Tavily Search)
       const [vaultMemories, liveWebEvidence] = await Promise.all([
         knowledgeService.search(trimmed, 3).catch(() => []),
-        this.executeSearchWeb(trimmed).catch(() => ({ sources: [] })),
+        this.executeSearchWeb(trimmed, undefined, signal).catch(() => ({ sources: [] })),
       ]);
 
       const evidenceContext = `EVIDENCE GROUNDING:
@@ -1317,91 +1664,146 @@ Live Web Search Facts: ${
           : 'No live external facts retrieved.'
       }`;
 
-      // Stage 1: Problem Framer with Evidence Grounding
+      const constraintsBlock = config.constraints.length > 0
+        ? `\nNON-NEGOTIABLE CONSTRAINTS:\n${config.constraints.map((c, idx) => `${idx + 1}. ${c}`).join('\n')}`
+        : '';
+
+      const focusProfileBlock = `FOCUS PROFILE (${config.focusBias}): risk=${config.focusWeights.risk}%, growth=${config.focusWeights.growth}%, capital=${config.focusWeights.capital}%, speed=${config.focusWeights.speed}%, regulatory=${config.focusWeights.regulatory}%.`;
+
+      // Stage 1: Problem Framer with Evidence Grounding & Constraints
       const framePrompt = `Stage 1: Problem Framer.
 Dilemma: "${trimmed}".
+${focusProfileBlock}${constraintsBlock}
 ${evidenceContext}
 
 Isolate:
 1. Core strategic trade-off & tension
-2. Hidden resource/time/capital constraints
-3. Objective criteria for a high-leverage outcome.
+2. Binding resource/time/capital/regulatory constraints
+3. Objective criteria aligned with the focus weighting above.
 Return concise, analytical bullet points.`;
-      const framing = await this.generateCompletion({ prompt: framePrompt, provider, model });
+      const framing = await this.generateCompletion({ prompt: framePrompt, provider, model, signal });
 
-      // Stage 2: Independent Perspectives (Parallel Execution)
-      const perspectiveAPrompt = `Stage 2 - Perspective A (Pragmatic / Lean Execution / High-Velocity Leverage):
+      // Stage 2: N Independent Persona Opening Statements (Parallel Execution)
+      const openingStatements = await Promise.all(
+        config.personas.map(async (persona) => {
+          const prompt = `Stage 2 - Independent Opening Argument (${persona.name}, Decision Weight: ${persona.weight}%):
 Dilemma: "${trimmed}"
+Mandate: ${persona.mandate}
+${focusProfileBlock}${constraintsBlock}
 Framing: ${framing}
 ${evidenceContext}
 
-Argue forcefully for the leanest, highest-velocity, lowest-overhead path. What is the single highest leverage move right now?`;
+Deliver a sharp, evidence-grounded opening position strictly reflecting your mandate and respecting any constraints stated above.`;
+          const statement = await this.generateCompletion({ prompt, provider, model, signal });
+          return {
+            personaId: persona.id,
+            personaName: persona.name,
+            weight: persona.weight,
+            statement,
+          };
+        }),
+      );
 
-      const perspectiveBPrompt = `Stage 2 - Perspective B (Downside Protection / Adversarial Challenger / Quality):
+      // Stage 3: Configurable R Cross-Examination Rounds
+      const roundTraces: Array<{
+        roundNumber: number;
+        responses: Array<{ personaId: string; personaName: string; response: string }>;
+      }> = [];
+
+      let latestPositions = openingStatements.map((o) => ({
+        personaId: o.personaId,
+        personaName: o.personaName,
+        weight: o.weight,
+        text: o.statement,
+      }));
+
+      for (let roundNumber = 1; roundNumber <= config.rounds; roundNumber++) {
+        const peerSnapshot = latestPositions
+          .map((p) => `[${p.personaName} (${p.weight}%)]: ${p.text}`)
+          .join('\n\n');
+
+        const roundResponses = await Promise.all(
+          config.personas.map(async (persona) => {
+            const peerArguments = latestPositions
+              .filter((p) => p.personaId !== persona.id)
+              .map((p) => `- ${p.personaName}: ${p.text.slice(0, 600)}`)
+              .join('\n');
+            const crossPrompt = `Stage 3 - Cross-Examination Round ${roundNumber} of ${config.rounds} (${persona.name}, Weight: ${persona.weight}%):
 Dilemma: "${trimmed}"
-Framing: ${framing}
-${evidenceContext}
+${focusProfileBlock}${constraintsBlock}
+Peer Arguments to Confront:
+${peerArguments || peerSnapshot}
 
-Argue for caution, risk mitigation, and protecting downside ruin. What hidden traps, failure modes, or capital waste could destroy this path?`;
+TASK: Directly rebut the strongest objections or flawed assumptions made by the other personas from your mandate ("${persona.mandate}"), test every claim against the stated constraints, and state any bounded concession required.`;
+            const response = await this.generateCompletion({ prompt: crossPrompt, provider, model, signal });
+            return {
+              personaId: persona.id,
+              personaName: persona.name,
+              response,
+            };
+          }),
+        );
 
-      const [perspectiveA, perspectiveB] = await Promise.all([
-        this.generateCompletion({ prompt: perspectiveAPrompt, provider, model }),
-        this.generateCompletion({ prompt: perspectiveBPrompt, provider, model }),
-      ]);
-
-      // Stage 3: Cross-Examination & Critique Round
-      const crossExamAPrompt = `Stage 3 - Cross-Examination (Perspective A Response to Challenger):
-Dilemma: "${trimmed}"
-Perspective A (Lean Velocity): ${perspectiveA}
-Perspective B (Downside Challenger): ${perspectiveB}
-
-TASK: Perspective A must directly address and rebut the strongest risk objections raised by Perspective B, citing specific evidence or acknowledging a bounded trade-off.`;
-
-      const crossExamBPrompt = `Stage 3 - Cross-Examination (Perspective B Response to Velocity):
-Dilemma: "${trimmed}"
-Perspective A (Lean Velocity): ${perspectiveA}
-Perspective B (Downside Challenger): ${perspectiveB}
-
-TASK: Perspective B must directly critique the feasibility and capital assumptions of Perspective A, highlighting unresolved failure modes.`;
-
-      const [crossExamA, crossExamB] = await Promise.all([
-        this.generateCompletion({ prompt: crossExamAPrompt, provider, model }),
-        this.generateCompletion({ prompt: crossExamBPrompt, provider, model }),
-      ]);
+        roundTraces.push({ roundNumber, responses: roundResponses });
+        latestPositions = roundResponses.map((r, idx) => ({
+          personaId: r.personaId,
+          personaName: r.personaName,
+          weight: config.personas[idx]?.weight ?? 100 / config.personas.length,
+          text: r.response,
+        }));
+      }
 
       // Stage 4: Pre-Mortem Inversion Stress-Testing
+      const summaryForPreMortem = openingStatements
+        .map((o) => `${o.personaName}: ${o.statement.slice(0, 220)}`)
+        .join('\n');
       const preMortemPrompt = `Stage 4: Pre-Mortem Inversion Stress-Test.
 Dilemma: "${trimmed}"
-Option A (Lean Velocity + Rebuttal): ${perspectiveA.slice(0, 250)}
-Option B (Downside Protection + Critique): ${perspectiveB.slice(0, 250)}
+${focusProfileBlock}${constraintsBlock}
+Debating Positions:
+${summaryForPreMortem}
 
-TASK: Assume it is 12 months from now, and BOTH paths have collapsed into catastrophic failure.
-1. Why did Option A fail?
-2. Why did Option B fail?
-3. Inverted Rule: What non-negotiable guardrail must be obeyed?`;
+TASK: Assume it is 12 months from now and the chosen strategy has failed catastrophically.
+1. Which constraint or blind spot triggered the collapse?
+2. Which persona's warning proved decisive?
+3. Inverted Rule: What non-negotiable guardrail must be enforced before execution?`;
 
-      const preMortemAnalysis = await this.generateCompletion({ prompt: preMortemPrompt, provider, model });
+      const preMortemAnalysis = await this.generateCompletion({ prompt: preMortemPrompt, provider, model, signal });
 
-      // Stage 5: Bayesian Expected-Value Matrix & Chief Arbiter Synthesis Verdict
-      const synthPrompt = `Stage 5: Synthesis, Bayesian Expected-Value Matrix & Action Plan.
+      // Stage 5: Weighted Expected-Value Matrix & Chief Arbiter Synthesis Verdict
+      const transcriptSections = [
+        ...openingStatements.map((o) => `Opening — ${o.personaName} (${o.weight}%):\n${o.statement}`),
+        ...roundTraces.map(
+          (rt) =>
+            `Cross-Exam Round ${rt.roundNumber}:\n` +
+            rt.responses.map((r) => `• ${r.personaName}: ${r.response}`).join('\n'),
+        ),
+      ].join('\n\n');
+
+      const synthPrompt = `Stage 5: Weighted Synthesis, Expected-Value Matrix & Action Plan.
 Dilemma: "${trimmed}"
+${focusProfileBlock}${constraintsBlock}
 Framing: ${framing}
-Perspective A (Lean): ${perspectiveA}
-Perspective B (Downside): ${perspectiveB}
-Cross-Examination A: ${crossExamA}
-Cross-Examination B: ${crossExamB}
+Debate Transcript (${config.personaCount} personas, ${config.rounds} round(s)):
+${transcriptSections}
 Pre-Mortem Inversion: ${preMortemAnalysis}
 
-Deliver the synthesized verdict formatted with clear sections:
+Deliver the synthesized verdict calibrated explicitly to the focus weights (${JSON.stringify(config.focusWeights)}) and constraints, formatted with clear sections:
 1. 🥊 *Core Clash & Tension*
-2. ⚔️ *Cross-Examination & Rebuttals*
+2. ⚔️ *Cross-Examination Highlights (${config.rounds} Round(s))*
 3. 💀 *Pre-Mortem Inversion (Fatal Blind Spot)*
-4. 📊 *Bayesian Expected-Value Matrix (Upside vs Downside Risk Score 1-10)*
+4. 📊 *Weighted Decision Matrix (Applied Focus Weights & Constraint Compliance)*
 5. 🎯 *Chief Arbiter Verdict & Recommendation*
-6. 🛡️ *Confidence Score (0-100%) & Trade-Off Accepted*
-7. 👉 *Immediate Next Action* (Specific, achievable today)`;
+6. 🛡️ *Confidence Assessment & Trade-Off Accepted*
+7. 👉 *Immediate Next Action*`;
 
-      const synthesis = await this.generateCompletion({ prompt: synthPrompt, provider, model });
+      const synthesis = await this.generateCompletion({ prompt: synthPrompt, provider, model, signal });
+
+      const perspectiveA = openingStatements[0]?.statement || '';
+      const perspectiveB = openingStatements[1]?.statement || '';
+      const lastRound = roundTraces[roundTraces.length - 1];
+      const crossExamA = lastRound?.responses[0]?.response || '';
+      const crossExamB = lastRound?.responses[1]?.response || '';
 
       // Verified Neon Database Persistence (Authoritative Await)
       let persistedToDb = false;
@@ -1410,13 +1812,16 @@ Deliver the synthesized verdict formatted with clear sections:
 
       try {
         decisionId = await neonDb.saveDecision({
-          title: `[Cross-Exam Debate] ${trimmed.slice(0, 90)}`,
+          title: `[${config.personaCount}-Agent x${config.rounds} Debate] ${trimmed.slice(0, 80)}`,
           situation: trimmed,
-          options: ['Perspective A (Lean Velocity)', 'Perspective B (Downside Protection)'],
+          options: config.personas.map((p) => `${p.name} (${p.weight}%)`),
           recommendation: synthesis.slice(0, 500),
           confidence: 85,
           full_analysis: {
+            resolvedConfig: config,
             framing,
+            openingStatements,
+            roundTraces,
             perspectiveA,
             perspectiveB,
             crossExamA,
@@ -1437,8 +1842,21 @@ Deliver the synthesized verdict formatted with clear sections:
       }
 
       return {
+        status: 'success',
         dilemma: trimmed,
+        resolvedConfig: config,
+        personas: config.personas,
+        roundCount: config.rounds,
         framing,
+        openingStatements: openingStatements.map((o) => ({
+          personaName: o.personaName,
+          weight: o.weight,
+          summary: o.statement.slice(0, 300),
+        })),
+        roundTraces: roundTraces.map((rt) => ({
+          roundNumber: rt.roundNumber,
+          responses: rt.responses.map((r) => ({ personaName: r.personaName, summary: r.response.slice(0, 260) })),
+        })),
         perspectiveA: perspectiveA.slice(0, 300),
         perspectiveB: perspectiveB.slice(0, 300),
         crossExamA: crossExamA.slice(0, 300),
@@ -1794,6 +2212,26 @@ Respond in valid JSON:
       ? `${learnedContext}\n${formatVisualEvidenceForContext(visualEvidence)}`
       : learnedContext;
 
+    let communicationStyleDirective = '';
+    try {
+      const styleMessages = [
+        ...conversationHistory.map((m) => ({ role: m.role, content: m.content })),
+        { role: 'user', content: userPrompt },
+      ];
+      const styleAnalysis = await communicationStyleService.analyzeCommunicationStyle(styleMessages, {
+        provider,
+        model,
+        customGeminiKey: options.customGeminiKey || s.customGeminiKey,
+        customGroqKey: customGroqKey || s.customGroqKey,
+        customMistralKey: customMistralKey || s.customMistralKey,
+        mode: process.env.TWINMIND_CHAT_STYLE_LLM === 'true' ? 'full' : 'fast',
+        signal: options.signal,
+      });
+      communicationStyleDirective = communicationStyleService.getPersonaPromptDirective(styleAnalysis);
+    } catch (styleErr) {
+      console.warn('[TwinAgent] Communication style analysis warning:', styleErr);
+    }
+
     const systemInstruction = buildSystemPrompt({
       channel,
       userName,
@@ -1808,48 +2246,94 @@ Respond in valid JSON:
       historicalContext,
       soulTuning: currentSettings.soulTuning,
       thinkingLevel: resolvedThinkingLevel,
+      communicationStyleDirective,
       pinnedDocs: options.pinnedDocs,
     });
 
 
     const toolsExecuted: Array<{ toolName: string; args: Record<string, unknown>; result: unknown }> = [];
-    const maxAgentToolCalls = resolveBoundedIntegerSetting(
-      process.env,
-      'TWINMIND_AGENT_MAX_TOOL_CALLS',
-      8,
-      1,
-      40,
+    const hasConfiguredTavily = Boolean(
+      process.env.TAVILY_API_KEY || s.customTavilyKey || customTavilyKey,
     );
-    let agentToolCallsUsed = 0;
+    const executionPolicy = resolveDynamicAgentExecutionPolicy({
+      env: process.env,
+      userPrompt,
+      thinkingLevel: resolvedThinkingLevel,
+      hasSearchProvider: hasConfiguredTavily,
+    });
 
-    // Helper to dispatch tool execution with a turn-wide, runtime-configured cap.
+    let agentToolCallsUsed = 0;
+    let exploratoryCallsUsed = 0;
+    const exploratoryBudgetCap = Math.max(
+      0,
+      executionPolicy.maxToolCalls - executionPolicy.deliverableReserveCalls,
+    );
+
+    const recordToolResult = (name: string, args: Record<string, unknown>, result: unknown, toolId: string) => {
+      onToolComplete?.(name, result, toolId);
+      toolsExecuted.push({ toolName: name, args, result });
+      return result;
+    };
+
+    // Helper to dispatch tool execution with dynamically resolved turn limits,
+    // pre-validation before charging budget, and deliverable slot preservation.
     const runTool = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
       const toolId = randomUUID();
       onToolStart?.(name, args, toolId);
-      if (agentToolCallsUsed >= maxAgentToolCalls) {
-        const rejected = {
-          status: 'error',
-          code: 'AGENT_TOOL_BUDGET_EXHAUSTED',
-          error: `The configured tool-call budget of ${maxAgentToolCalls} was exhausted; no additional provider call was made.`,
-        };
-        onToolComplete?.(name, rejected, toolId);
-        toolsExecuted.push({ toolName: name, args, result: rejected });
-        return rejected;
+
+      // Total cap protects all executions
+      if (agentToolCallsUsed >= executionPolicy.maxToolCalls) {
+        return recordToolResult(
+          name,
+          args,
+          {
+            status: 'error',
+            code: 'AGENT_TOOL_BUDGET_EXHAUSTED',
+            error: `The dynamic tool-call budget of ${executionPolicy.maxToolCalls} was exhausted; no additional provider call was made.`,
+          },
+          toolId,
+        );
       }
-      agentToolCallsUsed += 1;
+
+      // Preserve reserved deliverable slot for generateArtifact / generateArtifactBatch
+      if (
+        name !== 'generateArtifact' &&
+        name !== 'generateArtifactBatch' &&
+        exploratoryCallsUsed >= exploratoryBudgetCap
+      ) {
+        return recordToolResult(
+          name,
+          args,
+          {
+            status: 'error',
+            code: 'AGENT_EXPLORATORY_BUDGET_REACHED',
+            error: `Exploratory tool budget (${exploratoryBudgetCap} calls) is exhausted while preserving ${executionPolicy.deliverableReserveCalls} slot for final deliverable synthesis. Proceed directly to generateArtifact or generateArtifactBatch using the evidence already collected.`,
+          },
+          toolId,
+        );
+      }
+
       let result: unknown;
       if (name === 'searchWeb') {
-        result = await this.executeSearchWeb(String(args.query || ''), customTavilyKey, options.signal);
+        const query = String(args.query || '').trim();
+        if (!query) {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'SEARCH_QUERY_REQUIRED',
+              error: 'A non-empty search query is required.',
+              sources: [],
+            },
+            toolId,
+          );
+        }
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
+        result = await this.executeSearchWeb(query, customTavilyKey, options.signal);
       } else if (name === 'extractWebPages') {
-        const extractionLimit = resolveBoundedIntegerSetting(
-          process.env,
-          'TWINMIND_RESEARCH_EXTRACT_LIMIT',
-          5,
-          1,
-          10,
-        );
         const rawRequestedUrls = Array.isArray(args.urls) ? args.urls : [];
-        const requestedUrls = normalizeResearchUrls(rawRequestedUrls, 100);
         const userSuppliedUrls = normalizeResearchUrls(
           (userPrompt.match(/https?:\/\/[^\s"'<>]+/gi) || []).map((url) => url.replace(/[),.;!?]+$/, '')),
           100,
@@ -1861,43 +2345,109 @@ Respond in valid JSON:
           return normalizeResearchSearchResults(searchResult.sources);
         });
         const observedSearchUrls = observedSearchSources.map((source) => source.url);
-        const allowedUrls = new Set(normalizeResearchUrls([...userSuppliedUrls, ...observedSearchUrls], 100));
-        const invalidEntries = rawRequestedUrls.some((url) =>
-          typeof url !== 'string' || normalizeResearchUrls([url], 1).length === 0
+        const { matchedUrls, unauthorizedUrls, invalidEntries } = partitionExtractionUrls(
+          rawRequestedUrls,
+          [...userSuppliedUrls, ...observedSearchUrls],
         );
-        const unauthorizedUrls = requestedUrls.filter((url) => !allowedUrls.has(url));
 
-        if (invalidEntries || requestedUrls.length === 0 || requestedUrls.length > extractionLimit || unauthorizedUrls.length > 0) {
-          result = {
-            status: 'error',
-            code: invalidEntries
+        // Fail validation cleanly WITHOUT consuming tool budget when nothing valid/verified was supplied
+        if (matchedUrls.length === 0) {
+          const code = unauthorizedUrls.length > 0
+            ? 'RESEARCH_SOURCE_URL_NOT_VERIFIED'
+            : invalidEntries
               ? 'RESEARCH_SOURCE_URL_INVALID'
-              : requestedUrls.length > extractionLimit
-                ? 'RESEARCH_EXTRACTION_LIMIT_EXCEEDED'
-                : 'RESEARCH_SOURCE_URL_NOT_VERIFIED',
-            error: invalidEntries
+              : 'RESEARCH_SOURCE_URLS_REQUIRED';
+          const error = unauthorizedUrls.length > 0
+            ? 'Page extraction accepts only URLs present in the user request or returned by an earlier live search.'
+            : invalidEntries
               ? 'Page extraction requires valid public HTTP(S) URLs.'
-              : requestedUrls.length > extractionLimit
-                ? `Page extraction requested ${requestedUrls.length} unique URLs, exceeding the configured limit of ${extractionLimit}.`
-                : unauthorizedUrls.length > 0
-                  ? 'Page extraction accepts only URLs present in the user request or returned by an earlier live search.'
-                  : 'Page extraction requires at least one valid URL.',
-            sources: [],
-          };
-        } else {
-          result = await this.executeExtractWebPages(requestedUrls, customTavilyKey, options.signal, observedSearchSources);
+              : 'Page extraction requires at least one valid URL.';
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code,
+              error,
+              ...(unauthorizedUrls.length > 0 ? { unauthorizedUrls } : {}),
+              sources: [],
+            },
+            toolId,
+          );
         }
+
+        const batches = chunkUrlsByBatchLimit(matchedUrls, executionPolicy.extractBatchLimit);
+        const availableSlots = Math.max(0, exploratoryBudgetCap - exploratoryCallsUsed);
+        if (availableSlots === 0) {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'AGENT_EXPLORATORY_BUDGET_REACHED',
+              error: 'No exploratory tool slots remain; generate the final deliverable with gathered sources.',
+              sources: [],
+            },
+            toolId,
+          );
+        }
+
+        const batchesToRun = batches.slice(0, availableSlots);
+        const urlsToExtract = batchesToRun.flat();
+        const unextractedDueToBudgetUrls = batches.slice(availableSlots).flat();
+
+        agentToolCallsUsed += batchesToRun.length;
+        exploratoryCallsUsed += batchesToRun.length;
+
+        const extractionResult = await this.executeExtractWebPages(
+          urlsToExtract,
+          customTavilyKey,
+          options.signal,
+          observedSearchSources,
+          executionPolicy.extractBatchLimit,
+        );
+        result = {
+          ...extractionResult,
+          ...(unauthorizedUrls.length > 0 ? { skippedUnauthorizedUrls: unauthorizedUrls } : {}),
+          ...(unextractedDueToBudgetUrls.length > 0 ? { unextractedDueToBudgetUrls } : {}),
+        };
       } else if (name === 'runMultiAgentDebate') {
-        result = await this.executeMultiAgentDebate(String(args.dilemma || ''), channel, provider, model);
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
+        result = await this.executeMultiAgentDebate(
+          String(args.dilemma || ''),
+          channel,
+          provider,
+          model,
+          {
+            personaCount: args.personaCount as any,
+            personas: args.personas as any,
+            rounds: args.rounds as any,
+            focusBias: typeof args.focusBias === 'string' ? args.focusBias : undefined,
+            focusWeights: (args.focusWeights ?? args.focusWeightsJson) as any,
+            constraints: args.constraints as any,
+          },
+          options.signal,
+        );
       } else if (name === 'deconstructDecision') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         result = await this.executeDecisionAnalysis(String(args.dilemma || ''), channel, provider, model);
       } else if (name === 'generateExecutiveSummary') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         result = await this.executeExecutiveSummary(args.timeframe ? String(args.timeframe) : undefined);
       } else if (name === 'searchConversationHistory') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         result = await historicalAwarenessService.searchConversationHistory(String(args.query || ''));
       } else if (name === 'recallDecisionsAndTasks') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         result = await historicalAwarenessService.recallDecisionsAndTasks();
       } else if (name === 'updateMemoryVault') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         result = await executeVaultMemoryUpdate({
           topic: args.topic,
           targetTitle: args.targetTitle,
@@ -1907,6 +2457,8 @@ Respond in valid JSON:
           tier: args.tier,
         });
       } else if (name === 'manageActiveRules') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         result = await executeManageActiveRules({
           action: args.action,
           ruleId: args.ruleId,
@@ -1948,24 +2500,108 @@ Respond in valid JSON:
         const targetType = promptFormat || argumentFormat || filenameFormat;
 
         if (!targetType) {
-          throw new Error('ARTIFACT_FORMAT_REQUIRED: choose PDF, XLSX, CSV, or Markdown. No default format was substituted.');
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'ARTIFACT_FORMAT_REQUIRED',
+              error: 'ARTIFACT_FORMAT_REQUIRED: choose PDF, XLSX, CSV, or Markdown. No default format was substituted.',
+            },
+            toolId,
+          );
         }
-        if (!fileNameInput) {
-          throw new Error('ARTIFACT_FILENAME_REQUIRED: the generator needs a descriptive file name.');
+        const fileNameStem = fileNameInput.replace(/\.(pdf|csv|xlsx|xls|md)$/i, '');
+        if (!fileNameInput || !fileNameStem.trim()) {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'ARTIFACT_FILENAME_REQUIRED',
+              error: 'ARTIFACT_FILENAME_REQUIRED: the generator needs a descriptive file name.',
+            },
+            toolId,
+          );
         }
         if (typeof args.content !== 'string' || !args.content.trim()) {
-          throw new Error('ARTIFACT_CONTENT_REQUIRED: no usable content was supplied to the file generator.');
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'ARTIFACT_CONTENT_REQUIRED',
+              error: 'ARTIFACT_CONTENT_REQUIRED: no usable content was supplied to the file generator.',
+            },
+            toolId,
+          );
         }
 
-        const fileNameStem = fileNameInput.replace(/\.(pdf|csv|xlsx|xls|md)$/i, '');
-        if (!fileNameStem.trim()) throw new Error('ARTIFACT_FILENAME_REQUIRED');
-
+        agentToolCallsUsed += 1;
         result = await specialistSwarmService.executeGenerateArtifact(
           targetType,
           args.content,
           fileNameStem + '.' + targetType
         );
+      } else if (name === 'generateArtifactBatch') {
+        const { specialistSwarmService } = await import('./specialistSwarmService.ts');
+        const rawItems = Array.isArray(args.items) ? args.items : [];
+        const archiveFileName = typeof args.archiveFileName === 'string' ? args.archiveFileName.trim() : '';
+
+        if (!archiveFileName) {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'ARTIFACT_BATCH_FILENAME_REQUIRED',
+              error: 'ARTIFACT_BATCH_FILENAME_REQUIRED: archiveFileName is required for batch ZIP generation.',
+            },
+            toolId,
+          );
+        }
+        if (rawItems.length === 0) {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'ARTIFACT_BATCH_ITEMS_REQUIRED',
+              error: 'ARTIFACT_BATCH_ITEMS_REQUIRED: at least one deliverable item is required in items[].',
+            },
+            toolId,
+          );
+        }
+
+        const sanitizedItems = rawItems
+          .map((item: any) => ({
+            type: String(item?.type || '').trim().toLowerCase() as 'pdf' | 'md' | 'csv' | 'xlsx',
+            fileName: String(item?.fileName || '').trim(),
+            content: typeof item?.content === 'string' ? item.content : JSON.stringify(item?.content ?? ''),
+          }))
+          .filter((item) => item.fileName && item.content.trim());
+
+        if (sanitizedItems.length === 0) {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'ARTIFACT_BATCH_INVALID_ITEMS',
+              error: 'ARTIFACT_BATCH_INVALID_ITEMS: every batch item requires type, fileName, and non-empty content.',
+            },
+            toolId,
+          );
+        }
+
+        agentToolCallsUsed += 1;
+        result = await specialistSwarmService.executeGenerateArtifactBatch(
+          sanitizedItems,
+          archiveFileName,
+        );
       } else if (name === 'scheduleCheckIn') {
+        agentToolCallsUsed += 1;
+        exploratoryCallsUsed += 1;
         const { validateScheduledCheckinInput } = await import('./scheduledCheckinService.ts');
         const validated = validateScheduledCheckinInput({
           title: args.title,
@@ -1994,12 +2630,92 @@ Respond in valid JSON:
             };
           }
         }
+      } else if (name === 'queryStructuredData') {
+        const mode = typeof args.mode === 'string' ? args.mode.trim().toLowerCase() : '';
+        if (mode !== 'schema' && mode !== 'sql' && mode !== 'external_api') {
+          return recordToolResult(
+            name,
+            args,
+            {
+              status: 'error',
+              code: 'STRUCTURED_QUERY_MODE_REQUIRED',
+              error: 'queryStructuredData requires mode: "schema", "sql", or "external_api".',
+            },
+            toolId,
+          );
+        }
+
+        if (mode === 'schema') {
+          agentToolCallsUsed += 1;
+          exploratoryCallsUsed += 1;
+          result = await inspectAllowlistedSchema();
+        } else if (mode === 'sql') {
+          const validation = validateReadOnlySqlQuery(args.sql);
+          if (!validation.valid) {
+            return recordToolResult(
+              name,
+              args,
+              {
+                status: 'error',
+                code: validation.code || 'QUERY_READONLY_VIOLATION',
+                error: validation.error || 'Invalid SQL query.',
+                rows: [],
+              },
+              toolId,
+            );
+          }
+          const parsedMaxRows =
+            typeof args.maxRows === 'number' && Number.isFinite(args.maxRows)
+              ? Math.floor(args.maxRows)
+              : undefined;
+          const queryParams = Array.isArray(args.params) ? args.params : [];
+          agentToolCallsUsed += 1;
+          exploratoryCallsUsed += 1;
+          result = await executeReadOnlySqlQuery(args.sql, queryParams, parsedMaxRows);
+        } else {
+          if (typeof args.url !== 'string' || !args.url.trim()) {
+            return recordToolResult(
+              name,
+              args,
+              {
+                status: 'error',
+                code: 'INVALID_API_URL',
+                error: 'queryStructuredData external_api mode requires a public HTTP(S) url.',
+              },
+              toolId,
+            );
+          }
+          let parsedVariables: unknown = args.variables;
+          if (typeof args.variablesJson === 'string' && args.variablesJson.trim()) {
+            try {
+              parsedVariables = JSON.parse(args.variablesJson);
+            } catch {
+              return recordToolResult(
+                name,
+                args,
+                {
+                  status: 'error',
+                  code: 'INVALID_VARIABLES_JSON',
+                  error: 'variablesJson must be a valid JSON string.',
+                },
+                toolId,
+              );
+            }
+          }
+          agentToolCallsUsed += 1;
+          exploratoryCallsUsed += 1;
+          result = await executeExternalStructuredQuery({
+            url: args.url,
+            method: args.method,
+            graphqlQuery: args.graphqlQuery,
+            variables: parsedVariables,
+            signal: options.signal,
+          });
+        }
       } else {
         result = { error: `Unknown tool "${name}"`, status: 'unknown_tool' };
       }
-      onToolComplete?.(name, result, toolId);
-      toolsExecuted.push({ toolName: name, args, result });
-      return result;
+      return recordToolResult(name, args, result, toolId);
     };
 
     // =========================================================================
@@ -2067,7 +2783,9 @@ Respond in valid JSON:
       });
 
       let round = 0;
-      const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
+      const MAX_ROUNDS = executionPolicy.maxToolRounds;
+      const geminiToolsAll = buildGeminiTwinTools(executionPolicy);
+      const geminiToolsArtifactOnly = buildGeminiTwinTools(executionPolicy, { onlyArtifactDelivery: true });
 
       const geminiThinkingLevel =
         resolvedThinkingLevel === 'high'
@@ -2079,7 +2797,8 @@ Respond in valid JSON:
       const runGeminiRound = async (
         roundContents: Array<any>,
         useTools: boolean,
-        operationName: string
+        operationName: string,
+        toolDeclarations = geminiToolsAll,
       ): Promise<{
         text: string;
         functionCalls: Array<{ name?: string; args?: Record<string, unknown>; id?: string }>;
@@ -2089,7 +2808,7 @@ Respond in valid JSON:
           const config: any = {
             systemInstruction,
             temperature: 0.7,
-            ...(useTools ? { tools: [{ functionDeclarations: GEMINI_TWIN_TOOLS }] } : {}),
+            ...(useTools ? { tools: [{ functionDeclarations: toolDeclarations }] } : {}),
             ...(useThinking ? { thinkingConfig: { thinkingLevel: geminiThinkingLevel } } : {}),
           };
 
@@ -2251,6 +2970,51 @@ Respond in valid JSON:
         });
       }
 
+      // Guarantee a dedicated deliverable-generation round if requested and still pending
+      const deliverableDone = toolsExecuted.some(
+        (t) =>
+          (t.toolName === 'generateArtifact' || t.toolName === 'generateArtifactBatch') &&
+          (t.result as any)?.status === 'success',
+      );
+      if (
+        executionPolicy.taskProfile.requiresArtifactDelivery &&
+        !deliverableDone &&
+        agentToolCallsUsed < executionPolicy.maxToolCalls
+      ) {
+        const deliverableRound = await runGeminiRound(
+          [
+            ...contents,
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: 'Exploratory rounds are complete. Call generateArtifact now to produce and validate the requested file from your verified research evidence above.',
+                },
+              ],
+            },
+          ],
+          true,
+          'GeminiDeliverableDeliveryRound',
+          geminiToolsArtifactOnly,
+        );
+        if (deliverableRound.functionCalls && deliverableRound.functionCalls.length > 0) {
+          const executedDelivery = await Promise.all(
+            deliverableRound.functionCalls.map(async (call) => ({
+              name: call.name || '',
+              callId: (call as any).id,
+              response: await runTool(call.name || '', (call.args || {}) as Record<string, unknown>),
+            })),
+          );
+          if (deliverableRound.modelContent) contents.push(deliverableRound.modelContent);
+          contents.push({
+            role: 'user',
+            parts: executedDelivery.map((et) => ({
+              functionResponse: { name: et.name, response: { output: et.response } },
+            })),
+          });
+        }
+      }
+
       // If budget reached, perform final direct synthesis (streaming if requested)
       const finalSynthesis = await runGeminiRound(
         [
@@ -2324,13 +3088,20 @@ Respond in valid JSON:
         { role: 'user', content: providerUserContent },
       ];
 
-      const runOpenAiCompatibleRound = async (includeTools: boolean, operationName: string) => {
+      const openAiToolsAll = buildOpenAiCompatibleTwinTools(executionPolicy);
+      const openAiToolsArtifactOnly = buildOpenAiCompatibleTwinTools(executionPolicy, { onlyArtifactDelivery: true });
+
+      const runOpenAiCompatibleRound = async (
+        includeTools: boolean,
+        operationName: string,
+        toolsPayload = openAiToolsAll,
+      ) => {
         const useStreaming = Boolean(options.onTextChunk);
         const bodyPayload: Record<string, unknown> = {
           model,
           messages: messagesList,
           temperature: 0.7,
-          ...(includeTools ? { tools: OPENAI_COMPATIBLE_TWIN_TOOLS, tool_choice: 'auto' } : {}),
+          ...(includeTools ? { tools: toolsPayload, tool_choice: 'auto' } : {}),
           ...(useStreaming ? { stream: true } : {}),
         };
 
@@ -2377,7 +3148,7 @@ Respond in valid JSON:
       };
 
       let round = 0;
-      const MAX_ROUNDS = resolveBoundedIntegerSetting(process.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', 4, 1, 8);
+      const MAX_ROUNDS = executionPolicy.maxToolRounds;
 
       while (round < MAX_ROUNDS) {
         round++;
@@ -2427,6 +3198,43 @@ Respond in valid JSON:
             tool_call_id: item.id,
             content: item.content,
           });
+        }
+      }
+
+      const deliverableDone = toolsExecuted.some(
+        (t) =>
+          (t.toolName === 'generateArtifact' || t.toolName === 'generateArtifactBatch') &&
+          (t.result as any)?.status === 'success',
+      );
+      if (
+        executionPolicy.taskProfile.requiresArtifactDelivery &&
+        !deliverableDone &&
+        agentToolCallsUsed < executionPolicy.maxToolCalls
+      ) {
+        messagesList.push({
+          role: 'user',
+          content: 'Exploratory rounds are complete. Call generateArtifact now to produce and validate the requested file from your verified research evidence above.',
+        });
+        const deliveryMsg = await runOpenAiCompatibleRound(
+          true,
+          `${provider}DeliverableDeliveryRound`,
+          openAiToolsArtifactOnly,
+        );
+        if (deliveryMsg.tool_calls && deliveryMsg.tool_calls.length > 0) {
+          messagesList.push(deliveryMsg);
+          const executedDelivery = await Promise.all(
+            deliveryMsg.tool_calls.map(async (tc: any) => {
+              let args: Record<string, unknown> = {};
+              try {
+                args = JSON.parse(tc.function?.arguments || '{}');
+              } catch {}
+              const res = await runTool(tc.function?.name || '', args);
+              return { id: tc.id, content: JSON.stringify(res) };
+            }),
+          );
+          for (const item of executedDelivery) {
+            messagesList.push({ role: 'tool', tool_call_id: item.id, content: item.content });
+          }
         }
       }
 

@@ -2,15 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  chunkUrlsByBatchLimit,
   normalizeResearchExtractions,
   normalizeResearchSearchResults,
   normalizeResearchUrls,
+  normalizeUrlForProvenanceMatch,
+  partitionExtractionUrls,
   inspectCitationReferences,
   resolveResearchSearchDepth,
+  resolveDynamicAgentExecutionPolicy,
   parseAdaptiveResearchPlan,
   parseInitialResearchPlan,
   resolveBoundedIntegerSetting,
 } from '../server/utils/researchEvidence.ts';
+import {
+  buildGeminiTwinTools,
+  buildOpenAiCompatibleTwinTools,
+} from '../server/services/twinAgentService.ts';
 
 // These are pure normalization/validation tests. They do not simulate an external search
 // provider, a provider success response, or a successful live research session.
@@ -56,14 +64,15 @@ test('source extraction accepts only the URLs selected from real search records'
   const extracted = normalizeResearchExtractions({
     results: [
       { title: 'Allowed page full text', url: 'https://docs.example.org/allowed#top', raw_content: 'Extracted page text' },
+      { title: 'Redirected www variant', url: 'https://www.docs.example.org/allowed?utm_source=test', raw_content: 'Extracted canonical redirect' },
       { title: 'Unrequested page', url: 'https://docs.example.org/other', raw_content: 'Must not enter the evidence set' },
       { title: 'No URL', raw_content: 'Not attributable to a source' },
     ],
   }, allowed);
 
-  assert.deepEqual(extracted, [
-    { title: 'Allowed page full text', url: 'https://docs.example.org/allowed', content: 'Extracted page text' },
-  ]);
+  assert.equal(extracted.length, 2);
+  assert.equal(extracted[0].url, 'https://docs.example.org/allowed');
+  assert.equal(extracted[1].url, 'https://www.docs.example.org/allowed?utm_source=test');
 });
 
 test('research URL normalization rejects malformed and non-HTTP URLs and removes duplicates', () => {
@@ -224,4 +233,102 @@ test('initial plans fail closed when the model output does not satisfy the plan 
     () => parseInitialResearchPlan(JSON.stringify({ searchQueries: ['query'] }), { maxQueries: 2 }),
     /RESEARCH_INITIAL_PLAN_SCHEMA_INVALID/,
   );
+});
+
+test('resolveDynamicAgentExecutionPolicy scales budget dynamically by complexity and reserves deliverable slots', () => {
+  const lowSimple = resolveDynamicAgentExecutionPolicy({
+    env: {},
+    userPrompt: 'Summarize our conversation notes.',
+    thinkingLevel: 'low',
+    hasSearchProvider: false,
+  });
+  const highResearchPdf = resolveDynamicAgentExecutionPolicy({
+    env: {},
+    userPrompt: 'Research enterprise AI agent frameworks with citations and generate a PDF report comparing trade-offs.',
+    thinkingLevel: 'high',
+    hasSearchProvider: true,
+  });
+
+  assert.equal(lowSimple.budgetSource, 'dynamic_task_resolved');
+  assert.equal(lowSimple.deliverableReserveCalls, 0);
+  assert.ok(highResearchPdf.maxToolCalls > lowSimple.maxToolCalls);
+  assert.ok(highResearchPdf.maxToolRounds > lowSimple.maxToolRounds);
+  assert.equal(highResearchPdf.deliverableReserveCalls, 1);
+  assert.equal(highResearchPdf.extractBatchLimit, 10);
+
+  const explicitEnv = resolveDynamicAgentExecutionPolicy({
+    env: {
+      TWINMIND_AGENT_MAX_TOOL_CALLS: '15',
+      TWINMIND_AGENT_MAX_TOOL_ROUNDS: '7',
+      TWINMIND_RESEARCH_EXTRACT_LIMIT: '12',
+    },
+    userPrompt: 'Create a PDF research report',
+    thinkingLevel: 'medium',
+    hasSearchProvider: true,
+  });
+  assert.equal(explicitEnv.budgetSource, 'explicit_env');
+  assert.equal(explicitEnv.maxToolCalls, 15);
+  assert.equal(explicitEnv.maxToolRounds, 7);
+  assert.equal(explicitEnv.extractBatchLimit, 12);
+
+  assert.throws(
+    () => resolveDynamicAgentExecutionPolicy({
+      env: { TWINMIND_AGENT_MAX_TOOL_CALLS: '999' },
+      userPrompt: 'Research frameworks',
+      thinkingLevel: 'high',
+      hasSearchProvider: true,
+    }),
+    /RESEARCH_CONFIGURATION_INVALID/,
+  );
+});
+
+test('partitionExtractionUrls matches benign URL variations to verified canonical URLs while rejecting unverified/SSRF URLs', () => {
+  const allowed = ['https://docs.langchain.com/langgraph?v=2', 'https://openai.github.io/agents-sdk'];
+  const partition = partitionExtractionUrls(
+    [
+      'http://www.docs.langchain.com/langgraph/?utm_source=chat&v=2',
+      'https://openai.github.io/agents-sdk/',
+      'https://unverified.example.com/fabricated',
+      'http://127.0.0.1/secret',
+    ],
+    allowed,
+  );
+
+  assert.deepEqual(partition.matchedUrls, [
+    'https://docs.langchain.com/langgraph?v=2',
+    'https://openai.github.io/agents-sdk',
+  ]);
+  assert.deepEqual(partition.unauthorizedUrls, ['https://unverified.example.com/fabricated']);
+  assert.equal(partition.invalidEntries, true);
+  assert.equal(
+    normalizeUrlForProvenanceMatch('http://www.Example.COM/path/?utm_medium=social&a=1#frag'),
+    'https://example.com/path?a=1',
+  );
+});
+
+test('chunkUrlsByBatchLimit splits 6+ URLs cleanly into provider-sized batches without dropping URLs', () => {
+  const urls = Array.from({ length: 13 }, (_, idx) => `https://example.com/source-${idx + 1}`);
+  const batches = chunkUrlsByBatchLimit(urls, 5);
+  assert.equal(batches.length, 3);
+  assert.deepEqual(batches.map((b) => b.length), [5, 5, 3]);
+  assert.deepEqual(batches.flat(), urls);
+});
+
+test('dynamic twin tool builders inject extract batch limits and isolate generateArtifact on delivery round', () => {
+  const policy = resolveDynamicAgentExecutionPolicy({
+    env: { TWINMIND_RESEARCH_EXTRACT_LIMIT: '12' },
+    userPrompt: 'Research frameworks and generate a PDF report',
+    thinkingLevel: 'high',
+    hasSearchProvider: true,
+  });
+
+  const geminiTools = buildGeminiTwinTools(policy);
+  const geminiExtract = geminiTools.find((t) => t.name === 'extractWebPages');
+  assert.match(geminiExtract.description, /12 URLs per API batch/);
+
+  const geminiDeliveryOnly = buildGeminiTwinTools(policy, { onlyArtifactDelivery: true });
+  assert.deepEqual(geminiDeliveryOnly.map((t) => t.name), ['generateArtifact', 'generateArtifactBatch']);
+
+  const openAiDeliveryOnly = buildOpenAiCompatibleTwinTools(policy, { onlyArtifactDelivery: true });
+  assert.deepEqual(openAiDeliveryOnly.map((t) => t.function.name), ['generateArtifact', 'generateArtifactBatch']);
 });

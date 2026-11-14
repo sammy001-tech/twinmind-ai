@@ -58,3 +58,20 @@ test('CommunicationStyleService - enthusiastic & positive message classification
   assert.ok(result.perceivedTraits.some((t) => t.trait === 'Empathetic'));
   assert.ok(result.perceivedTraits.some((t) => t.trait === 'Concise'));
 });
+
+test('CommunicationStyleService - fast mode runs deterministically with truthful analysisSource and urgent adaptation', async () => {
+  const messages = [
+    { role: 'user', content: 'Deploy status asap!! Keep it brief and quick!', created_at: '2026-11-14T10:00:00Z' },
+  ];
+
+  const result = await communicationStyleService.analyzeCommunicationStyle(messages, {
+    mode: 'fast',
+    provider: 'groq',
+  });
+
+  assert.equal(result.analysisSource, 'deterministic_heuristic');
+  assert.equal(result.analyzedProvider, undefined);
+  assert.equal(result.personaAdaptation.activeToneMode, 'High-Velocity Operational Directness');
+  assert.equal(result.personaAdaptation.recommendedPacing, 'concise_fast');
+});
+

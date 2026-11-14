@@ -10,6 +10,9 @@ import {
   MemoryLifecycleStatus,
   MemorySourceType,
   RetrievedMemoryDiagnostic,
+  VaultEntityType,
+  VaultRevisionEntry,
+  BatchIngestFileResult,
 } from '../types/index.ts';
 import { KnowledgeGraphView } from './KnowledgeGraphView.tsx';
 import { BeliefConflictCard } from './BeliefConflictCard.tsx';
@@ -44,6 +47,8 @@ import {
   Clock,
   FolderGit2,
   Activity,
+  History,
+  RotateCcw,
 } from 'lucide-react';
 import { renderFormattedMarkdown } from '../utils/markdown.tsx';
 import { BeliefEvolutionTimeline } from './BeliefEvolutionTimeline.tsx';
@@ -205,13 +210,23 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
-  // File Ingestion state
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // File & Batch Archive Ingestion state
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [fileCategory, setFileCategory] = useState<string>('reference');
   const [fileTags, setFileTags] = useState<string>('');
   const [isIngestingFile, setIsIngestingFile] = useState(false);
   const [fileDragOver, setFileDragOver] = useState(false);
   const [fileFeedback, setFileFeedback] = useState<{ type: 'success' | 'error'; text: string; count?: number } | null>(null);
+  const [batchResults, setBatchResults] = useState<BatchIngestFileResult[] | null>(null);
+
+  // Version-Controlled Knowledge Vault History & Rollback state
+  const [historyTarget, setHistoryTarget] = useState<{ entityType: VaultEntityType; entityId: number | string } | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRevisions, setHistoryRevisions] = useState<VaultRevisionEntry[]>([]);
+  const [expandedDiffVersion, setExpandedDiffVersion] = useState<number | null>(null);
+  const [confirmRollbackVersion, setConfirmRollbackVersion] = useState<number | null>(null);
+  const [rollingBackVersion, setRollingBackVersion] = useState<number | null>(null);
 
   // Web URL Ingestion state
   const [webUrlInput, setWebUrlInput] = useState<string>('');
@@ -220,62 +235,190 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
   const [isIngestingUrl, setIsIngestingUrl] = useState(false);
   const [urlFeedback, setUrlFeedback] = useState<{ type: 'success' | 'error'; text: string; count?: number } | null>(null);
 
+  const fetchEntityHistory = async (entityType: VaultEntityType, entityId: number | string) => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const endpoint = entityType === 'knowledge_doc'
+        ? `/api/knowledge/${encodeURIComponent(String(entityId))}/history`
+        : `/api/persona-memories/${encodeURIComponent(String(entityId))}/history`;
+      const res = await fetch(endpoint);
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to load revision history.');
+      }
+      const list = Array.isArray(data.revisions) ? (data.revisions as VaultRevisionEntry[]) : [];
+      setHistoryRevisions(list);
+      setExpandedDiffVersion(list[0]?.versionNumber ?? null);
+    } catch (err: unknown) {
+      setHistoryError(err instanceof Error ? err.message : 'Unable to fetch commit history.');
+      setHistoryRevisions([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleToggleHistory = (entityType: VaultEntityType, entityId: number | string) => {
+    if (
+      historyTarget &&
+      historyTarget.entityType === entityType &&
+      String(historyTarget.entityId) === String(entityId)
+    ) {
+      setHistoryTarget(null);
+      setConfirmRollbackVersion(null);
+      setHistoryError(null);
+      return;
+    }
+    setHistoryTarget({ entityType, entityId });
+    setConfirmRollbackVersion(null);
+    setHistoryRevisions([]);
+    void fetchEntityHistory(entityType, entityId);
+  };
+
+  const handleRollbackVersion = async (
+    entityType: VaultEntityType,
+    entityId: number | string,
+    targetVersion: number,
+  ) => {
+    if (confirmRollbackVersion !== targetVersion) {
+      setConfirmRollbackVersion(targetVersion);
+      return;
+    }
+    setRollingBackVersion(targetVersion);
+    setHistoryError(null);
+    try {
+      const endpoint = entityType === 'knowledge_doc'
+        ? `/api/knowledge/${encodeURIComponent(String(entityId))}/rollback`
+        : `/api/persona-memories/${encodeURIComponent(String(entityId))}/rollback`;
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetVersion,
+          reason: `Manual rollback to v${targetVersion} from Knowledge Vault UI`,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Failed to roll back to v${targetVersion}.`);
+      }
+      setConfirmRollbackVersion(null);
+      await fetchEntityHistory(entityType, entityId);
+      if (entityType === 'knowledge_doc') {
+        await fetchDocuments();
+        await fetchCategories();
+        await fetchStatus();
+      } else {
+        await fetchRules();
+      }
+    } catch (err: unknown) {
+      setHistoryError(err instanceof Error ? err.message : 'Rollback failed.');
+    } finally {
+      setRollingBackVersion(null);
+    }
+  };
+
+  const fileToBase64 = async (file: File): Promise<string> => {
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
   const handleFileDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setFileDragOver(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      setSelectedFile(e.dataTransfer.files[0]);
+      setSelectedFiles(Array.from(e.dataTransfer.files));
       setFileFeedback(null);
+      setBatchResults(null);
     }
   };
 
   const handleFileIngestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedFile) {
-      setFileFeedback({ type: 'error', text: 'Please select a document file to ingest.' });
+    if (selectedFiles.length === 0) {
+      setFileFeedback({ type: 'error', text: 'Please select one or more documents (or a .zip bundle) to ingest.' });
       return;
     }
 
     setIsIngestingFile(true);
     setFileFeedback(null);
+    setBatchResults(null);
 
     try {
-      const arrayBuffer = await selectedFile.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      let binary = '';
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-      }
-      const base64Content = btoa(binary);
-
       const splitTags = fileTags
         .split(',')
         .map((t) => t.trim())
         .filter(Boolean);
+      const targetCategory = fileCategory.trim() || 'reference';
+      const isSingleNonZip =
+        selectedFiles.length === 1 && !selectedFiles[0].name.toLowerCase().endsWith('.zip');
 
-      const res = await fetch('/api/knowledge/ingest/file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: selectedFile.name,
-          contentBase64: base64Content,
-          mimeType: selectedFile.type,
-          category: fileCategory.trim() || 'reference',
-          tags: splitTags,
-        }),
-      });
+      if (isSingleNonZip) {
+        const single = selectedFiles[0];
+        const base64Content = await fileToBase64(single);
+        const res = await fetch('/api/knowledge/ingest/file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: single.name,
+            contentBase64: base64Content,
+            mimeType: single.type,
+            category: targetCategory,
+            tags: splitTags,
+          }),
+        });
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to ingest document file into knowledge vault');
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || 'Failed to ingest document file into knowledge vault');
+        }
+
+        setFileFeedback({
+          type: 'success',
+          text: `Successfully ingested "${data.primaryTitle}" (${data.totalCharacters.toLocaleString()} characters) into ${data.documentsCreated} vector-embedded document chunk(s).`,
+          count: data.documentsCreated,
+        });
+      } else {
+        const encodedFiles = await Promise.all(
+          selectedFiles.map(async (f) => ({
+            filename: f.name,
+            contentBase64: await fileToBase64(f),
+            mimeType: f.type,
+          })),
+        );
+
+        const res = await fetch('/api/knowledge/ingest/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            files: encodedFiles,
+            category: targetCategory,
+            tags: splitTags,
+          }),
+        });
+
+        const data = await res.json().catch(() => null);
+        if (Array.isArray(data?.results)) {
+          setBatchResults(data.results);
+        }
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || 'Batch ingestion failed.');
+        }
+
+        setFileFeedback({
+          type: data.overallStatus === 'success' ? 'success' : 'error',
+          text: `Batch complete (${data.overallStatus}): ${data.succeededCount}/${data.totalFilesProcessed} file(s) ingested into ${data.totalDocumentsCreated} vector chunk(s)${data.failedCount > 0 ? `; ${data.failedCount} failed` : ''}.`,
+          count: data.totalDocumentsCreated,
+        });
       }
 
-      setFileFeedback({
-        type: 'success',
-        text: `Successfully ingested "${data.primaryTitle}" (${data.totalCharacters.toLocaleString()} characters) into ${data.documentsCreated} vector-embedded document chunk(s).`,
-        count: data.documentsCreated,
-      });
-      setSelectedFile(null);
+      setSelectedFiles([]);
       setFileTags('');
       await fetchDocuments();
       await fetchCategories();
@@ -1664,6 +1807,19 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                                 )}
                                 <button
                                   type="button"
+                                  onClick={() => handleToggleHistory('knowledge_doc', doc.id)}
+                                  className={`p-1 rounded transition ${
+                                    historyTarget?.entityType === 'knowledge_doc' &&
+                                    String(historyTarget.entityId) === String(doc.id)
+                                      ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                      : 'text-slate-400 hover:text-indigo-500 dark:hover:text-indigo-400'
+                                  }`}
+                                  title="Commit history & rollback"
+                                >
+                                  <History className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => handleStartEdit(doc)}
                                   className="p-1 rounded text-slate-400 hover:text-indigo-500 dark:hover:text-indigo-400 transition"
                                   title="Edit note"
@@ -1717,6 +1873,128 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                                 ))}
                               </div>
                             )}
+
+                            {historyTarget?.entityType === 'knowledge_doc' &&
+                              String(historyTarget.entityId) === String(doc.id) && (
+                                <div className="mt-2 pt-2.5 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                  <div className="flex items-center justify-between text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
+                                    <span className="flex items-center gap-1.5">
+                                      <History className="w-3.5 h-3.5" />
+                                      Commit History &amp; Rollback
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setHistoryTarget(null)}
+                                      className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                  {historyLoading ? (
+                                    <div className="text-[11px] text-slate-500 flex items-center gap-1.5 py-2">
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                      Loading revision log...
+                                    </div>
+                                  ) : historyError ? (
+                                    <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-600 dark:text-rose-300">
+                                      {historyError}
+                                    </div>
+                                  ) : historyRevisions.length === 0 ? (
+                                    <div className="text-[11px] text-slate-500 py-1">
+                                      No recorded revision commits yet for this memory.
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                                      {historyRevisions.map((rev) => {
+                                        const isExpanded = expandedDiffVersion === rev.versionNumber;
+                                        return (
+                                          <div
+                                            key={rev.id}
+                                            className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5"
+                                          >
+                                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                                              <div className="flex items-center gap-1.5 text-[10px]">
+                                                <span className="font-mono font-bold px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300">
+                                                  v{rev.versionNumber}
+                                                </span>
+                                                <span className="uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                                                  {rev.operation}
+                                                </span>
+                                                <span className="text-slate-500 font-mono">
+                                                  {new Date(rev.createdAt).toLocaleString()}
+                                                </span>
+                                              </div>
+                                              <div className="flex items-center gap-1">
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    setExpandedDiffVersion(isExpanded ? null : rev.versionNumber)
+                                                  }
+                                                  className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700"
+                                                >
+                                                  {isExpanded ? 'Hide Diff' : 'View Diff'}
+                                                </button>
+                                                {rev.operation !== 'retire' && rev.snapshot && (
+                                                  <button
+                                                    type="button"
+                                                    disabled={rollingBackVersion === rev.versionNumber}
+                                                    onClick={() =>
+                                                      void handleRollbackVersion(
+                                                        'knowledge_doc',
+                                                        doc.id,
+                                                        rev.versionNumber,
+                                                      )
+                                                    }
+                                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold flex items-center gap-1 transition disabled:opacity-50 ${
+                                                      confirmRollbackVersion === rev.versionNumber
+                                                        ? 'bg-amber-600 text-white hover:bg-amber-500'
+                                                        : 'bg-indigo-600/15 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-600 hover:text-white'
+                                                    }`}
+                                                  >
+                                                    <RotateCcw className="w-2.5 h-2.5" />
+                                                    <span>
+                                                      {rollingBackVersion === rev.versionNumber
+                                                        ? 'Restoring...'
+                                                        : confirmRollbackVersion === rev.versionNumber
+                                                          ? `Confirm Restore v${rev.versionNumber}`
+                                                          : `Restore v${rev.versionNumber}`}
+                                                    </span>
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </div>
+                                            {rev.diffSummary && (
+                                              <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                                                {rev.diffSummary}
+                                                {rev.reason ? ` — ${rev.reason}` : ''}
+                                              </div>
+                                            )}
+                                            {isExpanded && rev.diffLines && rev.diffLines.length > 0 && (
+                                              <div className="p-2 rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 font-mono text-[10px] space-y-0.5 max-h-40 overflow-y-auto">
+                                                {rev.diffLines.map((line, idx) => (
+                                                  <div
+                                                    key={idx}
+                                                    className={`whitespace-pre-wrap break-words px-1 rounded ${
+                                                      line.type === 'add'
+                                                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                                        : line.type === 'remove'
+                                                          ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                                                          : 'text-slate-500'
+                                                    }`}
+                                                  >
+                                                    {line.type === 'add' ? '+ ' : line.type === 'remove' ? '- ' : '  '}
+                                                    {line.text}
+                                                  </div>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                           </>
                         )}
                       </div>
@@ -2017,6 +2295,19 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                               </button>
                               <button
                                 type="button"
+                                onClick={() => handleToggleHistory('active_rule', rule.id)}
+                                className={`p-1 rounded transition ${
+                                  historyTarget?.entityType === 'active_rule' &&
+                                  String(historyTarget.entityId) === String(rule.id)
+                                    ? 'text-indigo-600 dark:text-indigo-400 bg-indigo-500/10'
+                                    : 'text-slate-400 hover:text-indigo-500'
+                                }`}
+                                title="Rule commit history & rollback"
+                              >
+                                <History className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
                                 onClick={() => handleStartEditRule(rule)}
                                 className="p-1 rounded text-slate-400 hover:text-indigo-500"
                                 title="Edit rule"
@@ -2036,6 +2327,127 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                           <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed whitespace-pre-wrap">
                             {rule.content}
                           </p>
+                          {historyTarget?.entityType === 'active_rule' &&
+                            String(historyTarget.entityId) === String(rule.id) && (
+                              <div className="mt-2 pt-2.5 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                <div className="flex items-center justify-between text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
+                                  <span className="flex items-center gap-1.5">
+                                    <History className="w-3.5 h-3.5" />
+                                    Rule Commit History &amp; Rollback
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setHistoryTarget(null)}
+                                    className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                                {historyLoading ? (
+                                  <div className="text-[11px] text-slate-500 flex items-center gap-1.5 py-2">
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    Loading revision log...
+                                  </div>
+                                ) : historyError ? (
+                                  <div className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-600 dark:text-rose-300">
+                                    {historyError}
+                                  </div>
+                                ) : historyRevisions.length === 0 ? (
+                                  <div className="text-[11px] text-slate-500 py-1">
+                                    No recorded revision commits yet for this rule.
+                                  </div>
+                                ) : (
+                                  <div className="space-y-1.5 max-h-60 overflow-y-auto pr-1">
+                                    {historyRevisions.map((rev) => {
+                                      const isExpanded = expandedDiffVersion === rev.versionNumber;
+                                      return (
+                                        <div
+                                          key={rev.id}
+                                          className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1.5"
+                                        >
+                                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                                            <div className="flex items-center gap-1.5 text-[10px]">
+                                              <span className="font-mono font-bold px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-300">
+                                                v{rev.versionNumber}
+                                              </span>
+                                              <span className="uppercase font-semibold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                                                {rev.operation}
+                                              </span>
+                                              <span className="text-slate-500 font-mono">
+                                                {new Date(rev.createdAt).toLocaleString()}
+                                              </span>
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  setExpandedDiffVersion(isExpanded ? null : rev.versionNumber)
+                                                }
+                                                className="px-1.5 py-0.5 rounded text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+                                              >
+                                                {isExpanded ? 'Hide Diff' : 'View Diff'}
+                                              </button>
+                                              {rev.operation !== 'retire' && rev.snapshot && (
+                                                <button
+                                                  type="button"
+                                                  disabled={rollingBackVersion === rev.versionNumber}
+                                                  onClick={() =>
+                                                    void handleRollbackVersion(
+                                                      'active_rule',
+                                                      rule.id,
+                                                      rev.versionNumber,
+                                                    )
+                                                  }
+                                                  className={`px-2 py-0.5 rounded text-[10px] font-semibold flex items-center gap-1 transition disabled:opacity-50 ${
+                                                    confirmRollbackVersion === rev.versionNumber
+                                                      ? 'bg-amber-600 text-white hover:bg-amber-500'
+                                                      : 'bg-indigo-600/15 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-600 hover:text-white'
+                                                  }`}
+                                                >
+                                                  <RotateCcw className="w-2.5 h-2.5" />
+                                                  <span>
+                                                    {rollingBackVersion === rev.versionNumber
+                                                      ? 'Restoring...'
+                                                      : confirmRollbackVersion === rev.versionNumber
+                                                        ? `Confirm Restore v${rev.versionNumber}`
+                                                        : `Restore v${rev.versionNumber}`}
+                                                  </span>
+                                                </button>
+                                              )}
+                                            </div>
+                                          </div>
+                                          {rev.diffSummary && (
+                                            <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                                              {rev.diffSummary}
+                                              {rev.reason ? ` — ${rev.reason}` : ''}
+                                            </div>
+                                          )}
+                                          {isExpanded && rev.diffLines && rev.diffLines.length > 0 && (
+                                            <div className="p-2 rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 font-mono text-[10px] space-y-0.5 max-h-36 overflow-y-auto">
+                                              {rev.diffLines.map((line, idx) => (
+                                                <div
+                                                  key={idx}
+                                                  className={`whitespace-pre-wrap break-words px-1 rounded ${
+                                                    line.type === 'add'
+                                                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                                      : line.type === 'remove'
+                                                        ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
+                                                        : 'text-slate-500'
+                                                  }`}
+                                                >
+                                                  {line.type === 'add' ? '+ ' : line.type === 'remove' ? '- ' : '  '}
+                                                  {line.text}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </div>
+                            )}
                         </>
                       )}
                     </div>
@@ -2376,7 +2788,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                     Upload your documents, notes, or data files. TwinMind extracts the text, applies semantic paragraph chunking, computes real 768-dimensional vector embeddings, and durably stores them in Neon PostgreSQL.
                   </p>
                   <div className="flex flex-wrap gap-1.5 pt-1">
-                    {['PDF (.pdf)', 'Markdown (.md)', 'Plain Text (.txt)', 'JSON (.json)', 'CSV (.csv)'].map((fmt) => (
+                    {['PDF (.pdf)', 'Excel (.xlsx)', 'Word (.docx)', 'Images (OCR)', 'Markdown (.md)', 'Plain Text (.txt)', 'JSON (.json)', 'CSV (.csv)', 'ZIP Bundles (.zip)'].map((fmt) => (
                       <span key={fmt} className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-700 dark:text-blue-300 font-mono text-[10px] font-semibold">
                         {fmt}
                       </span>
@@ -2413,6 +2825,38 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                 </div>
               )}
 
+              {batchResults && batchResults.length > 0 && (
+                <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60 space-y-1.5">
+                  <div className="text-[11px] font-bold text-slate-700 dark:text-slate-200">
+                    Batch Ingestion Breakdown ({batchResults.length} file(s))
+                  </div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {batchResults.map((item, idx) => (
+                      <div
+                        key={`${item.filename}-${idx}`}
+                        className="flex items-center justify-between gap-2 text-[11px] p-1.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800"
+                      >
+                        <div className="min-w-0 truncate">
+                          <span className="font-semibold text-slate-800 dark:text-slate-200">{item.filename}</span>
+                          {item.archiveSource && (
+                            <span className="ml-1.5 text-[10px] text-slate-500 font-mono">({item.archiveSource})</span>
+                          )}
+                        </div>
+                        {item.status === 'ingested' ? (
+                          <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 shrink-0">
+                            {item.documentsCreated} chunk(s) • {item.totalCharacters.toLocaleString()} chars
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-rose-600 dark:text-rose-400 truncate max-w-[55%]" title={item.error}>
+                            {item.error || 'Failed'}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <form onSubmit={handleFileIngestSubmit} className="space-y-4">
                 {/* Drag and Drop Zone */}
                 <div
@@ -2425,7 +2869,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                   className={`border-2 border-dashed rounded-xl p-6 text-center transition cursor-pointer ${
                     fileDragOver
                       ? 'border-blue-500 bg-blue-500/10'
-                      : selectedFile
+                      : selectedFiles.length > 0
                       ? 'border-emerald-500/50 bg-emerald-500/5'
                       : 'border-slate-300 dark:border-slate-700 hover:border-blue-500/50 bg-slate-50 dark:bg-slate-950'
                   }`}
@@ -2437,35 +2881,57 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                   <input
                     id="twinmind-file-input"
                     type="file"
-                    accept=".pdf,.md,.markdown,.txt,.json,.csv"
+                    multiple
+                    accept=".pdf,.xlsx,.docx,.png,.jpg,.jpeg,.webp,.gif,.md,.markdown,.txt,.json,.csv,.zip"
                     className="hidden"
                     onChange={(e) => {
                       if (e.target.files && e.target.files.length > 0) {
-                        setSelectedFile(e.target.files[0]);
+                        setSelectedFiles(Array.from(e.target.files));
                         setFileFeedback(null);
+                        setBatchResults(null);
                       }
                     }}
                   />
-                  {selectedFile ? (
+                  {selectedFiles.length > 0 ? (
                     <div className="space-y-2">
                       <div className="w-12 h-12 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto">
                         <FileText className="w-6 h-6" />
                       </div>
                       <div className="font-semibold text-slate-900 dark:text-white text-xs sm:text-sm">
-                        {selectedFile.name}
+                        {selectedFiles.length === 1
+                          ? selectedFiles[0].name
+                          : `${selectedFiles.length} files selected for batch ingestion`}
                       </div>
-                      <div className="text-[11px] text-slate-500">
-                        {(selectedFile.size / 1024).toFixed(1)} KB • {selectedFile.type || 'Document'}
+                      <div className="flex flex-wrap justify-center gap-1.5 max-h-24 overflow-y-auto px-2">
+                        {selectedFiles.map((f, idx) => (
+                          <span
+                            key={`${f.name}-${idx}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[10px] text-slate-700 dark:text-slate-200"
+                          >
+                            <span className="truncate max-w-[160px]">{f.name}</span>
+                            <span className="text-slate-400 font-mono">({(f.size / 1024).toFixed(0)}KB)</span>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedFiles((prev) => prev.filter((_, i) => i !== idx))}
+                              className="text-slate-400 hover:text-rose-500"
+                              aria-label={`Remove ${f.name}`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
                       </div>
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setSelectedFile(null);
+                          setSelectedFiles([]);
+                          setBatchResults(null);
                         }}
                         className="text-xs text-rose-500 hover:text-rose-600 dark:hover:text-rose-400 underline font-medium pt-1"
                       >
-                        Change file
+                        Clear selection
                       </button>
                     </div>
                   ) : (
@@ -2474,10 +2940,10 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                         <UploadCloud className="w-6 h-6" />
                       </div>
                       <div className="font-semibold text-slate-900 dark:text-white text-xs sm:text-sm">
-                        Click or drag &amp; drop document here
+                        Click or drag &amp; drop document(s) or a .zip archive here
                       </div>
                       <div className="text-[11px] text-slate-500">
-                        Supports PDF, Markdown, Text, JSON, and CSV up to 25MB
+                        Supports multi-file batch uploads &amp; .zip bundles containing PDF, Excel (.xlsx), Word (.docx), Images (OCR), Markdown, Text, JSON, and CSV
                       </div>
                     </div>
                   )}
@@ -2523,13 +2989,14 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                 </div>
 
                 <div className="flex items-center justify-end gap-2 pt-2">
-                  {selectedFile && (
+                  {selectedFiles.length > 0 && (
                     <button
                       type="button"
                       onClick={() => {
-                        setSelectedFile(null);
+                        setSelectedFiles([]);
                         setFileTags('');
                         setFileFeedback(null);
+                        setBatchResults(null);
                       }}
                       className="px-3 py-2 rounded-lg text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition"
                     >
@@ -2538,7 +3005,7 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                   )}
                   <button
                     type="submit"
-                    disabled={isIngestingFile || !selectedFile}
+                    disabled={isIngestingFile || selectedFiles.length === 0}
                     className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs transition flex items-center gap-1.5 shadow-md shadow-blue-600/20 disabled:opacity-50"
                   >
                     {isIngestingFile ? (
@@ -2549,7 +3016,11 @@ export const KnowledgeModal: React.FC<KnowledgeModalProps> = ({
                     ) : (
                       <>
                         <Database className="w-3.5 h-3.5" />
-                        <span>Ingest Document into Vault</span>
+                        <span>
+                          {selectedFiles.length > 1 || selectedFiles[0]?.name.toLowerCase().endsWith('.zip')
+                            ? 'Ingest Batch into Vault'
+                            : 'Ingest Document into Vault'}
+                        </span>
                       </>
                     )}
                   </button>

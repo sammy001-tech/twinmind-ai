@@ -33,6 +33,7 @@ import { pcmToWav } from './server/services/audioGenerationService.ts';
 import {
   parseDocumentBuffer,
   ingestDocumentChunks,
+  ingestDocumentBatch,
   fetchAndIngestWebPage,
 } from './server/services/documentIngestionService.ts';
 import { scanDuplicateVaultDocuments } from './server/services/vaultMemoryUpdateService.ts';
@@ -41,6 +42,11 @@ import { buildArtifactPreview } from './server/services/artifactPreviewService.t
 import { memoryService } from './server/services/memoryService.ts';
 import { normalizeInstructionScope, normalizeProjectKey } from './server/services/instructionRegistryService.ts';
 import { buildVerificationEnvelope, type ExecutedToolInput } from './server/services/verificationEnvelopeService.ts';
+import {
+  inspectAllowlistedSchema,
+  executeReadOnlySqlQuery,
+  executeExternalStructuredQuery,
+} from './server/services/structuredDataQueryService.ts';
 import type {
   AutonomousMemoryEvent,
   InstructionResolutionManifest,
@@ -79,8 +85,8 @@ const isProduction = process.env.NODE_ENV === 'production';
 // In development, the dev server must always listen on port 3000; in production, use PORT provided by host (e.g. Render)
 const PORT = isProduction ? (Number(process.env.PORT) || 3000) : 3000;
 
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(express.json({ limit: '65mb' }));
+app.use(express.urlencoded({ extended: true, limit: '65mb' }));
 
 // Owner-only API boundary. Signed webhooks are validated by their individual handlers.
 const publicApiPaths = new Set([
@@ -285,6 +291,73 @@ app.get('/api/artifacts/:filename/preview', async (req: Request, res: Response) 
         ? 'ARTIFACT_SIGNING_CONFIGURATION_MISSING'
         : 'ARTIFACT_PREVIEW_UNAVAILABLE',
       error: message,
+    });
+  }
+});
+
+// Generate multiple deliverables and bundle them into a verified, database-stored ZIP archive
+app.post('/api/artifacts/batch', async (req: Request, res: Response) => {
+  try {
+    const { archiveFileName, items } = req.body || {};
+    if (typeof archiveFileName !== 'string' || !archiveFileName.trim()) {
+      res.status(400).json({
+        success: false,
+        code: 'ARTIFACT_BATCH_FILENAME_REQUIRED',
+        error: 'archiveFileName is required for batch ZIP generation.',
+      });
+      return;
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      res.status(400).json({
+        success: false,
+        code: 'ARTIFACT_BATCH_ITEMS_REQUIRED',
+        error: 'items must be a non-empty array of { type, fileName, content } objects.',
+      });
+      return;
+    }
+
+    const sanitizedItems = items
+      .map((item: any) => ({
+        type: String(item?.type || '').trim().toLowerCase() as 'pdf' | 'md' | 'csv' | 'xlsx',
+        fileName: String(item?.fileName || '').trim(),
+        content: typeof item?.content === 'string' ? item.content : JSON.stringify(item?.content ?? ''),
+      }))
+      .filter((item) => item.fileName && item.content.trim());
+
+    if (sanitizedItems.length === 0) {
+      res.status(400).json({
+        success: false,
+        code: 'ARTIFACT_BATCH_INVALID_ITEMS',
+        error: 'Each batch item must include type, fileName, and non-empty content.',
+      });
+      return;
+    }
+
+    const result = await specialistSwarmService.executeGenerateArtifactBatch(
+      sanitizedItems,
+      archiveFileName.trim(),
+    );
+
+    if (result.status !== 'success') {
+      const resultCode = 'code' in result && typeof (result as { code?: unknown }).code === 'string'
+        ? (result as { code: string }).code
+        : undefined;
+      const errText = result.error || '';
+      const code = resultCode || (errText.match(/^([A-Z0-9_]+):/)?.[1] ?? 'ARTIFACT_BATCH_FAILED');
+      const httpStatus =
+        code.includes('UNAVAILABLE') || code.includes('DATABASE') || errText.includes('Database')
+          ? 503
+          : 400;
+      res.status(httpStatus).json({ success: false, code, ...result });
+      return;
+    }
+
+    res.json({ success: true, ...result });
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      code: 'ARTIFACT_BATCH_ERROR',
+      error: err instanceof Error ? err.message : 'Batch artifact generation failed.',
     });
   }
 });
@@ -1006,11 +1079,17 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
     // Routine chat messages are preserved purely in conversation history without automatically creating memory vault documents.
     let autonomousMemoryEvent: AutonomousMemoryEvent | null = null;
 
-    // Analyze user communication style & tone to tune persona resonance
+    // Analyze user communication style & tone to tune persona resonance (zero-latency deterministic fast mode unless opt-in LLM mode enabled)
     let communicationStyleDirective = '';
     try {
       const styleAnalysis = await communicationStyleService.analyzeCommunicationStyle(messages, {
+        provider: targetProvider,
+        model: targetModel,
         customGeminiKey: customGeminiKey || currentSettings.customGeminiKey,
+        customGroqKey: customGroqKey || currentSettings.customGroqKey,
+        customMistralKey: customMistralKey || currentSettings.customMistralKey,
+        mode: process.env.TWINMIND_CHAT_STYLE_LLM === 'true' ? 'full' : 'fast',
+        signal: abortController.signal,
       });
       communicationStyleDirective = communicationStyleService.getPersonaPromptDirective(styleAnalysis);
     } catch (sErr) {
@@ -1163,7 +1242,7 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       // Only expose artifacts when the generator confirms successful validation and durable file persistence.
       const artifactToolResults = swarmSession.traces.flatMap((trace) =>
         trace.tools
-          .filter((tool) => tool.toolName === 'generateArtifact')
+          .filter((tool) => tool.toolName === 'generateArtifact' || tool.toolName === 'generateArtifactBatch')
           .map((tool) => ({ traceStatus: tool.status, output: tool.output as Record<string, unknown> | null })),
       );
       const artifacts: Array<Record<string, unknown>> = [];
@@ -1291,7 +1370,9 @@ app.post('/api/chat', async (req: Request, res: Response): Promise<void> => {
       }
 
       // Only surface generated files that passed real format and saved-file validation.
-      const artifactToolResults = turnResult.toolsExecuted.filter((tool) => tool.toolName === 'generateArtifact');
+      const artifactToolResults = turnResult.toolsExecuted.filter(
+        (tool) => tool.toolName === 'generateArtifact' || tool.toolName === 'generateArtifactBatch',
+      );
       const artifacts: Array<Record<string, unknown>> = [];
       const artifactFailures: string[] = [];
 
@@ -2778,6 +2859,58 @@ app.delete('/api/knowledge/:id', async (req: Request, res: Response) => {
   }
 });
 
+// Knowledge Document Commit History & Rollback
+app.get('/api/knowledge/:id/history', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const numId = Number(req.params.id);
+  if (!Number.isSafeInteger(numId) || numId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DOCUMENT_ID', error: 'Valid numeric document id is required.' });
+    return;
+  }
+  const limit = req.query.limit ? Math.max(1, Math.min(200, Number(req.query.limit) || 50)) : 50;
+  try {
+    const revisions = await knowledgeService.getDocumentHistory(numId, limit);
+    res.json({ success: true, entityType: 'knowledge_doc', entityId: numId, revisions });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to load document history.' });
+  }
+});
+
+app.post('/api/knowledge/:id/rollback', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const numId = Number(req.params.id);
+  if (!Number.isSafeInteger(numId) || numId < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_DOCUMENT_ID', error: 'Valid numeric document id is required.' });
+    return;
+  }
+  const targetVersion = Number(req.body?.targetVersion);
+  if (!Number.isSafeInteger(targetVersion) || targetVersion < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_TARGET_VERSION', error: 'Valid targetVersion >= 1 is required.' });
+    return;
+  }
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : undefined;
+  try {
+    const outcome = await knowledgeService.rollbackDocument(numId, targetVersion, {
+      reason,
+      channel: 'web',
+    });
+    res.json({ success: true, ...outcome });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to rollback document.';
+    if (message.startsWith('REVISION_NOT_FOUND')) {
+      res.status(404).json({ success: false, code: 'REVISION_NOT_FOUND', error: message });
+      return;
+    }
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
 app.post('/api/knowledge/search', async (req: Request, res: Response) => {
   try {
     const { query, limit = 5, threshold = 0.4 } = req.body;
@@ -3154,6 +3287,55 @@ app.delete('/api/persona-memories/:id', async (req: Request, res: Response) => {
   res.json({ success: true, id });
 });
 
+// Active Rules (persona_memories) Commit History & Rollback
+app.get('/api/persona-memories/:id/history', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_RULE_ID', error: 'Valid numeric rule id is required.' });
+    return;
+  }
+  const limit = req.query.limit ? Math.max(1, Math.min(200, Number(req.query.limit) || 50)) : 50;
+  try {
+    const revisions = await memoryService.getRuleHistory(id, limit);
+    res.json({ success: true, entityType: 'active_rule', entityId: id, revisions });
+  } catch (err: unknown) {
+    res.status(500).json({ success: false, error: err instanceof Error ? err.message : 'Failed to load rule history.' });
+  }
+});
+
+app.post('/api/persona-memories/:id/rollback', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({ success: false, code: 'DATABASE_UNAVAILABLE', error: 'Neon PostgreSQL database is unavailable.' });
+    return;
+  }
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_RULE_ID', error: 'Valid numeric rule id is required.' });
+    return;
+  }
+  const targetVersion = Number(req.body?.targetVersion);
+  if (!Number.isSafeInteger(targetVersion) || targetVersion < 1) {
+    res.status(400).json({ success: false, code: 'INVALID_TARGET_VERSION', error: 'Valid targetVersion >= 1 is required.' });
+    return;
+  }
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : undefined;
+  try {
+    const outcome = await memoryService.rollbackRule(id, targetVersion, { reason, channel: 'web' });
+    res.json({ success: true, ...outcome });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to rollback active rule.';
+    if (message.startsWith('REVISION_NOT_FOUND')) {
+      res.status(404).json({ success: false, code: 'REVISION_NOT_FOUND', error: message });
+      return;
+    }
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
 // Thread Scoped Instructions & Project Binding Endpoints
 app.get('/api/threads/:id/instructions', async (req: Request, res: Response) => {
   const threadId = req.params.id?.trim();
@@ -3523,10 +3705,18 @@ app.delete('/api/checkins/:id', async (req: Request, res: Response) => {
 });
 
 // Communication Style & Emotional Tone Analysis Endpoint
-// Communication Style & Emotional Tone Analysis Endpoint
 app.post('/api/communication-style', async (req: Request, res: Response) => {
   try {
-    const { messages = [], threadId, customGeminiKey } = req.body;
+    const {
+      messages = [],
+      threadId,
+      provider,
+      model,
+      customGeminiKey,
+      customGroqKey,
+      customMistralKey,
+      mode,
+    } = req.body || {};
     let targetMessages = Array.isArray(messages) ? messages : [];
 
     // If threadId provided and messages empty, retrieve thread messages from Neon DB
@@ -3546,7 +3736,12 @@ app.post('/api/communication-style', async (req: Request, res: Response) => {
     }
 
     const analysis = await communicationStyleService.analyzeCommunicationStyle(targetMessages, {
-      customGeminiKey,
+      provider: typeof provider === 'string' ? provider : undefined,
+      model: typeof model === 'string' ? model : undefined,
+      customGeminiKey: normalizeProviderApiKey(customGeminiKey) || undefined,
+      customGroqKey: normalizeProviderApiKey(customGroqKey) || undefined,
+      customMistralKey: normalizeProviderApiKey(customMistralKey) || undefined,
+      mode: mode === 'fast' ? 'fast' : 'full',
     });
     res.json({ success: true, analysis });
   } catch (err: unknown) {
@@ -3564,10 +3759,19 @@ app.get('/api/historical-awareness', async (_req: Request, res: Response) => {
   }
 });
 
-// Direct Document Parsing for Chat Analysis (PDF, Markdown, Text, JSON, CSV)
+// Direct Document Parsing & OCR for Chat Analysis (PDF, Excel, Word, Images, Markdown, Text, JSON, CSV)
 app.post('/api/documents/parse', async (req: Request, res: Response) => {
   try {
-    const { filename, contentBase64, textContent, mimeType } = req.body || {};
+    const {
+      filename,
+      contentBase64,
+      textContent,
+      mimeType,
+      userPrompt,
+      customGeminiKey,
+      customGroqKey,
+      customMistralKey,
+    } = req.body || {};
 
     if (!filename || typeof filename !== 'string') {
       res.status(400).json({ success: false, error: 'FILENAME_REQUIRED: filename string is required' });
@@ -3584,25 +3788,46 @@ app.post('/api/documents/parse', async (req: Request, res: Response) => {
       return;
     }
 
-    const parsed = await parseDocumentBuffer(filename, buffer, mimeType);
+    const parsed = await parseDocumentBuffer(filename, buffer, mimeType, {
+      userPrompt: typeof userPrompt === 'string' && userPrompt.trim() ? userPrompt.trim() : undefined,
+      keys: {
+        gemini: normalizeProviderApiKey(customGeminiKey) || undefined,
+        groq: normalizeProviderApiKey(customGroqKey) || undefined,
+        mistral: normalizeProviderApiKey(customMistralKey) || undefined,
+      },
+    });
     res.json({
       success: true,
       title: parsed.title,
       content: parsed.content,
       format: parsed.format,
       charCount: parsed.content.length,
+      ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    res.status(400).json({ success: false, error: message });
+    const codeMatch = message.match(/^([A-Z0-9_]+):/);
+    const code = codeMatch ? codeMatch[1] : undefined;
+    const status = code && code.endsWith('_UNAVAILABLE') ? 503 : 400;
+    res.status(status).json({ success: false, ...(code ? { code } : {}), error: message });
   }
 });
 
-// Document File Ingestion (PDF, Markdown, Text, JSON, CSV) with intelligent chunking & pgvector embedding
-
+// Document File Ingestion (PDF, Excel, Word, Images, Markdown, Text, JSON, CSV) with chunking & pgvector embedding
 app.post('/api/knowledge/ingest/file', async (req: Request, res: Response) => {
   try {
-    const { filename, contentBase64, textContent, mimeType, category = 'reference', tags = [] } = req.body || {};
+    const {
+      filename,
+      contentBase64,
+      textContent,
+      mimeType,
+      category = 'reference',
+      tags = [],
+      userPrompt,
+      customGeminiKey,
+      customGroqKey,
+      customMistralKey,
+    } = req.body || {};
 
     if (!filename || typeof filename !== 'string') {
       res.status(400).json({ success: false, error: 'FILENAME_REQUIRED: filename string is required' });
@@ -3619,7 +3844,14 @@ app.post('/api/knowledge/ingest/file', async (req: Request, res: Response) => {
       return;
     }
 
-    const parsed = await parseDocumentBuffer(filename, buffer, mimeType);
+    const parsed = await parseDocumentBuffer(filename, buffer, mimeType, {
+      userPrompt: typeof userPrompt === 'string' && userPrompt.trim() ? userPrompt.trim() : undefined,
+      keys: {
+        gemini: normalizeProviderApiKey(customGeminiKey) || undefined,
+        groq: normalizeProviderApiKey(customGroqKey) || undefined,
+        mistral: normalizeProviderApiKey(customMistralKey) || undefined,
+      },
+    });
     const result = await ingestDocumentChunks({
       title: parsed.title,
       content: parsed.content,
@@ -3628,12 +3860,95 @@ app.post('/api/knowledge/ingest/file', async (req: Request, res: Response) => {
       source: 'file',
       format: parsed.format,
       sourceReference: filename,
+      metadata: parsed.metadata,
     });
 
     res.json({ success: true, ...result });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    res.status(400).json({ success: false, error: message });
+    const codeMatch = message.match(/^([A-Z0-9_]+):/);
+    const code = codeMatch ? codeMatch[1] : undefined;
+    const status = code && code.endsWith('_UNAVAILABLE') ? 503 : 400;
+    res.status(status).json({ success: false, ...(code ? { code } : {}), error: message });
+  }
+});
+
+// Batch Document & ZIP Archive Ingestion (expands safe .zip bundles & multi-file drops cleanly)
+app.post('/api/knowledge/ingest/batch', async (req: Request, res: Response) => {
+  if (!neonDb.isDatabaseConnected()) {
+    res.status(503).json({
+      success: false,
+      code: 'DATABASE_UNAVAILABLE',
+      error: 'Neon PostgreSQL database is unavailable; batch knowledge ingestion requires database persistence.',
+    });
+    return;
+  }
+
+  try {
+    const {
+      files,
+      category = 'reference',
+      tags = [],
+      userPrompt,
+      customGeminiKey,
+      customGroqKey,
+      customMistralKey,
+    } = req.body || {};
+
+    if (!Array.isArray(files) || files.length === 0) {
+      res.status(400).json({
+        success: false,
+        code: 'BATCH_FILES_REQUIRED',
+        error: 'files must be a non-empty array of uploaded files.',
+      });
+      return;
+    }
+
+    const decodedFiles = files.map((file: any) => {
+      const filename = typeof file?.filename === 'string' ? file.filename.trim() : '';
+      let buffer: Buffer = Buffer.alloc(0);
+      if (typeof file?.contentBase64 === 'string' && file.contentBase64.length > 0) {
+        buffer = Buffer.from(file.contentBase64, 'base64');
+      } else if (typeof file?.textContent === 'string' && file.textContent.length > 0) {
+        buffer = Buffer.from(file.textContent, 'utf-8');
+      }
+      return {
+        filename,
+        buffer,
+        mimeType: typeof file?.mimeType === 'string' ? file.mimeType : undefined,
+      };
+    });
+
+    const batchResult = await ingestDocumentBatch(decodedFiles, {
+      category: typeof category === 'string' && category.trim() ? category.trim() : 'reference',
+      tags: Array.isArray(tags) ? tags : [],
+      parseOptions: {
+        userPrompt: typeof userPrompt === 'string' && userPrompt.trim() ? userPrompt.trim() : undefined,
+        keys: {
+          gemini: normalizeProviderApiKey(customGeminiKey) || undefined,
+          groq: normalizeProviderApiKey(customGroqKey) || undefined,
+          mistral: normalizeProviderApiKey(customMistralKey) || undefined,
+        },
+      },
+    });
+
+    if (batchResult.overallStatus === 'failed') {
+      res.status(422).json({
+        ...batchResult,
+        success: false,
+        code: 'BATCH_INGESTION_FAILED',
+        error: batchResult.results[0]?.error || 'No files in the batch could be ingested.',
+      });
+      return;
+    }
+
+    res.json(batchResult);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    const codeMatch = message.match(/^([A-Z0-9_]+):/);
+    const code = codeMatch ? codeMatch[1] : undefined;
+    const status = code && code.endsWith('_UNAVAILABLE') ? 503 : 400;
+    res.status(status).json({ success: false, ...(code ? { code } : {}), error: message });
   }
 });
 
@@ -3656,6 +3971,104 @@ app.post('/api/knowledge/ingest/url', async (req: Request, res: Response) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     res.status(400).json({ success: false, error: message });
+  }
+});
+
+// Structured Data Query API: dynamic PostgreSQL schema introspection & read-only parameterized SQL / REST / GraphQL
+app.get('/api/data/schema', async (_req: Request, res: Response) => {
+  try {
+    const schema = await inspectAllowlistedSchema();
+    if (schema.status === 'error') {
+      const status = schema.code === 'DATABASE_UNCONNECTED' ? 503 : 500;
+      res.status(status).json({ success: false, ...schema });
+      return;
+    }
+    res.json({ success: true, ...schema });
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      code: 'SCHEMA_INTROSPECTION_FAILED',
+      error: err instanceof Error ? err.message : 'Failed to inspect allowlisted database schema.',
+      tables: [],
+    });
+  }
+});
+
+app.post('/api/data/query', async (req: Request, res: Response) => {
+  try {
+    const body = req.body || {};
+    const inferredMode =
+      typeof body.mode === 'string' && body.mode.trim()
+        ? body.mode.trim().toLowerCase()
+        : typeof body.sql === 'string'
+          ? 'sql'
+          : typeof body.url === 'string'
+            ? 'external_api'
+            : '';
+
+    if (inferredMode === 'schema') {
+      const schema = await inspectAllowlistedSchema();
+      if (schema.status === 'error') {
+        const status = schema.code === 'DATABASE_UNCONNECTED' ? 503 : 500;
+        res.status(status).json({ success: false, ...schema });
+        return;
+      }
+      res.json({ success: true, ...schema });
+      return;
+    }
+
+    if (inferredMode === 'sql') {
+      const result = await executeReadOnlySqlQuery(
+        body.sql,
+        Array.isArray(body.params) ? body.params : [],
+        typeof body.maxRows === 'number' ? Math.floor(body.maxRows) : undefined,
+      );
+      if (result.status === 'error') {
+        const status =
+          result.code === 'DATABASE_UNCONNECTED'
+            ? 503
+            : result.code === 'QUERY_EXECUTION_FAILED'
+              ? 400
+              : 400;
+        res.status(status).json({ success: false, ...result });
+        return;
+      }
+      res.json({ success: true, ...result });
+      return;
+    }
+
+    if (inferredMode === 'external_api') {
+      const result = await executeExternalStructuredQuery({
+        url: body.url,
+        method: body.method,
+        graphqlQuery: body.graphqlQuery,
+        variables: body.variables,
+        headers: body.headers,
+      });
+      if (result.status === 'error') {
+        const code = String(result.code || '');
+        const isClientValidation =
+          code === 'INVALID_API_URL' ||
+          code === 'API_HOST_NOT_ALLOWLISTED' ||
+          code === 'UNSUPPORTED_HTTP_METHOD';
+        res.status(isClientValidation ? 400 : 502).json({ success: false, ...result });
+        return;
+      }
+      res.json({ success: true, ...result });
+      return;
+    }
+
+    res.status(400).json({
+      success: false,
+      code: 'STRUCTURED_QUERY_MODE_REQUIRED',
+      error: 'Provide mode: "schema", "sql" (with sql), or "external_api" (with url).',
+    });
+  } catch (err: unknown) {
+    res.status(500).json({
+      success: false,
+      code: 'STRUCTURED_QUERY_FAILED',
+      error: err instanceof Error ? err.message : 'Structured data query failed.',
+    });
   }
 });
 

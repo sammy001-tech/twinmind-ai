@@ -5,6 +5,14 @@ import { calculateCalibrationMetrics, canTransitionExperiment, getEffectiveExper
 import fs from 'fs';
 import path from 'path';
 import { isRetryableDatabaseError, summarizeDatabaseConnectionError } from '../utils/databaseConnection.ts';
+import {
+  computeSnapshotDiff,
+  type VaultEntityType,
+  type VaultRevisionAuditMeta,
+  type VaultRevisionOperation,
+  type VaultRevisionRecord,
+  type VaultSnapshotPayload,
+} from '../services/vaultVersioningService.ts';
 
 export interface DatabaseStatus {
   configured: boolean;
@@ -109,7 +117,7 @@ export interface ScheduledCheckinRecord {
   updated_at: string;
 }
 
-export type StoredArtifactType = 'pdf' | 'md' | 'csv' | 'xlsx';
+export type StoredArtifactType = 'pdf' | 'md' | 'csv' | 'xlsx' | 'zip';
 
 export interface NewStoredArtifact {
   fileName: string;
@@ -477,7 +485,7 @@ class NeonDatabaseService {
         CREATE TABLE IF NOT EXISTS generated_artifacts (
           file_name TEXT PRIMARY KEY,
           display_name TEXT NOT NULL,
-          artifact_type VARCHAR(16) NOT NULL CHECK (artifact_type IN ('pdf', 'md', 'csv', 'xlsx')),
+          artifact_type VARCHAR(16) NOT NULL CHECK (artifact_type IN ('pdf', 'md', 'csv', 'xlsx', 'zip')),
           mime_type VARCHAR(255) NOT NULL,
           size_bytes BIGINT NOT NULL CHECK (size_bytes > 0),
           sha256 VARCHAR(64) NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
@@ -715,9 +723,37 @@ class NeonDatabaseService {
           ALTER TABLE twin_knowledge ADD COLUMN IF NOT EXISTS last_verified_at TIMESTAMP WITH TIME ZONE;
           CREATE INDEX IF NOT EXISTS idx_twin_knowledge_lifecycle ON twin_knowledge(lifecycle_status, confidence_status);
           CREATE INDEX IF NOT EXISTS idx_twin_knowledge_superseded_by ON twin_knowledge(superseded_by_id);
+
+          CREATE TABLE IF NOT EXISTS vault_revisions (
+            id BIGSERIAL PRIMARY KEY,
+            entity_type VARCHAR(24) NOT NULL CHECK (entity_type IN ('knowledge_doc', 'active_rule')),
+            entity_id INTEGER NOT NULL,
+            version_number INTEGER NOT NULL CHECK (version_number >= 1),
+            operation VARCHAR(24) NOT NULL CHECK (operation IN ('create', 'update', 'supersede', 'remove_rule', 'rollback', 'retire')),
+            snapshot JSONB NOT NULL,
+            diff_summary TEXT NOT NULL DEFAULT '',
+            diff_lines JSONB NOT NULL DEFAULT '[]',
+            changed_fields JSONB NOT NULL DEFAULT '[]',
+            reason TEXT,
+            channel VARCHAR(32),
+            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (entity_type, entity_id, version_number)
+          );
+          CREATE INDEX IF NOT EXISTS idx_vault_revisions_entity
+            ON vault_revisions(entity_type, entity_id, version_number DESC);
         `);
       } catch (govErr) {
         console.warn('[NeonDB] Knowledge governance migration warning:', govErr);
+      }
+
+      try {
+        await this.pool.query(`
+          ALTER TABLE generated_artifacts DROP CONSTRAINT IF EXISTS generated_artifacts_artifact_type_check;
+          ALTER TABLE generated_artifacts ADD CONSTRAINT generated_artifacts_artifact_type_check
+            CHECK (artifact_type IN ('pdf', 'md', 'csv', 'xlsx', 'zip'));
+        `);
+      } catch (artConstraintErr) {
+        console.warn('[NeonDB] Artifact type constraint migration warning:', artConstraintErr);
       }
 
       // Auto-backfill chat_threads for any existing conversations that don't have a thread entry yet
@@ -855,6 +891,38 @@ class NeonDatabaseService {
   }
 
   /**
+   * Run a read-only database inspection or query inside an explicit
+   * PostgreSQL READ ONLY transaction with bounded statement timeout.
+   */
+  public async executeReadOnlyTransaction<T>(
+    callback: (queryFn: (sql: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount: number | null; fields?: Array<{ name: string }> }>) => Promise<T>,
+    statementTimeoutMs = 5000,
+  ): Promise<T> {
+    const connected = await this.ensureConnected();
+    if (!connected || !this.pool || !this.isConnected) {
+      throw new Error('DATABASE_UNAVAILABLE');
+    }
+    const safeTimeout = Number.isSafeInteger(statementTimeoutMs) && statementTimeoutMs >= 500 && statementTimeoutMs <= 30000
+      ? statementTimeoutMs
+      : 5000;
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN TRANSACTION READ ONLY');
+      await client.query(`SET LOCAL statement_timeout = '${safeTimeout}ms'`);
+      const result = await callback((sql: string, params?: unknown[]) => client.query(sql, params));
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {}
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Persist conversation message
    */
   /** Confirm the live database connection and artifact table before enabling file operations. */
@@ -885,7 +953,7 @@ class NeonDatabaseService {
 
   private mapArtifactMetadata(row: Record<string, unknown>): StoredArtifactMetadata {
     const type = row.artifact_type;
-    if (type !== 'pdf' && type !== 'md' && type !== 'csv' && type !== 'xlsx') {
+    if (type !== 'pdf' && type !== 'md' && type !== 'csv' && type !== 'xlsx' && type !== 'zip') {
       throw new Error('ARTIFACT_METADATA_INVALID');
     }
     const sizeBytes = Number(row.size_bytes);
@@ -921,7 +989,7 @@ class NeonDatabaseService {
       artifact.content.length === 0 ||
       !Number.isFinite(Date.parse(artifact.generatedAt)) ||
       !/^[a-z0-9.+-]+\/[a-z0-9.+-]+(?:;\s*charset=utf-8)?$/i.test(artifact.mimeType) ||
-      (artifact.type !== 'pdf' && artifact.type !== 'md' && artifact.type !== 'csv' && artifact.type !== 'xlsx')
+      (artifact.type !== 'pdf' && artifact.type !== 'md' && artifact.type !== 'csv' && artifact.type !== 'xlsx' && artifact.type !== 'zip')
     ) {
       throw new Error('INVALID_ARTIFACT_METADATA');
     }
@@ -2292,31 +2360,167 @@ class NeonDatabaseService {
     }
   }
 
-  /**
-   * Insert a document or personal note with optional pgvector embedding
-   */
-  public async saveKnowledge(item: {
-    title: string;
-    content: string;
-    category?: string;
-    tags?: string[];
-    embedding?: number[];
-    metadata?: Record<string, unknown>;
-    sourceType?: string;
-    sourceRef?: string | null;
-    confidenceStatus?: string;
-    impactLevel?: string;
-    lifecycleStatus?: string;
-    supersededById?: number | null;
-    validFrom?: string | null;
-    validUntil?: string | null;
-    lastVerifiedAt?: string | null;
-  }): Promise<{ id: number; success: boolean }> {
+  private knowledgeRowToSnapshot(row: Record<string, unknown>): VaultSnapshotPayload {
+    const rawTags = row.tags;
+    let tags: string[] = [];
+    if (Array.isArray(rawTags)) {
+      tags = rawTags.map((t) => String(t));
+    } else if (typeof rawTags === 'string') {
+      try {
+        const parsed = JSON.parse(rawTags);
+        if (Array.isArray(parsed)) tags = parsed.map((t) => String(t));
+      } catch {}
+    }
+    return {
+      title: String(row.title || ''),
+      content: String(row.content || ''),
+      category: String(row.category || 'personal_note'),
+      tags,
+      sourceType: row.source_type ? String(row.source_type) : 'direct_directive',
+      sourceRef: row.source_ref ? String(row.source_ref) : null,
+      confidenceStatus: row.confidence_status ? String(row.confidence_status) : 'confirmed',
+      impactLevel: row.impact_level ? String(row.impact_level) : 'medium',
+      lifecycleStatus: row.lifecycle_status ? String(row.lifecycle_status) : 'active',
+      supersededById: row.superseded_by_id != null ? Number(row.superseded_by_id) : null,
+      validUntil: row.valid_until ? (row.valid_until instanceof Date ? row.valid_until.toISOString() : String(row.valid_until)) : null,
+      lastVerifiedAt: row.last_verified_at ? (row.last_verified_at instanceof Date ? row.last_verified_at.toISOString() : String(row.last_verified_at)) : null,
+    };
+  }
+
+  private personaMemoryRowToSnapshot(row: Record<string, unknown>): VaultSnapshotPayload {
+    return {
+      content: String(row.content || ''),
+      category: String(row.category || 'preference'),
+      priority: Number(row.priority || 1),
+      scope: String(row.scope || 'permanent'),
+      project_key: row.project_key ? String(row.project_key) : null,
+      thread_id: row.thread_id ? String(row.thread_id) : null,
+      expires_at: row.expires_at ? (row.expires_at instanceof Date ? row.expires_at.toISOString() : String(row.expires_at)) : null,
+      is_active: row.is_active !== false,
+      superseded_by_id: row.superseded_by_id != null ? Number(row.superseded_by_id) : null,
+    };
+  }
+
+  private async appendVaultRevisionTx(
+    client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> },
+    params: {
+      entityType: VaultEntityType;
+      entityId: number;
+      operation: VaultRevisionOperation;
+      prevSnapshot: VaultSnapshotPayload | null;
+      nextSnapshot: VaultSnapshotPayload | null;
+      legacyCreatedAt?: unknown;
+      audit?: VaultRevisionAuditMeta;
+    },
+  ): Promise<VaultRevisionRecord | null> {
+    const maxRes = await client.query(
+      `SELECT COALESCE(MAX(version_number), 0)::int AS max_version
+       FROM vault_revisions
+       WHERE entity_type = $1 AND entity_id = $2`,
+      [params.entityType, params.entityId],
+    );
+    let maxVersion = Number(maxRes.rows[0]?.max_version || 0);
+
+    // Backfill baseline v1 for pre-existing records created before revision tracking existed.
+    if (maxVersion === 0 && params.operation !== 'create' && params.prevSnapshot) {
+      const baseDiff = computeSnapshotDiff(params.entityType, null, params.prevSnapshot, 'create');
+      const createdAtVal = params.legacyCreatedAt instanceof Date
+        ? params.legacyCreatedAt.toISOString()
+        : (typeof params.legacyCreatedAt === 'string' && params.legacyCreatedAt ? params.legacyCreatedAt : new Date().toISOString());
+      await client.query(
+        `INSERT INTO vault_revisions
+          (entity_type, entity_id, version_number, operation, snapshot, diff_summary, diff_lines, changed_fields, reason, channel, created_at)
+         VALUES ($1, $2, 1, 'create', $3::jsonb, $4, $5::jsonb, $6::jsonb, $7, $8, $9)`,
+        [
+          params.entityType,
+          params.entityId,
+          JSON.stringify(params.prevSnapshot),
+          'Baseline snapshot captured prior to modification',
+          JSON.stringify(baseDiff.diffLines),
+          JSON.stringify(baseDiff.changedFields),
+          'Baseline backfill',
+          null,
+          createdAtVal,
+        ],
+      );
+      maxVersion = 1;
+    }
+
+    const nextVersion = maxVersion + 1;
+    const snapshotToStore = params.nextSnapshot || params.prevSnapshot;
+    if (!snapshotToStore) return null;
+
+    const computed = computeSnapshotDiff(
+      params.entityType,
+      params.prevSnapshot,
+      params.nextSnapshot,
+      params.operation,
+    );
+
+    const inserted = await client.query(
+      `INSERT INTO vault_revisions
+        (entity_type, entity_id, version_number, operation, snapshot, diff_summary, diff_lines, changed_fields, reason, channel)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, $8::jsonb, $9, $10)
+       RETURNING *`,
+      [
+        params.entityType,
+        params.entityId,
+        nextVersion,
+        params.operation,
+        JSON.stringify(snapshotToStore),
+        computed.diffSummary,
+        JSON.stringify(computed.diffLines),
+        JSON.stringify(computed.changedFields),
+        params.audit?.reason ?? null,
+        params.audit?.channel ?? null,
+      ],
+    );
+
+    const row = inserted.rows[0];
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      entityType: row.entity_type,
+      entityId: Number(row.entity_id),
+      versionNumber: Number(row.version_number),
+      operation: row.operation,
+      snapshot: row.snapshot as VaultSnapshotPayload,
+      diffSummary: String(row.diff_summary || ''),
+      diffLines: Array.isArray(row.diff_lines) ? row.diff_lines : [],
+      changedFields: Array.isArray(row.changed_fields) ? row.changed_fields : [],
+      reason: row.reason ? String(row.reason) : null,
+      channel: row.channel ? String(row.channel) : null,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    };
+  }
+
+  public async saveKnowledge(
+    item: {
+      title: string;
+      content: string;
+      category?: string;
+      tags?: string[];
+      embedding?: number[];
+      metadata?: Record<string, unknown>;
+      sourceType?: string;
+      sourceRef?: string | null;
+      confidenceStatus?: string;
+      impactLevel?: string;
+      lifecycleStatus?: string;
+      supersededById?: number | null;
+      validFrom?: string | null;
+      validUntil?: string | null;
+      lastVerifiedAt?: string | null;
+    },
+    audit?: VaultRevisionAuditMeta,
+  ): Promise<{ id: number; success: boolean }> {
     if (!this.pool || !this.isConnected) {
       return { id: 0, success: false };
     }
 
+    const client = await this.pool.connect();
     try {
+      await client.query('BEGIN');
       const category = item.category || 'personal_note';
       const tags = JSON.stringify(item.tags || []);
       const metadata = JSON.stringify(item.metadata || {});
@@ -2330,45 +2534,62 @@ class NeonDatabaseService {
       const validUntil = item.validUntil ?? null;
       const lastVerifiedAt = item.lastVerifiedAt || (confidenceStatus === 'confirmed' ? new Date().toISOString() : null);
 
-      if (item.embedding && item.embedding.length > 0) {
-        const vectorStr = `[${item.embedding.join(',')}]`;
-        const res = await this.pool.query(
-          `INSERT INTO twin_knowledge (
-             title, content, category, tags, embedding, metadata,
-             source_type, source_ref, confidence_status, impact_level, lifecycle_status,
-             superseded_by_id, valid_from, valid_until, last_verified_at,
-             created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-           RETURNING id;`,
-          [
-            item.title, item.content, category, tags, vectorStr, metadata,
-            sourceType, sourceRef, confidenceStatus, impactLevel, lifecycleStatus,
-            supersededById, validFrom, validUntil, lastVerifiedAt,
-          ]
-        );
-        return { id: res.rows[0].id, success: true };
-      } else {
-        const res = await this.pool.query(
-          `INSERT INTO twin_knowledge (
-             title, content, category, tags, metadata,
-             source_type, source_ref, confidence_status, impact_level, lifecycle_status,
-             superseded_by_id, valid_from, valid_until, last_verified_at,
-             created_at, updated_at
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-           RETURNING id;`,
-          [
-            item.title, item.content, category, tags, metadata,
-            sourceType, sourceRef, confidenceStatus, impactLevel, lifecycleStatus,
-            supersededById, validFrom, validUntil, lastVerifiedAt,
-          ]
-        );
-        return { id: res.rows[0].id, success: true };
+      const res = item.embedding && item.embedding.length > 0
+        ? await client.query(
+            `INSERT INTO twin_knowledge (
+               title, content, category, tags, embedding, metadata,
+               source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+               superseded_by_id, valid_from, valid_until, last_verified_at,
+               created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             RETURNING *;`,
+            [
+              item.title, item.content, category, tags, `[${item.embedding.join(',')}]`, metadata,
+              sourceType, sourceRef, confidenceStatus, impactLevel, lifecycleStatus,
+              supersededById, validFrom, validUntil, lastVerifiedAt,
+            ]
+          )
+        : await client.query(
+            `INSERT INTO twin_knowledge (
+               title, content, category, tags, metadata,
+               source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+               superseded_by_id, valid_from, valid_until, last_verified_at,
+               created_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             RETURNING *;`,
+            [
+              item.title, item.content, category, tags, metadata,
+              sourceType, sourceRef, confidenceStatus, impactLevel, lifecycleStatus,
+              supersededById, validFrom, validUntil, lastVerifiedAt,
+            ]
+          );
+
+      const createdRow = res.rows[0];
+      if (!createdRow) {
+        await client.query('ROLLBACK');
+        return { id: 0, success: false };
       }
+
+      const nextSnapshot = this.knowledgeRowToSnapshot(createdRow);
+      await this.appendVaultRevisionTx(client, {
+        entityType: 'knowledge_doc',
+        entityId: Number(createdRow.id),
+        operation: audit?.operation || 'create',
+        prevSnapshot: null,
+        nextSnapshot,
+        audit,
+      });
+
+      await client.query('COMMIT');
+      return { id: Number(createdRow.id), success: true };
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[NeonDB] Error saving knowledge document:', err);
       return { id: 0, success: false };
+    } finally {
+      client.release();
     }
   }
 
@@ -2526,17 +2747,40 @@ class NeonDatabaseService {
   }
 
   /**
-   * Delete a knowledge document
+   * Delete a knowledge document (recording a durable 'retire' commit in vault_revisions)
    */
-  public async deleteKnowledge(id: number | string): Promise<boolean> {
+  public async deleteKnowledge(id: number | string, audit?: VaultRevisionAuditMeta): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
 
+    const client = await this.pool.connect();
     try {
-      const res = await this.pool.query('DELETE FROM twin_knowledge WHERE id = $1', [id]);
+      await client.query('BEGIN');
+      const existing = await client.query('SELECT * FROM twin_knowledge WHERE id = $1 FOR UPDATE', [id]);
+      if (existing.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const prevRow = existing.rows[0];
+      const prevSnapshot = this.knowledgeRowToSnapshot(prevRow);
+      await this.appendVaultRevisionTx(client, {
+        entityType: 'knowledge_doc',
+        entityId: Number(prevRow.id),
+        operation: audit?.operation || 'retire',
+        prevSnapshot,
+        nextSnapshot: null,
+        legacyCreatedAt: prevRow.created_at,
+        audit,
+      });
+
+      const res = await client.query('DELETE FROM twin_knowledge WHERE id = $1', [id]);
+      await client.query('COMMIT');
       return (res.rowCount || 0) > 0;
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[NeonDB] Error deleting knowledge document:', err);
       return false;
+    } finally {
+      client.release();
     }
   }
 
@@ -2559,11 +2803,22 @@ class NeonDatabaseService {
       supersededById?: number | string | null;
       validUntil?: string | null;
       lastVerifiedAt?: string | null;
-    }
+    },
+    audit?: VaultRevisionAuditMeta,
   ): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
 
+    const client = await this.pool.connect();
     try {
+      await client.query('BEGIN');
+      const existingRes = await client.query('SELECT * FROM twin_knowledge WHERE id = $1 FOR UPDATE', [id]);
+      if (existingRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const prevRow = existingRes.rows[0];
+      const prevSnapshot = this.knowledgeRowToSnapshot(prevRow);
+
       const updates: string[] = ['updated_at = CURRENT_TIMESTAMP'];
       const params: unknown[] = [id];
 
@@ -2620,14 +2875,35 @@ class NeonDatabaseService {
         updates.push(`last_verified_at = $${params.length}`);
       }
 
-      const res = await this.pool.query(
-        `UPDATE twin_knowledge SET ${updates.join(', ')} WHERE id = $1`,
+      const res = await client.query(
+        `UPDATE twin_knowledge SET ${updates.join(', ')} WHERE id = $1 RETURNING *`,
         params
       );
-      return (res.rowCount || 0) > 0;
+      if (res.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      const nextRow = res.rows[0];
+      const nextSnapshot = this.knowledgeRowToSnapshot(nextRow);
+      await this.appendVaultRevisionTx(client, {
+        entityType: 'knowledge_doc',
+        entityId: Number(nextRow.id),
+        operation: audit?.operation || 'update',
+        prevSnapshot,
+        nextSnapshot,
+        legacyCreatedAt: prevRow.created_at,
+        audit,
+      });
+
+      await client.query('COMMIT');
+      return true;
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[NeonDB] Error updating knowledge document:', err);
       return false;
+    } finally {
+      client.release();
     }
   }
 
@@ -2806,29 +3082,34 @@ class NeonDatabaseService {
   /**
    * Persist a learned persona trait, preference, correction, or scoped instruction
    */
-  public async savePersonaMemory(memory: {
-    category: 'preference' | 'opinion' | 'correction' | 'feedback';
-    content: string;
-    priority?: number;
-    scope?: 'permanent' | 'project' | 'temporary';
-    project_key?: string | null;
-    thread_id?: string | null;
-    expires_at?: string | null;
-    is_active?: boolean;
-    superseded_by_id?: number | null;
-    metadata?: Record<string, unknown>;
-  }): Promise<number | null> {
+  public async savePersonaMemory(
+    memory: {
+      category: 'preference' | 'opinion' | 'correction' | 'feedback';
+      content: string;
+      priority?: number;
+      scope?: 'permanent' | 'project' | 'temporary';
+      project_key?: string | null;
+      thread_id?: string | null;
+      expires_at?: string | null;
+      is_active?: boolean;
+      superseded_by_id?: number | null;
+      metadata?: Record<string, unknown>;
+    },
+    audit?: VaultRevisionAuditMeta,
+  ): Promise<number | null> {
     if (!this.pool || !this.isConnected) return null;
 
+    const client = await this.pool.connect();
     try {
+      await client.query('BEGIN');
       const scope = memory.scope || 'permanent';
       const isActive = memory.is_active !== false;
-      const res = await this.pool.query(
+      const res = await client.query(
         `INSERT INTO persona_memories (
            category, content, priority, scope, project_key, thread_id, expires_at, is_active, superseded_by_id, metadata
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         RETURNING id`,
+         RETURNING *`,
         [
           memory.category,
           memory.content,
@@ -2842,10 +3123,29 @@ class NeonDatabaseService {
           JSON.stringify(memory.metadata || {}),
         ]
       );
-      return res.rows[0]?.id || null;
+      const createdRow = res.rows[0];
+      if (!createdRow) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+
+      await this.appendVaultRevisionTx(client, {
+        entityType: 'active_rule',
+        entityId: Number(createdRow.id),
+        operation: audit?.operation || 'create',
+        prevSnapshot: null,
+        nextSnapshot: this.personaMemoryRowToSnapshot(createdRow),
+        audit,
+      });
+
+      await client.query('COMMIT');
+      return Number(createdRow.id);
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[NeonDB] Failed to save persona memory:', err);
       return null;
+    } finally {
+      client.release();
     }
   }
 
@@ -2890,22 +3190,44 @@ class NeonDatabaseService {
   }
 
   /**
-   * Delete a specific persona memory
+   * Delete a specific persona memory (recording a durable 'retire' commit in vault_revisions)
    */
-  public async deletePersonaMemory(id: number): Promise<boolean> {
+  public async deletePersonaMemory(id: number, audit?: VaultRevisionAuditMeta): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
 
+    const client = await this.pool.connect();
     try {
-      const res = await this.pool.query('DELETE FROM persona_memories WHERE id = $1', [id]);
+      await client.query('BEGIN');
+      const existing = await client.query('SELECT * FROM persona_memories WHERE id = $1 FOR UPDATE', [id]);
+      if (existing.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const prevRow = existing.rows[0];
+      await this.appendVaultRevisionTx(client, {
+        entityType: 'active_rule',
+        entityId: Number(prevRow.id),
+        operation: audit?.operation || 'retire',
+        prevSnapshot: this.personaMemoryRowToSnapshot(prevRow),
+        nextSnapshot: null,
+        legacyCreatedAt: prevRow.created_at,
+        audit,
+      });
+
+      const res = await client.query('DELETE FROM persona_memories WHERE id = $1', [id]);
+      await client.query('COMMIT');
       return (res.rowCount ?? 0) > 0;
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[NeonDB] Error deleting persona memory:', err);
       return false;
+    } finally {
+      client.release();
     }
   }
 
   /**
-   * Update a specific persona memory or instruction metadata
+   * Update a specific persona memory or instruction metadata (transactional revision commit)
    */
   public async updatePersonaMemory(
     id: number,
@@ -2919,10 +3241,22 @@ class NeonDatabaseService {
       expires_at?: string | null;
       is_active?: boolean;
       superseded_by_id?: number | null;
-    }
+    },
+    audit?: VaultRevisionAuditMeta,
   ): Promise<boolean> {
     if (!this.pool || !this.isConnected) return false;
+
+    const client = await this.pool.connect();
     try {
+      await client.query('BEGIN');
+      const existing = await client.query('SELECT * FROM persona_memories WHERE id = $1 FOR UPDATE', [id]);
+      if (existing.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const prevRow = existing.rows[0];
+      const prevSnapshot = this.personaMemoryRowToSnapshot(prevRow);
+
       const sets: string[] = ['updated_at = CURRENT_TIMESTAMP'];
       const params: unknown[] = [id];
       if (patch.category !== undefined) {
@@ -2961,15 +3295,311 @@ class NeonDatabaseService {
         params.push(patch.superseded_by_id);
         sets.push(`superseded_by_id = $${params.length}`);
       }
-      if (sets.length === 1) return false;
-      const res = await this.pool.query(
-        `UPDATE persona_memories SET ${sets.join(', ')} WHERE id = $1`,
+      if (sets.length === 1) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const res = await client.query(
+        `UPDATE persona_memories SET ${sets.join(', ')} WHERE id = $1 RETURNING *`,
         params
       );
-      return (res.rowCount ?? 0) > 0;
+      if (res.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      const nextRow = res.rows[0];
+      await this.appendVaultRevisionTx(client, {
+        entityType: 'active_rule',
+        entityId: Number(nextRow.id),
+        operation: audit?.operation || 'update',
+        prevSnapshot,
+        nextSnapshot: this.personaMemoryRowToSnapshot(nextRow),
+        legacyCreatedAt: prevRow.created_at,
+        audit,
+      });
+
+      await client.query('COMMIT');
+      return true;
     } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
       console.error('[NeonDB] Error updating persona memory:', err);
       return false;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async getVaultRevisions(
+    entityType: VaultEntityType,
+    entityId: number,
+    limit = 50,
+  ): Promise<VaultRevisionRecord[]> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('DATABASE_UNAVAILABLE');
+    }
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    const res = await this.pool.query(
+      `SELECT * FROM vault_revisions
+       WHERE entity_type = $1 AND entity_id = $2
+       ORDER BY version_number DESC
+       LIMIT $3`,
+      [entityType, entityId, safeLimit],
+    );
+    return res.rows.map((row) => ({
+      id: Number(row.id),
+      entityType: row.entity_type,
+      entityId: Number(row.entity_id),
+      versionNumber: Number(row.version_number),
+      operation: row.operation,
+      snapshot: row.snapshot as VaultSnapshotPayload,
+      diffSummary: String(row.diff_summary || ''),
+      diffLines: Array.isArray(row.diff_lines) ? row.diff_lines : [],
+      changedFields: Array.isArray(row.changed_fields) ? row.changed_fields : [],
+      reason: row.reason ? String(row.reason) : null,
+      channel: row.channel ? String(row.channel) : null,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    }));
+  }
+
+  public async getVaultRevisionByVersion(
+    entityType: VaultEntityType,
+    entityId: number,
+    targetVersion: number,
+  ): Promise<VaultRevisionRecord | null> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('DATABASE_UNAVAILABLE');
+    }
+    const res = await this.pool.query(
+      `SELECT * FROM vault_revisions
+       WHERE entity_type = $1 AND entity_id = $2 AND version_number = $3
+       LIMIT 1`,
+      [entityType, entityId, targetVersion],
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      id: Number(row.id),
+      entityType: row.entity_type,
+      entityId: Number(row.entity_id),
+      versionNumber: Number(row.version_number),
+      operation: row.operation,
+      snapshot: row.snapshot as VaultSnapshotPayload,
+      diffSummary: String(row.diff_summary || ''),
+      diffLines: Array.isArray(row.diff_lines) ? row.diff_lines : [],
+      changedFields: Array.isArray(row.changed_fields) ? row.changed_fields : [],
+      reason: row.reason ? String(row.reason) : null,
+      channel: row.channel ? String(row.channel) : null,
+      createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    };
+  }
+
+  public async rollbackVaultEntity(
+    entityType: VaultEntityType,
+    entityId: number,
+    targetVersion: number,
+    opts?: { reason?: string; channel?: string; embedding?: number[] },
+  ): Promise<{
+    revision: VaultRevisionRecord;
+    restoredSnapshot: VaultSnapshotPayload;
+  }> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('DATABASE_UNAVAILABLE');
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const targetRes = await client.query(
+        `SELECT * FROM vault_revisions
+         WHERE entity_type = $1 AND entity_id = $2 AND version_number = $3
+         LIMIT 1`,
+        [entityType, entityId, targetVersion],
+      );
+      if (targetRes.rows.length === 0) {
+        throw new Error(`REVISION_NOT_FOUND: Version v${targetVersion} was not found for ${entityType} #${entityId}.`);
+      }
+
+      const targetSnap = targetRes.rows[0].snapshot as VaultSnapshotPayload;
+      const reason = opts?.reason?.trim() || `Rolled back to v${targetVersion}`;
+      const channel = opts?.channel || 'web';
+
+      if (entityType === 'knowledge_doc') {
+        const curRes = await client.query('SELECT * FROM twin_knowledge WHERE id = $1 FOR UPDATE', [entityId]);
+        const prevSnapshot = curRes.rows[0] ? this.knowledgeRowToSnapshot(curRes.rows[0]) : null;
+        const legacyCreatedAt = curRes.rows[0]?.created_at;
+
+        const tagsJson = JSON.stringify(Array.isArray(targetSnap.tags) ? targetSnap.tags : []);
+        let nextRow: any;
+        if (curRes.rows.length > 0) {
+          const params: unknown[] = [
+            entityId,
+            targetSnap.title || 'Untitled Note',
+            targetSnap.content || '',
+            targetSnap.category || 'personal_note',
+            tagsJson,
+            targetSnap.sourceType || 'direct_directive',
+            targetSnap.sourceRef ?? null,
+            targetSnap.confidenceStatus || 'confirmed',
+            targetSnap.impactLevel || 'medium',
+            targetSnap.lifecycleStatus || 'active',
+            targetSnap.supersededById ?? null,
+            targetSnap.validUntil ?? null,
+            targetSnap.lastVerifiedAt ?? new Date().toISOString(),
+          ];
+          const embeddingClause = opts?.embedding && opts.embedding.length > 0
+            ? `, embedding = $${params.push(`[${opts.embedding.join(',')}]`)}::vector`
+            : '';
+          const upRes = await client.query(
+            `UPDATE twin_knowledge SET
+               title = $2,
+               content = $3,
+               category = $4,
+               tags = $5,
+               source_type = $6,
+               source_ref = $7,
+               confidence_status = $8,
+               impact_level = $9,
+               lifecycle_status = $10,
+               superseded_by_id = $11,
+               valid_until = $12,
+               last_verified_at = $13,
+               updated_at = CURRENT_TIMESTAMP
+               ${embeddingClause}
+             WHERE id = $1
+             RETURNING *`,
+            params,
+          );
+          nextRow = upRes.rows[0];
+        } else {
+          const insParams: unknown[] = [
+            entityId,
+            targetSnap.title || 'Untitled Note',
+            targetSnap.content || '',
+            targetSnap.category || 'personal_note',
+            tagsJson,
+            targetSnap.sourceType || 'direct_directive',
+            targetSnap.sourceRef ?? null,
+            targetSnap.confidenceStatus || 'confirmed',
+            targetSnap.impactLevel || 'medium',
+            targetSnap.lifecycleStatus || 'active',
+            targetSnap.supersededById ?? null,
+            targetSnap.validUntil ?? null,
+            targetSnap.lastVerifiedAt ?? new Date().toISOString(),
+          ];
+          const hasEmb = Boolean(opts?.embedding && opts.embedding.length > 0);
+          if (hasEmb) insParams.push(`[${opts!.embedding!.join(',')}]`);
+          const insRes = await client.query(
+            `INSERT INTO twin_knowledge (
+               id, title, content, category, tags,
+               source_type, source_ref, confidence_status, impact_level, lifecycle_status,
+               superseded_by_id, valid_until, last_verified_at
+               ${hasEmb ? ', embedding' : ''}
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13
+               ${hasEmb ? ', $14::vector' : ''}
+             )
+             RETURNING *`,
+            insParams,
+          );
+          nextRow = insRes.rows[0];
+          await client.query(
+            `SELECT setval(pg_get_serial_sequence('twin_knowledge', 'id'), COALESCE((SELECT MAX(id) FROM twin_knowledge), 1), true)`,
+          );
+        }
+
+        const nextSnapshot = this.knowledgeRowToSnapshot(nextRow);
+        const revision = await this.appendVaultRevisionTx(client, {
+          entityType: 'knowledge_doc',
+          entityId: Number(nextRow.id),
+          operation: 'rollback',
+          prevSnapshot,
+          nextSnapshot,
+          legacyCreatedAt,
+          audit: { operation: 'rollback', reason, channel },
+        });
+        await client.query('COMMIT');
+        return { revision: revision!, restoredSnapshot: nextSnapshot };
+      }
+
+      // active_rule rollback
+      const curRes = await client.query('SELECT * FROM persona_memories WHERE id = $1 FOR UPDATE', [entityId]);
+      const prevSnapshot = curRes.rows[0] ? this.personaMemoryRowToSnapshot(curRes.rows[0]) : null;
+      const legacyCreatedAt = curRes.rows[0]?.created_at;
+
+      let nextRow: any;
+      if (curRes.rows.length > 0) {
+        const upRes = await client.query(
+          `UPDATE persona_memories SET
+             category = $2,
+             content = $3,
+             priority = $4,
+             scope = $5,
+             project_key = $6,
+             thread_id = $7,
+             expires_at = $8,
+             is_active = $9,
+             superseded_by_id = $10,
+             updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1
+           RETURNING *`,
+          [
+            entityId,
+            targetSnap.category || 'preference',
+            targetSnap.content || '',
+            Number(targetSnap.priority || 1),
+            targetSnap.scope || 'permanent',
+            targetSnap.project_key ?? null,
+            targetSnap.thread_id ?? null,
+            targetSnap.expires_at ?? null,
+            targetSnap.is_active !== false,
+            targetSnap.superseded_by_id ?? null,
+          ],
+        );
+        nextRow = upRes.rows[0];
+      } else {
+        const insRes = await client.query(
+          `INSERT INTO persona_memories (
+             id, category, content, priority, scope, project_key, thread_id, expires_at, is_active, superseded_by_id
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           RETURNING *`,
+          [
+            entityId,
+            targetSnap.category || 'preference',
+            targetSnap.content || '',
+            Number(targetSnap.priority || 1),
+            targetSnap.scope || 'permanent',
+            targetSnap.project_key ?? null,
+            targetSnap.thread_id ?? null,
+            targetSnap.expires_at ?? null,
+            targetSnap.is_active !== false,
+            targetSnap.superseded_by_id ?? null,
+          ],
+        );
+        nextRow = insRes.rows[0];
+        await client.query(
+          `SELECT setval(pg_get_serial_sequence('persona_memories', 'id'), COALESCE((SELECT MAX(id) FROM persona_memories), 1), true)`,
+        );
+      }
+
+      const nextSnapshot = this.personaMemoryRowToSnapshot(nextRow);
+      const revision = await this.appendVaultRevisionTx(client, {
+        entityType: 'active_rule',
+        entityId: Number(nextRow.id),
+        operation: 'rollback',
+        prevSnapshot,
+        nextSnapshot,
+        legacyCreatedAt,
+        audit: { operation: 'rollback', reason, channel },
+      });
+      await client.query('COMMIT');
+      return { revision: revision!, restoredSnapshot: nextSnapshot };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
     }
   }
 

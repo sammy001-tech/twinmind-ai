@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Share2,
   Loader2,
+  Archive,
 } from 'lucide-react';
 import type { GeneratedArtifact } from '../types/index.ts';
 import { ArtifactPreviewModal } from './ArtifactPreviewModal.tsx';
@@ -42,6 +43,8 @@ function artifactIcon(type: string) {
     case 'md':
     case 'markdown':
       return FileCode2;
+    case 'zip':
+      return Archive;
     default:
       return FileText;
   }
@@ -86,7 +89,7 @@ export const ArtifactCard: React.FC<ArtifactCardProps> = ({ artifact }) => {
   const displayName = artifact.displayName || artifact.name;
   const hasVerifiedMetadata = artifact.validationStatus === 'validated';
   const sizeLabel = typeof artifact.sizeBytes === 'number' ? formatFileSize(artifact.sizeBytes) : '';
-  const supportsPreview = ['pdf', 'md', 'markdown', 'csv', 'xlsx', 'excel'].includes(artifact.type.toLowerCase());
+  const supportsPreview = ['pdf', 'md', 'markdown', 'csv', 'xlsx', 'excel', 'zip'].includes(artifact.type.toLowerCase());
   const nativeShareAvailable = canUseNativeFileShare();
 
   const handleTransfer = async (preferShare: boolean) => {

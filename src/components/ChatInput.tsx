@@ -318,34 +318,45 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         });
       };
       reader.readAsDataURL(file);
-    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+    } else if (
+      file.type === 'application/pdf' ||
+      file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      /\.(pdf|xlsx|docx)$/i.test(file.name)
+    ) {
       setIsParsingDocument(true);
       const reader = new FileReader();
       reader.onload = async () => {
         try {
           const resultStr = reader.result as string;
           const base64Data = resultStr.split(',')[1];
+          const lowerName = file.name.toLowerCase();
+          const fallbackMime = lowerName.endsWith('.xlsx')
+            ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            : lowerName.endsWith('.docx')
+              ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+              : 'application/pdf';
           const res = await apiFetch('/api/documents/parse', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               filename: file.name,
               contentBase64: base64Data,
-              mimeType: 'application/pdf',
+              mimeType: file.type || fallbackMime,
             }),
           });
           const data = await res.json();
           if (!res.ok || !data.success) {
-            throw new Error(data.error || 'Failed to parse PDF file');
+            throw new Error(data.error || `Failed to parse ${file.name}`);
           }
           setAttachedDocument({
             name: file.name,
-            format: data.format || 'pdf',
+            format: data.format || lowerName.split('.').pop() || 'document',
             content: data.content,
             charCount: data.charCount || data.content.length,
           });
         } catch (err: unknown) {
-          setDocumentError(err instanceof Error ? err.message : 'Could not read PDF');
+          setDocumentError(err instanceof Error ? err.message : `Could not parse ${file.name}`);
         } finally {
           setIsParsingDocument(false);
         }
@@ -374,13 +385,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   return (
     <div className={`w-full shrink-0 max-w-3xl mx-auto px-3 sm:px-4 ${isKeyboardOpen ? 'pb-1 pt-0.5' : 'pb-3 pt-1'} relative z-20 transition-all`}>
-      {/* Hidden File Input supporting PDF, photos, images, and text documents */}
+      {/* Hidden File Input supporting PDF, Excel, Word, photos, images, and text documents */}
       <input
         type="file"
         ref={fileInputRef}
         onChange={handleFileUpload}
         className="hidden"
-        accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.pdf,.txt,.md,.json,.csv,.js,.ts,.tsx,.py"
+        accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.pdf,.xlsx,.docx,.txt,.md,.json,.csv,.js,.ts,.tsx,.py"
       />
 
       {/* Recording Overlay Bar */}

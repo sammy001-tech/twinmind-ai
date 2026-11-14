@@ -6,6 +6,7 @@
  */
 
 import { isIP } from 'node:net';
+import { isArtifactGenerationRequest } from './artifactFormat.ts';
 
 export interface ResearchSource {
   title: string;
@@ -100,8 +101,11 @@ function normalizeSourceArray(
 ): ResearchSource[] {
   if (!Array.isArray(value)) return [];
 
-  const allowed = allowedSources
+  const allowedByCanonical = allowedSources
     ? new Map(allowedSources.map((source) => [canonicalHttpUrl(source.url), source] as const))
+    : undefined;
+  const allowedByProvenanceKey = allowedSources
+    ? new Map(allowedSources.map((source) => [normalizeUrlForProvenanceMatch(source.url), source] as const))
     : undefined;
   const unique = new Map<string, ResearchSource>();
 
@@ -109,9 +113,16 @@ function normalizeSourceArray(
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
     const record = candidate as Record<string, unknown>;
     const url = canonicalHttpUrl(record.url);
-    if (!url || (allowed && !allowed.has(url))) continue;
+    if (!url) continue;
+    const provenanceKey = normalizeUrlForProvenanceMatch(url);
+    const isAllowed = !allowedSources
+      || allowedByCanonical?.has(url)
+      || (provenanceKey !== null && allowedByProvenanceKey?.has(provenanceKey));
+    if (!isAllowed) continue;
 
-    const knownSource = allowed?.get(url);
+    const knownSource =
+      allowedByCanonical?.get(url) ||
+      (provenanceKey !== null ? allowedByProvenanceKey?.get(provenanceKey) : undefined);
     const title = firstText(record, ['title']) || knownSource?.title || '';
     const content = firstText(record, ['raw_content', 'rawContent', 'content', 'snippet', 'extract']);
     if (!title || !content) continue;
@@ -329,4 +340,194 @@ export function parseAdaptiveResearchPlan(
   )];
 
   return { followUpQueries, unresolvedQuestions };
+}
+
+const BENIGN_TRACKING_PARAMS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'fbclid',
+  'gclid',
+  'mc_cid',
+  'mc_eid',
+]);
+
+/**
+ * Compute a comparison key for verifying that an extraction target URL came from
+ * an earlier live search or user message without altering SSRF / hostname safety.
+ */
+export function normalizeUrlForProvenanceMatch(value: unknown): string | null {
+  const canonical = canonicalHttpUrl(value);
+  if (!canonical) return null;
+  try {
+    const parsed = new URL(canonical);
+    parsed.protocol = 'https:';
+    parsed.hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (BENIGN_TRACKING_PARAMS.has(key.toLowerCase())) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    parsed.searchParams.sort();
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Partition requested extraction URLs against verified allowed URLs (from live search
+ * or explicit user prompt), substituting exact verified canonical URLs when matched.
+ */
+export function partitionExtractionUrls(
+  rawRequestedUrls: unknown,
+  allowedUrls: string[],
+): {
+  matchedUrls: string[];
+  unauthorizedUrls: string[];
+  invalidEntries: boolean;
+} {
+  if (!Array.isArray(rawRequestedUrls)) {
+    return { matchedUrls: [], unauthorizedUrls: [], invalidEntries: true };
+  }
+
+  const allowedByProvenanceKey = new Map<string, string>();
+  for (const allowed of allowedUrls) {
+    const canonical = canonicalHttpUrl(allowed);
+    if (!canonical) continue;
+    const key = normalizeUrlForProvenanceMatch(canonical);
+    if (key && !allowedByProvenanceKey.has(key)) {
+      allowedByProvenanceKey.set(key, canonical);
+    }
+  }
+
+  const matchedSet = new Set<string>();
+  const unauthorizedSet = new Set<string>();
+  let invalidEntries = false;
+
+  for (const rawEntry of rawRequestedUrls) {
+    if (typeof rawEntry !== 'string') {
+      invalidEntries = true;
+      continue;
+    }
+    const canonical = canonicalHttpUrl(rawEntry);
+    if (!canonical) {
+      invalidEntries = true;
+      continue;
+    }
+    const key = normalizeUrlForProvenanceMatch(canonical);
+    const verifiedCanonical = key ? allowedByProvenanceKey.get(key) : undefined;
+    if (verifiedCanonical) {
+      matchedSet.add(verifiedCanonical);
+    } else {
+      unauthorizedSet.add(canonical);
+    }
+  }
+
+  return {
+    matchedUrls: [...matchedSet],
+    unauthorizedUrls: [...unauthorizedSet],
+    invalidEntries,
+  };
+}
+
+/** Split an array of URLs into provider-sized batches without silently dropping items. */
+export function chunkUrlsByBatchLimit(urls: string[], batchLimit: number): string[][] {
+  const safeLimit = Number.isSafeInteger(batchLimit) && batchLimit >= 1 ? batchLimit : 1;
+  const batches: string[][] = [];
+  for (let i = 0; i < urls.length; i += safeLimit) {
+    batches.push(urls.slice(i, i + safeLimit));
+  }
+  return batches;
+}
+
+export interface DynamicAgentExecutionPolicy {
+  maxToolCalls: number;
+  maxToolRounds: number;
+  extractBatchLimit: number;
+  deliverableReserveCalls: number;
+  budgetSource: 'explicit_env' | 'dynamic_task_resolved';
+  taskProfile: {
+    thinkingLevel: 'low' | 'medium' | 'high';
+    requiresArtifactDelivery: boolean;
+    requiresDeepResearch: boolean;
+  };
+}
+
+const TAVILY_EXTRACT_API_MAX_BATCH = 20;
+
+/**
+ * Dynamically resolve execution budgets from live task requirements and explicit
+ * operator environment configuration instead of rigid static turn caps.
+ */
+export function resolveDynamicAgentExecutionPolicy(input: {
+  env: Record<string, string | undefined>;
+  userPrompt: string;
+  thinkingLevel?: 'low' | 'medium' | 'high';
+  hasSearchProvider?: boolean;
+}): DynamicAgentExecutionPolicy {
+  const thinkingLevel: 'low' | 'medium' | 'high' =
+    input.thinkingLevel === 'high' || input.thinkingLevel === 'medium' ? input.thinkingLevel : 'low';
+  const prompt = (input.userPrompt || '').trim();
+  const hasExplicitUrls = /https?:\/\/[^\s"'<>]+/i.test(prompt);
+  const requiresArtifactDelivery =
+    isArtifactGenerationRequest(prompt) ||
+    /\b(?:create|generate|export|prepare|produce|make|write)\b[\s\S]{0,60}\b(?:pdf|xlsx|excel|csv|markdown|report|document)\b/i.test(prompt);
+  const requiresDeepResearch =
+    Boolean(input.hasSearchProvider) &&
+    (hasExplicitUrls ||
+      /\b(?:research|deep\s+dive|analy[sz]e|compar(?:e|ison)|market|evidence|sources?|citations?|benchmark|frameworks?|latest|current|state\s+of|report)\b/i.test(prompt));
+
+  const extractBatchLimit = resolveBoundedIntegerSetting(
+    input.env,
+    'TWINMIND_RESEARCH_EXTRACT_LIMIT',
+    10,
+    1,
+    TAVILY_EXTRACT_API_MAX_BATCH,
+  );
+
+  const hasExplicitCalls =
+    typeof input.env.TWINMIND_AGENT_MAX_TOOL_CALLS === 'string' &&
+    input.env.TWINMIND_AGENT_MAX_TOOL_CALLS.trim() !== '';
+  const hasExplicitRounds =
+    typeof input.env.TWINMIND_AGENT_MAX_TOOL_ROUNDS === 'string' &&
+    input.env.TWINMIND_AGENT_MAX_TOOL_ROUNDS.trim() !== '';
+
+  const baseCallsByThinking = thinkingLevel === 'high' ? 14 : thinkingLevel === 'medium' ? 10 : 6;
+  const baseRoundsByThinking = thinkingLevel === 'high' ? 6 : thinkingLevel === 'medium' ? 5 : 3;
+
+  const computedCalls = Math.min(
+    24,
+    baseCallsByThinking + (requiresDeepResearch ? 4 : 0) + (requiresArtifactDelivery ? 2 : 0),
+  );
+  const computedRounds = Math.min(
+    10,
+    baseRoundsByThinking + (requiresDeepResearch ? 1 : 0) + (requiresArtifactDelivery ? 1 : 0),
+  );
+
+  const maxToolCalls = hasExplicitCalls
+    ? resolveBoundedIntegerSetting(input.env, 'TWINMIND_AGENT_MAX_TOOL_CALLS', computedCalls, 1, 60)
+    : computedCalls;
+
+  const maxToolRounds = hasExplicitRounds
+    ? resolveBoundedIntegerSetting(input.env, 'TWINMIND_AGENT_MAX_TOOL_ROUNDS', computedRounds, 1, 16)
+    : computedRounds;
+
+  // Preserve at least 1 execution slot for final deliverable synthesis when total budget > 1
+  const deliverableReserveCalls = requiresArtifactDelivery && maxToolCalls > 1 ? 1 : 0;
+
+  return {
+    maxToolCalls,
+    maxToolRounds,
+    extractBatchLimit,
+    deliverableReserveCalls,
+    budgetSource: hasExplicitCalls || hasExplicitRounds ? 'explicit_env' : 'dynamic_task_resolved',
+    taskProfile: {
+      thinkingLevel,
+      requiresArtifactDelivery,
+      requiresDeepResearch,
+    },
+  };
 }

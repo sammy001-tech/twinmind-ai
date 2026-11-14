@@ -13,6 +13,7 @@ import type {
   InstructionScope,
   PersonaMemoryRecord,
 } from '../../src/types/index.ts';
+import type { VaultRevisionAuditMeta, VaultRevisionRecord } from './vaultVersioningService.ts';
 
 export type PersonaMemoryCategory = 'preference' | 'opinion' | 'correction' | 'feedback';
 
@@ -85,7 +86,7 @@ export interface ActiveRuleStore {
     expires_at?: string | null;
     is_active?: boolean;
     metadata?: Record<string, unknown>;
-  }) => Promise<number | null>;
+  }, audit?: VaultRevisionAuditMeta) => Promise<number | null>;
   updateRule: (
     id: number,
     patch: {
@@ -97,9 +98,10 @@ export interface ActiveRuleStore {
       thread_id?: string | null;
       expires_at?: string | null;
       is_active?: boolean;
-    }
+    },
+    audit?: VaultRevisionAuditMeta,
   ) => Promise<boolean>;
-  deleteRule: (id: number) => Promise<boolean>;
+  deleteRule: (id: number, audit?: VaultRevisionAuditMeta) => Promise<boolean>;
 }
 
 export interface ExtractMemoriesOptions {
@@ -512,9 +514,9 @@ export interface ManageActiveRulesToolInput {
 
 const neonActiveRuleStore: ActiveRuleStore = {
   listRules: (limit = 100) => neonDb.getPersonaMemories(limit),
-  addRule: (rule) => neonDb.savePersonaMemory(rule),
-  updateRule: (id, patch) => neonDb.updatePersonaMemory(id, patch),
-  deleteRule: (id) => neonDb.deletePersonaMemory(id),
+  addRule: (rule, audit) => neonDb.savePersonaMemory(rule, audit),
+  updateRule: (id, patch, audit) => neonDb.updatePersonaMemory(id, patch, audit),
+  deleteRule: (id, audit) => neonDb.deletePersonaMemory(id, audit),
 };
 
 export async function executeManageActiveRules(
@@ -592,7 +594,10 @@ export async function executeManageActiveRules(
       };
     }
 
-    const ok = await store.deleteRule(target.id);
+    const ok = await store.deleteRule(target.id, {
+      operation: 'remove_rule',
+      reason: 'Deleted via manageActiveRules',
+    });
     if (!ok) {
       return {
         status: 'error',
@@ -667,7 +672,7 @@ export async function executeManageActiveRules(
       ...(threadId !== undefined ? { thread_id: threadId } : {}),
       ...(expiresAt !== undefined ? { expires_at: expiresAt } : {}),
       is_active: true,
-    });
+    }, { operation: 'update', reason: 'Updated via manageActiveRules' });
     if (!ok) {
       return {
         status: 'error',
@@ -898,6 +903,34 @@ class MemoryService {
   public async getLearnedPersonaContext(context: InstructionResolutionContext = {}): Promise<string> {
     const { promptBlock } = await this.resolveInstructionsForThread(context);
     return promptBlock;
+  }
+
+  public async getRuleHistory(ruleId: number, limit = 50): Promise<VaultRevisionRecord[]> {
+    if (!Number.isSafeInteger(ruleId) || ruleId < 1) {
+      throw new Error('INVALID_RULE_ID');
+    }
+    return await neonDb.getVaultRevisions('active_rule', ruleId, limit);
+  }
+
+  public async rollbackRule(
+    ruleId: number,
+    targetVersion: number,
+    opts?: { reason?: string; channel?: string },
+  ): Promise<{ revision: VaultRevisionRecord; restoredSnapshot: Record<string, unknown> }> {
+    if (!Number.isSafeInteger(ruleId) || ruleId < 1) {
+      throw new Error('INVALID_RULE_ID');
+    }
+    if (!Number.isSafeInteger(targetVersion) || targetVersion < 1) {
+      throw new Error('INVALID_TARGET_VERSION');
+    }
+    const res = await neonDb.rollbackVaultEntity('active_rule', ruleId, targetVersion, {
+      reason: opts?.reason,
+      channel: opts?.channel || 'web',
+    });
+    return {
+      revision: res.revision,
+      restoredSnapshot: res.restoredSnapshot as unknown as Record<string, unknown>,
+    };
   }
 }
 

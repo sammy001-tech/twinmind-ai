@@ -8,6 +8,7 @@ import type {
   MemoryLifecycleStatus,
   MemorySourceType,
 } from '../../src/types/index.ts';
+import type { VaultRevisionAuditMeta } from './vaultVersioningService.ts';
 
 export type VaultUpdateCategory =
   | 'personal_note'
@@ -60,7 +61,8 @@ export interface VaultMemoryStore {
       lastVerifiedAt?: string | null;
       lifecycleStatus?: MemoryLifecycleStatus;
       confidenceStatus?: MemoryConfidenceStatus;
-    }
+    },
+    audit?: VaultRevisionAuditMeta,
   ) => Promise<boolean>;
   addDocument: (params: {
     title: string;
@@ -72,8 +74,8 @@ export interface VaultMemoryStore {
     impactLevel?: MemoryImpactLevel;
     lifecycleStatus?: MemoryLifecycleStatus;
     lastVerifiedAt?: string | null;
-  }) => Promise<{ id: string | number; success: boolean; hasEmbedding?: boolean }>;
-  deleteDocument: (id: string | number) => Promise<boolean>;
+  }, audit?: VaultRevisionAuditMeta) => Promise<{ id: string | number; success: boolean; hasEmbedding?: boolean }>;
+  deleteDocument: (id: string | number, audit?: VaultRevisionAuditMeta) => Promise<boolean>;
 }
 
 const VALID_CATEGORIES: readonly VaultUpdateCategory[] = [
@@ -465,7 +467,10 @@ export async function executeVaultMemoryUpdate(
     }
 
     if (removal.remainingEmpty) {
-      const deletedOk = await store.deleteDocument(matchedDoc.id);
+      const deletedOk = await store.deleteDocument(matchedDoc.id, {
+        operation: 'retire',
+        reason: `Removed rule and retired empty record: ${input.memoryEntry}`,
+      });
       if (!deletedOk) {
         return {
           status: 'error',
@@ -498,10 +503,14 @@ export async function executeVaultMemoryUpdate(
       };
     }
 
-    const updatedOk = await store.updateDocument(matchedDoc.id, {
-      title: matchedDoc.title,
-      content: removal.updatedContent,
-    });
+    const updatedOk = await store.updateDocument(
+      matchedDoc.id,
+      {
+        title: matchedDoc.title,
+        content: removal.updatedContent,
+      },
+      { operation: 'remove_rule', reason: `Removed rule: ${input.memoryEntry}` },
+    );
 
     if (!updatedOk) {
       return {
@@ -545,13 +554,17 @@ export async function executeVaultMemoryUpdate(
     );
 
     if (!alreadyPresent) {
-      const updatedOk = await store.updateDocument(matchedDoc.id, {
-        title: matchedDoc.title,
-        content: updatedContent,
-        confidenceStatus: 'confirmed',
-        lifecycleStatus: 'active',
-        lastVerifiedAt: new Date().toISOString(),
-      });
+      const updatedOk = await store.updateDocument(
+        matchedDoc.id,
+        {
+          title: matchedDoc.title,
+          content: updatedContent,
+          confidenceStatus: 'confirmed',
+          lifecycleStatus: 'active',
+          lastVerifiedAt: new Date().toISOString(),
+        },
+        { operation: 'update', reason: `Added/updated rule: ${input.memoryEntry}` },
+      );
 
       if (!updatedOk) {
         return {
@@ -597,17 +610,20 @@ export async function executeVaultMemoryUpdate(
     };
   }
 
-  const created = await store.addDocument({
-    title: input.topic,
-    content: `- **Rule / Note (${dateStamp}):** ${input.memoryEntry}`,
-    category: input.category,
-    tags: extractSignificantTokens(input.topic).slice(0, 4),
-    sourceType: 'in_turn_synthesis',
-    confidenceStatus: 'confirmed',
-    impactLevel: inferImpactLevelFromCategory(input.category, input.tier),
-    lifecycleStatus: 'active',
-    lastVerifiedAt: new Date().toISOString(),
-  });
+  const created = await store.addDocument(
+    {
+      title: input.topic,
+      content: `- **Rule / Note (${dateStamp}):** ${input.memoryEntry}`,
+      category: input.category,
+      tags: extractSignificantTokens(input.topic).slice(0, 4),
+      sourceType: 'in_turn_synthesis',
+      confidenceStatus: 'confirmed',
+      impactLevel: inferImpactLevelFromCategory(input.category, input.tier),
+      lifecycleStatus: 'active',
+      lastVerifiedAt: new Date().toISOString(),
+    },
+    { operation: 'create', reason: `Created via Vault tool: ${input.topic}` },
+  );
 
   if (!created || !created.success || !created.id) {
     return {

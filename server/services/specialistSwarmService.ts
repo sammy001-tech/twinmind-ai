@@ -27,8 +27,15 @@ import {
   SwarmBudgetExceededError,
 } from '../utils/swarmResourceManager.ts';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import { artifactAccessService } from './artifactAccessService.ts';
-import { generateArtifactBuffer, normalizeArtifactFormat } from './artifactFormattingService.ts';
+import {
+  generateArtifactBuffer,
+  generateZipArtifactBundle,
+  normalizeArtifactFormat,
+  type BatchArtifactItemInput,
+  type ZipArtifactEntryMetadata,
+} from './artifactFormattingService.ts';
 import path from 'path';
 import { isArtifactGenerationRequest, resolveArtifactFormat } from '../utils/artifactFormat.ts';
 import { normalizeResearchExtractions, normalizeResearchSearchResults, normalizeResearchUrls, parseAdaptiveResearchPlan, parseInitialResearchPlan, inspectCitationReferences, resolveBoundedIntegerSetting, resolveResearchSearchDepth, type ResearchSource } from '../utils/researchEvidence.ts';
@@ -242,9 +249,9 @@ class SpecialistSwarmService {
     const extractLimit = resolveBoundedIntegerSetting(
       process.env,
       'TWINMIND_RESEARCH_EXTRACT_LIMIT',
-      5,
-      1,
       10,
+      1,
+      20,
     );
     const contentLimit = resolveBoundedIntegerSetting(
       process.env,
@@ -513,6 +520,105 @@ class SpecialistSwarmService {
     }
   }
 
+  /**
+   * Batch Artifact Architect Tool: Multi-file ZIP Archive Delivery with Verified Neon Persistence
+   */
+  public async executeGenerateArtifactBatch(
+    items: BatchArtifactItemInput[],
+    archiveFileName: string,
+    budget?: SwarmToolBudget,
+  ): Promise<{
+    status: 'success' | 'error';
+    url: string;
+    fileName: string;
+    displayName?: string;
+    type: 'zip';
+    mimeType?: string;
+    sizeBytes?: number;
+    generatedAt?: string;
+    validationStatus?: 'validated';
+    entries?: ZipArtifactEntryMetadata[];
+    error?: string;
+    durationMs: number;
+  }> {
+    const startTime = Date.now();
+    let finalFileName = '';
+    let artifactPersisted = false;
+
+    try {
+      if (budget) budget.claim('generateArtifactBatch', 1);
+
+      if (typeof archiveFileName !== 'string' || !archiveFileName.trim()) {
+        throw new Error('ARTIFACT_FILENAME_REQUIRED');
+      }
+      const suppliedName = archiveFileName.trim();
+      if (path.basename(suppliedName) !== suppliedName || suppliedName === '.' || suppliedName === '..') {
+        throw new Error('INVALID_ARTIFACT_FILENAME');
+      }
+      const withoutZip = suppliedName.replace(/\.zip$/i, '');
+      const safeStem = withoutZip.replace(/[^a-z0-9._-]/gi, '_').replace(/^[._-]+|[._-]+$/g, '');
+      if (!safeStem) throw new Error('INVALID_ARTIFACT_FILENAME');
+
+      const displayFileName = safeStem + '.zip';
+      const generated = await generateZipArtifactBundle(items, displayFileName);
+      finalFileName = Date.now() + '_' + randomUUID() + '_' + displayFileName;
+
+      // Fail closed before writing bytes if signing is unconfigured.
+      const downloadUrl = artifactAccessService.createSignedPath(finalFileName);
+
+      await neonDb.saveArtifact({
+        fileName: finalFileName,
+        displayName: displayFileName,
+        type: 'zip',
+        mimeType: generated.mimeType,
+        content: generated.buffer,
+        generatedAt: generated.generatedAt,
+      });
+      artifactPersisted = true;
+
+      const storedArtifact = await neonDb.getArtifactContent(finalFileName);
+      if (!storedArtifact) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: database did not return the persisted zip bundle');
+      }
+      if (storedArtifact.sizeBytes !== generated.buffer.length || !storedArtifact.content.equals(generated.buffer)) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted zip bundle bytes did not match generated output');
+      }
+      const zipCheck = await JSZip.loadAsync(storedArtifact.content);
+      const checkedEntries = Object.keys(zipCheck.files).filter((n) => !zipCheck.files[n].dir);
+      if (checkedEntries.length !== generated.entries.length) {
+        throw new Error('ARTIFACT_VALIDATION_FAILED: persisted zip bundle entry count mismatch');
+      }
+
+      return {
+        status: 'success',
+        url: downloadUrl,
+        fileName: finalFileName,
+        displayName: displayFileName,
+        type: 'zip',
+        mimeType: storedArtifact.mimeType,
+        sizeBytes: storedArtifact.sizeBytes,
+        generatedAt: storedArtifact.generatedAt,
+        validationStatus: 'validated',
+        entries: generated.entries,
+        durationMs: Date.now() - startTime,
+      };
+    } catch (err) {
+      if (artifactPersisted && finalFileName) {
+        try {
+          await neonDb.deleteArtifact(finalFileName);
+        } catch {}
+      }
+      return {
+        status: 'error',
+        url: '',
+        fileName: '',
+        type: 'zip',
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startTime,
+      };
+    }
+  }
+
 
 
   /**
@@ -652,7 +758,7 @@ class SpecialistSwarmService {
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_SEARCH_RESULT_LIMIT', 6, 1, 10);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_INITIAL_QUERY_LIMIT', 2, 0, 4);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_FOLLOW_UP_LIMIT', 2, 0, 4);
-    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_EXTRACT_LIMIT', 5, 1, 10);
+    resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_EXTRACT_LIMIT', 10, 1, 20);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_SOURCE_CONTENT_LIMIT', 12000, 1000, 30000);
     resolveBoundedIntegerSetting(process.env, 'TWINMIND_RESEARCH_REPORT_SOURCE_LIMIT', 8, 1, 20);
     resolveResearchSearchDepth(process.env);
@@ -1094,9 +1200,9 @@ class SpecialistSwarmService {
             const extractLimit = resolveBoundedIntegerSetting(
               process.env,
               'TWINMIND_RESEARCH_EXTRACT_LIMIT',
-              5,
-              1,
               10,
+              1,
+              20,
             );
             const sourcesToExtract = gatheredSources.slice(0, extractLimit);
             const requestedUrls = sourcesToExtract.map((source) => source.url);

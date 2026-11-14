@@ -1,8 +1,14 @@
 import { GoogleGenAI } from '@google/genai';
 import { settingsManager } from '../db/settingsService.ts';
-import { modelCatalogService } from './modelCatalogService.ts';
+import { modelCatalogService, type ProviderId } from './modelCatalogService.ts';
 import { callWithBoundedRetry } from '../utils/retryHelper.ts';
-import type { CommunicationStyleAnalysis, SentimentDataPoint, ToneBreakdown, TwinPersonaAdaptation, PerceivedTrait } from '../../src/types/index.ts';
+import type {
+  CommunicationStyleAnalysis,
+  SentimentDataPoint,
+  ToneBreakdown,
+  TwinPersonaAdaptation,
+  PerceivedTrait,
+} from '../../src/types/index.ts';
 
 interface RawMessage {
   role: string;
@@ -10,51 +16,109 @@ interface RawMessage {
   created_at?: string;
 }
 
+export interface AnalyzeStyleOptions {
+  provider?: string;
+  model?: string;
+  customGeminiKey?: string;
+  customGroqKey?: string;
+  customMistralKey?: string;
+  mode?: 'fast' | 'full';
+  signal?: AbortSignal;
+}
+
 class CommunicationStyleService {
-  private getAiClient(customKey?: string): GoogleGenAI | null {
+  private resolveProviderKey(
+    provider: ProviderId,
+    options: AnalyzeStyleOptions,
+  ): string {
     const s = settingsManager.getSettings();
-    const apiKey = customKey || s.customGeminiKey || process.env.GEMINI_API_KEY || '';
-    if (!apiKey) return null;
-    return new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build-communication-style',
-        },
-      },
-    });
+    const candidate = provider === 'gemini'
+      ? (options.customGeminiKey || s.customGeminiKey || process.env.GEMINI_API_KEY)
+      : provider === 'groq'
+        ? (options.customGroqKey || s.customGroqKey || process.env.GROQ_API_KEY)
+        : (options.customMistralKey || s.customMistralKey || process.env.MISTRAL_API_KEY);
+    if (!candidate || typeof candidate !== 'string') return '';
+    const trimmed = candidate.trim();
+    if (!trimmed || trimmed.includes('your_') || trimmed.includes('_here')) return '';
+    return trimmed;
+  }
+
+  private resolveActiveStyleProvider(options: AnalyzeStyleOptions): {
+    provider: ProviderId;
+    apiKey: string;
+    configuredModel: string;
+  } | null {
+    const s = settingsManager.getSettings();
+    const preferredOrder: ProviderId[] = [];
+    const candidateProvider = (options.provider || s.activeProvider || '').toLowerCase();
+    if (candidateProvider === 'gemini' || candidateProvider === 'groq' || candidateProvider === 'mistral') {
+      preferredOrder.push(candidateProvider);
+    }
+    for (const fallback of ['gemini', 'groq', 'mistral'] as const) {
+      if (!preferredOrder.includes(fallback)) preferredOrder.push(fallback);
+    }
+
+    for (const provider of preferredOrder) {
+      const apiKey = this.resolveProviderKey(provider, options);
+      if (!apiKey) continue;
+      const configuredModel =
+        (provider === candidateProvider && options.model) ||
+        s.providerModels?.[provider] ||
+        (s.activeProvider === provider ? s.activeModel : '') ||
+        '';
+      return { provider, apiKey, configuredModel };
+    }
+    return null;
   }
 
   /**
    * Deterministic NLP heuristic analyzer for user text messages.
-   * Derives real metrics when AI provider call is offline or unavailable.
+   * Derives real metrics dynamically with zero external latency when fast mode is selected
+   * or when no live provider is configured.
    */
-  private analyzeMessageHeuristically(text: string, index: number, timestamp: string): SentimentDataPoint {
+  public analyzeMessageHeuristically(text: string, index: number, timestamp: string): SentimentDataPoint {
     const lower = text.toLowerCase();
-    
+
     // Frustration signals
-    const frustKeywords = ['annoyed', 'frustrated', 'broken', 'error', 'wrong', 'hate', 'terrible', 'fail', 'stuck', 'issue', 'bad', 'angry', 'slow', 'doesnt work', "doesn't work", 'hardcoded', 'parch'];
+    const frustKeywords = [
+      'annoyed', 'frustrated', 'broken', 'error', 'wrong', 'hate', 'terrible',
+      'fail', 'stuck', 'issue', 'bad', 'angry', 'slow', 'doesnt work', "doesn't work",
+      'hardcoded', 'parch', 'bug', 'crash', 'useless',
+    ];
     const frustMatches = frustKeywords.filter((k) => lower.includes(k)).length;
     const exclamationCount = (text.match(/!/g) || []).length;
-    const angryEmojiCount = (text.match(/😠|😡|🤬|😒|😤|👿|👿|❌|💣/g) || []).length;
+    const angryEmojiCount = (text.match(/😠|😡|🤬|😒|😤|👿|❌|💣/g) || []).length;
 
     // Positive / Enthusiastic signals
-    const posKeywords = ['great', 'awesome', 'excellent', 'love', 'perfect', 'amazing', 'thanks', 'thank you', 'good', 'super', 'wonderful', 'nicely'];
+    const posKeywords = [
+      'great', 'awesome', 'excellent', 'love', 'perfect', 'amazing', 'thanks',
+      'thank you', 'good', 'super', 'wonderful', 'nicely', 'clean', 'helpful',
+    ];
     const posMatches = posKeywords.filter((k) => lower.includes(k)).length;
     const happyEmojiCount = (text.match(/😊|😄|🚀|❤️|👍|🎉|✨|🔥|👏/g) || []).length;
 
-    // Analytical / Technical signals
-    const techKeywords = ['architecture', 'vector', 'database', 'endpoint', 'schema', 'api', 'function', 'async', 'typescript', 'component', 'optimis', 'query', 'postgres', 'service', 'class'];
+    // Analytical / Technical / Deep Learning signals
+    const techKeywords = [
+      'architecture', 'vector', 'database', 'endpoint', 'schema', 'api', 'function',
+      'async', 'typescript', 'component', 'optimis', 'query', 'postgres', 'service',
+      'class', 'algorithm', 'benchmark', 'protocol', 'sql', 'graphql', 'ocr',
+    ];
     const techMatches = techKeywords.filter((k) => lower.includes(k)).length;
     const codeBlockCount = (text.match(/```/g) || []).length / 2;
     const questionMarkCount = (text.match(/\?/g) || []).length;
 
     // Urgency signals
-    const urgentKeywords = ['urgent', 'asap', 'immediately', 'now', 'quick', 'fast', 'fix', 'broken', 'critical', 'root', 'emergency'];
+    const urgentKeywords = [
+      'urgent', 'asap', 'immediately', 'now', 'quick', 'fast', 'fix',
+      'broken', 'critical', 'root', 'emergency', 'concise', 'brief',
+    ];
     const urgentMatches = urgentKeywords.filter((k) => lower.includes(k)).length;
 
     // Politeness / Formality
-    const formalKeywords = ['please', 'kindly', 'regards', 'ensure', 'appreciate', 'furthermore', 'accordingly', 'solution'];
+    const formalKeywords = [
+      'please', 'kindly', 'regards', 'ensure', 'appreciate', 'furthermore',
+      'accordingly', 'solution', 'explain', 'overview',
+    ];
     const formalMatches = formalKeywords.filter((k) => lower.includes(k)).length;
 
     let sentiment: SentimentDataPoint['sentiment'] = 'neutral';
@@ -73,15 +137,24 @@ class CommunicationStyleService {
       sentiment = 'analytical';
       score = 0.2;
       dominantEmotion = 'Technical & Analytical';
-    } else if (text.length < 30 && (exclamationCount > 0 || questionMarkCount > 0)) {
+    } else if (text.length < 40 && (exclamationCount > 0 || questionMarkCount > 0 || urgentMatches > 0)) {
       sentiment = 'direct';
-      score = -0.1;
+      score = -0.05;
       dominantEmotion = 'Direct & Concise Request';
     }
 
-    const urgency = Math.min(10, Math.round(urgentMatches * 3 + angryEmojiCount * 2 + exclamationCount * 1.5 + (sentiment === 'frustrated' ? 3 : 0)));
-    const formality = Math.min(10, Math.round(formalMatches * 2.5 + (techMatches > 0 ? 2 : 0) + (angryEmojiCount > 0 ? -2 : 1) + 4));
-    const technicalDepth = Math.min(10, Math.round(techMatches * 2.5 + codeBlockCount * 4 + (text.length > 200 ? 2 : 0)));
+    const urgency = Math.min(
+      10,
+      Math.round(urgentMatches * 3 + angryEmojiCount * 2 + exclamationCount * 1.5 + (sentiment === 'frustrated' ? 3 : 0)),
+    );
+    const formality = Math.min(
+      10,
+      Math.round(formalMatches * 2.5 + (techMatches > 0 ? 2 : 0) + (angryEmojiCount > 0 ? -2 : 1) + 4),
+    );
+    const technicalDepth = Math.min(
+      10,
+      Math.round(techMatches * 2.5 + codeBlockCount * 4 + (text.length > 200 ? 2 : 0)),
+    );
 
     return {
       messageIndex: index + 1,
@@ -96,12 +169,74 @@ class CommunicationStyleService {
     };
   }
 
+  private async runModelToneEvaluation(
+    provider: ProviderId,
+    model: string,
+    apiKey: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (provider === 'gemini') {
+      const aiClient = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: { 'User-Agent': 'aistudio-build-communication-style' },
+        },
+      });
+      const res = await callWithBoundedRetry(
+        () =>
+          aiClient.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.1,
+            },
+          }),
+        { operationName: `StyleAnalysis(${provider}:${model})`, maxRetries: 1, signal },
+      );
+      return res.text || '';
+    }
+
+    const endpoint = provider === 'groq'
+      ? 'https://api.groq.com/openai/v1/chat/completions'
+      : 'https://api.mistral.ai/v1/chat/completions';
+
+    const res = await callWithBoundedRetry(
+      async () => {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            response_format: { type: 'json_object' },
+          }),
+          signal,
+        });
+        if (!response.ok) {
+          const errText = await response.text().catch(() => '');
+          throw new Error(`${provider} API error (${response.status}): ${errText}`);
+        }
+        return await response.json();
+      },
+      { operationName: `StyleAnalysis(${provider}:${model})`, maxRetries: 1, signal },
+    );
+
+    return res.choices?.[0]?.message?.content || '';
+  }
+
   /**
-   * Main entry point to analyze user communication style over time.
+   * Analyze user communication style over time using either fast zero-latency deterministic NLP
+   * or live model evaluation dynamically routed through whichever provider (Gemini/Groq/Mistral) is configured.
    */
   public async analyzeCommunicationStyle(
     messages: RawMessage[],
-    options: { customGeminiKey?: string; signal?: AbortSignal } = {}
+    options: AnalyzeStyleOptions = {},
   ): Promise<CommunicationStyleAnalysis> {
     const userMessages = messages.filter((m) => m.role === 'user' && m.content && m.content.trim());
 
@@ -110,9 +245,7 @@ class CommunicationStyleService {
         totalAnalyzedMessages: 0,
         overallSentiment: 'Neutral & Observant',
         averageScore: 0.0,
-        toneBreakdown: [
-          { label: 'Neutral', percentage: 100, color: '#94a3b8' },
-        ],
+        toneBreakdown: [{ label: 'Neutral', percentage: 100, color: '#94a3b8' }],
         timeline: [],
         personaAdaptation: {
           activeToneMode: 'Balanced & Responsive',
@@ -128,35 +261,40 @@ class CommunicationStyleService {
           { trait: 'Concise', score: 50, description: 'Standard concise response pacing.' },
         ],
         keyEmotionalInsights: ['Awaiting initial user input to calibrate emotional resonance.'],
+        analysisSource: 'deterministic_heuristic',
       };
     }
 
-    // Try AI model analysis if key available
-    const aiClient = this.getAiClient(options.customGeminiKey);
+    const mode = options.mode || 'full';
     let aiTimeline: SentimentDataPoint[] | null = null;
     let aiPersona: TwinPersonaAdaptation | null = null;
     let aiInsights: string[] | null = null;
+    let analysisSource: 'live_model' | 'deterministic_heuristic' = 'deterministic_heuristic';
+    let analyzedProvider: string | undefined;
+    let analyzedModel: string | undefined;
 
-    if (aiClient) {
-      try {
-        const geminiModel = await modelCatalogService.resolveModelForProvider(
-          'gemini',
-          settingsManager.getSettings().providerModels.gemini,
-          options.customGeminiKey
-        );
+    if (mode === 'full') {
+      const activeTarget = this.resolveActiveStyleProvider(options);
+      if (activeTarget) {
+        try {
+          const liveModel = await modelCatalogService.resolveModelForProvider(
+            activeTarget.provider,
+            activeTarget.configuredModel,
+            activeTarget.apiKey,
+          );
 
-        if (geminiModel) {
-          const sampleMessages = userMessages.slice(-15).map((m, idx) => ({
-            index: idx + 1,
-            time: m.created_at || new Date().toISOString(),
-            content: m.content.slice(0, 300),
-          }));
+          if (liveModel) {
+            const sampleMessages = userMessages.slice(-15).map((m, idx) => ({
+              index: idx + 1,
+              time: m.created_at || new Date().toISOString(),
+              content: m.content.slice(0, 300),
+            }));
 
-          const prompt = `You are an expert psycholinguist analyzing user communication style in an AI assistant chat.
+            const prompt = `You are an expert psycholinguist analyzing user communication style in an AI assistant chat.
 Analyze the following user messages chronologically:
 ${JSON.stringify(sampleMessages, null, 2)}
 
-Return a JSON object matching this exact schema:
+Return ONLY a valid JSON object matching this exact schema:
 {
   "timeline": [
     {
@@ -167,12 +305,12 @@ Return a JSON object matching this exact schema:
       "urgency": number 0 to 10,
       "formality": number 0 to 10,
       "technicalDepth": number 0 to 10,
-      "dominantEmotion": "string (e.g., Frustrated, Analytical, Enthusiastic)"
+      "dominantEmotion": "string"
     }
   ],
   "overallSentiment": "string description",
   "personaAdaptation": {
-    "activeToneMode": "string (e.g., Root-Cause Diagnostic & High Transparency)",
+    "activeToneMode": "string",
     "recommendedPacing": "concise_fast" | "balanced" | "empathetic_thorough" | "deep_technical",
     "empathyLevel": number 0 to 100,
     "formalityTarget": number 0 to 100,
@@ -182,68 +320,65 @@ Return a JSON object matching this exact schema:
   "keyEmotionalInsights": ["insight 1", "insight 2"]
 }`;
 
-          const res = await callWithBoundedRetry(
-            async () => {
-              return await aiClient.models.generateContent({
-                model: geminiModel,
-                contents: prompt,
-                config: {
-                  responseMimeType: 'application/json',
-                },
-              });
-            },
-            { maxRetries: 1, signal: options.signal }
-          );
+            const rawJson = await this.runModelToneEvaluation(
+              activeTarget.provider,
+              liveModel,
+              activeTarget.apiKey,
+              prompt,
+              options.signal,
+            );
 
-          if (res.text) {
-            const parsed = JSON.parse(res.text);
-            if (Array.isArray(parsed.timeline) && parsed.timeline.length > 0) {
-              aiTimeline = parsed.timeline.map((item: any, i: number) => ({
-                messageIndex: i + 1,
-                timestamp: userMessages[i]?.created_at || new Date().toISOString(),
-                userSnippet: item.userSnippet || userMessages[i]?.content?.slice(0, 100) || '',
-                sentiment: ['positive', 'neutral', 'analytical', 'frustrated', 'enthusiastic', 'direct'].includes(item.sentiment)
-                  ? item.sentiment
-                  : 'neutral',
-                score: typeof item.score === 'number' ? item.score : 0,
-                urgency: typeof item.urgency === 'number' ? item.urgency : 5,
-                formality: typeof item.formality === 'number' ? item.formality : 5,
-                technicalDepth: typeof item.technicalDepth === 'number' ? item.technicalDepth : 5,
-                dominantEmotion: item.dominantEmotion || 'Neutral',
-              }));
-              if (parsed.personaAdaptation) {
-                aiPersona = {
-                  activeToneMode: parsed.personaAdaptation.activeToneMode || 'Root-Cause & Transparent',
-                  recommendedPacing: parsed.personaAdaptation.recommendedPacing || 'balanced',
-                  empathyLevel: parsed.personaAdaptation.empathyLevel ?? 60,
-                  formalityTarget: parsed.personaAdaptation.formalityTarget ?? 50,
-                  adaptedBehaviors: Array.isArray(parsed.personaAdaptation.adaptedBehaviors)
-                    ? parsed.personaAdaptation.adaptedBehaviors
-                    : ['Provide transparent explanations', 'Focus on root-cause fixes'],
-                  explanation: parsed.personaAdaptation.explanation || 'Persona tuned dynamically to user emotional state.',
-                };
-              }
-              if (Array.isArray(parsed.keyEmotionalInsights)) {
-                aiInsights = parsed.keyEmotionalInsights;
+            if (rawJson) {
+              const parsed = JSON.parse(rawJson);
+              if (Array.isArray(parsed.timeline) && parsed.timeline.length > 0) {
+                analysisSource = 'live_model';
+                analyzedProvider = activeTarget.provider;
+                analyzedModel = liveModel;
+                aiTimeline = parsed.timeline.map((item: any, i: number) => ({
+                  messageIndex: i + 1,
+                  timestamp: userMessages[i]?.created_at || new Date().toISOString(),
+                  userSnippet: item.userSnippet || userMessages[i]?.content?.slice(0, 100) || '',
+                  sentiment: ['positive', 'neutral', 'analytical', 'frustrated', 'enthusiastic', 'direct'].includes(item.sentiment)
+                    ? item.sentiment
+                    : 'neutral',
+                  score: typeof item.score === 'number' ? item.score : 0,
+                  urgency: typeof item.urgency === 'number' ? item.urgency : 5,
+                  formality: typeof item.formality === 'number' ? item.formality : 5,
+                  technicalDepth: typeof item.technicalDepth === 'number' ? item.technicalDepth : 5,
+                  dominantEmotion: item.dominantEmotion || 'Neutral',
+                }));
+                if (parsed.personaAdaptation) {
+                  aiPersona = {
+                    activeToneMode: parsed.personaAdaptation.activeToneMode || 'Root-Cause & Transparent',
+                    recommendedPacing: parsed.personaAdaptation.recommendedPacing || 'balanced',
+                    empathyLevel: parsed.personaAdaptation.empathyLevel ?? 60,
+                    formalityTarget: parsed.personaAdaptation.formalityTarget ?? 50,
+                    adaptedBehaviors: Array.isArray(parsed.personaAdaptation.adaptedBehaviors)
+                      ? parsed.personaAdaptation.adaptedBehaviors
+                      : ['Provide transparent explanations', 'Focus on root-cause fixes'],
+                    explanation: parsed.personaAdaptation.explanation || 'Persona tuned dynamically to user emotional state.',
+                  };
+                }
+                if (Array.isArray(parsed.keyEmotionalInsights)) {
+                  aiInsights = parsed.keyEmotionalInsights;
+                }
               }
             }
           }
+        } catch (err) {
+          console.warn('[CommunicationStyleService] Live model evaluation fell back to deterministic NLP:', err);
         }
-      } catch (err) {
-        console.warn('[CommunicationStyleService] AI evaluation fallback to deterministic NLP:', err);
       }
     }
 
-    // Fallback / Deterministic calculation if AI timeline was not produced
     const timeline: SentimentDataPoint[] = aiTimeline || userMessages.map((msg, i) =>
       this.analyzeMessageHeuristically(
         msg.content,
         i,
-        msg.created_at || new Date().toISOString()
-      )
+        msg.created_at || new Date().toISOString(),
+      ),
     );
 
-    // Compute dynamic aggregate metrics
     const totalScore = timeline.reduce((acc, curr) => acc + curr.score, 0);
     const avgScore = Number((totalScore / timeline.length).toFixed(2));
 
@@ -267,31 +402,32 @@ Return a JSON object matching this exact schema:
       color: COLOR_MAP[label] || '#94a3b8',
     }));
 
-    // Dynamic Overall Sentiment Label
     let overallSentiment = 'Balanced & Collaborative';
     if (avgScore < -0.3) overallSentiment = 'Critique-Focused & Urgent';
     else if (avgScore > 0.4) overallSentiment = 'Enthusiastic & High-Satisfaction';
     else if (sentimentCounts['frustrated'] > 0) overallSentiment = 'Demanding Root-Cause Directness';
     else if (sentimentCounts['analytical'] > 0) overallSentiment = 'Deeply Analytical & Technical';
+    else if (sentimentCounts['direct'] > 0) overallSentiment = 'Direct & Action-Oriented';
 
-    // Persona Adaptation computation if AI persona was not returned
     let personaAdaptation: TwinPersonaAdaptation = aiPersona || {
-      activeToneMode: 'Direct, Root-Cause & Transparent',
-      recommendedPacing: 'concise_fast',
-      empathyLevel: 75,
-      formalityTarget: 40,
+      activeToneMode: 'Balanced, Clear & Evidence-Led',
+      recommendedPacing: 'balanced',
+      empathyLevel: 60,
+      formalityTarget: 55,
       adaptedBehaviors: [
-        'Acknowledge friction immediately without robotic pleasantries',
-        'Prioritize zero-patch, root-cause code verification',
-        'Keep technical explanations crisp, authoritative, and direct',
+        'Match complexity proportionally to the question',
+        'Keep formatting scannable without unnecessary preamble',
+        'Cite verified evidence transparently when tools run',
       ],
-      explanation: 'User exhibits high directness and frustration with build errors. Persona adapted to emphasize root-cause technical resolution with zero fluff.',
+      explanation: 'Balanced communication profile calibrated dynamically from conversational turns.',
     };
 
     if (!aiPersona) {
+      const avgUrgencyCheck = timeline.length > 0 ? timeline.reduce((acc, t) => acc + t.urgency, 0) / timeline.length : 0;
       const isFrustrated = (sentimentCounts['frustrated'] || 0) > 0 || avgScore < -0.2;
       const isAnalytical = (sentimentCounts['analytical'] || 0) > 0;
       const isEnthusiastic = (sentimentCounts['enthusiastic'] || 0) > 0;
+      const isDirectUrgent = !isFrustrated && (avgUrgencyCheck >= 4 || (sentimentCounts['direct'] || 0) > timeline.length * 0.5);
 
       if (isFrustrated) {
         personaAdaptation = {
@@ -306,6 +442,18 @@ Return a JSON object matching this exact schema:
           ],
           explanation: 'User expects immediate, non-patch root-cause resolution for issues.',
         };
+      } else if (isDirectUrgent) {
+        personaAdaptation = {
+          activeToneMode: 'High-Velocity Operational Directness',
+          recommendedPacing: 'concise_fast',
+          empathyLevel: 50,
+          formalityTarget: 45,
+          adaptedBehaviors: [
+            'Lead immediately with the bottom-line answer and actionable step',
+            'Skip introductory filler and background recap unless asked',
+          ],
+          explanation: 'User inputs reflect high urgency or direct command phrasing requiring fast turnaround.',
+        };
       } else if (isAnalytical) {
         personaAdaptation = {
           activeToneMode: 'Empirical, Structural & Architectural',
@@ -314,8 +462,8 @@ Return a JSON object matching this exact schema:
           formalityTarget: 70,
           adaptedBehaviors: [
             'Provide explicit schema definitions and data flow breakdowns',
-            'Expose architectural rationale alongside code changes',
-            'Use precise technical terminology without simplification',
+            'Expose architectural rationale alongside code or analysis',
+            'Use precise technical terminology without oversimplification',
           ],
           explanation: 'User engages heavily with architectural concepts and technical precision.',
         };
@@ -335,7 +483,6 @@ Return a JSON object matching this exact schema:
       }
     }
 
-    // Calculate Twin's current perceived persona traits based on analyzed chat history
     const avgTechDepth = timeline.length > 0 ? timeline.reduce((acc, t) => acc + t.technicalDepth, 0) / timeline.length : 5;
     const avgUrgency = timeline.length > 0 ? timeline.reduce((acc, t) => acc + t.urgency, 0) / timeline.length : 5;
     const avgFormality = timeline.length > 0 ? timeline.reduce((acc, t) => acc + t.formality, 0) / timeline.length : 5;
@@ -375,7 +522,6 @@ Return a JSON object matching this exact schema:
 
     personaAdaptation.perceivedTraits = perceivedTraits;
 
-    // Insights
     const keyEmotionalInsights: string[] = aiInsights || [
       `Analyzed ${timeline.length} recent user turns: average sentiment score is ${avgScore > 0 ? '+' : ''}${avgScore}.`,
       `Dominant style profile: ${toneBreakdown[0]?.label || 'Neutral'} (${toneBreakdown[0]?.percentage || 100}% of messages).`,
@@ -391,11 +537,14 @@ Return a JSON object matching this exact schema:
       personaAdaptation,
       perceivedTraits,
       keyEmotionalInsights,
+      analysisSource,
+      ...(analyzedProvider ? { analyzedProvider } : {}),
+      ...(analyzedModel ? { analyzedModel } : {}),
     };
   }
 
   /**
-   * Generates system prompt instruction directive for TwinAgent execution
+   * Generates system prompt instruction directive for TwinAgent execution.
    */
   public getPersonaPromptDirective(analysis: CommunicationStyleAnalysis): string {
     if (analysis.totalAnalyzedMessages === 0) return '';

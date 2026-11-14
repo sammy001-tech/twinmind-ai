@@ -18,6 +18,7 @@ import type {
   MemorySourceType,
   RetrievedMemoryDiagnostic,
 } from '../../src/types/index.ts';
+import type { VaultRevisionAuditMeta, VaultRevisionRecord } from '../services/vaultVersioningService.ts';
 
 export interface KnowledgeDoc {
   id: string | number;
@@ -106,7 +107,7 @@ class KnowledgeService {
     validFrom?: string | null;
     validUntil?: string | null;
     lastVerifiedAt?: string | null;
-  }): Promise<{ id: string | number; success: boolean; hasEmbedding: boolean }> {
+  }, audit?: VaultRevisionAuditMeta): Promise<{ id: string | number; success: boolean; hasEmbedding: boolean }> {
     const {
       title,
       content,
@@ -141,7 +142,7 @@ class KnowledgeService {
         validFrom,
         validUntil,
         lastVerifiedAt,
-      });
+      }, audit);
       return {
         id: neonRes.id,
         success: neonRes.success,
@@ -292,7 +293,8 @@ class KnowledgeService {
       supersededById?: number | string | null;
       validUntil?: string | null;
       lastVerifiedAt?: string | null;
-    }
+    },
+    audit?: VaultRevisionAuditMeta,
   ): Promise<boolean> {
     let embedding: number[] | undefined;
     if (patch.title || patch.content) {
@@ -304,7 +306,7 @@ class KnowledgeService {
     return await neonDb.updateKnowledge(id, {
       ...patch,
       embedding: embedding && embedding.length > 0 ? embedding : undefined,
-    });
+    }, audit);
   }
 
   /**
@@ -341,11 +343,11 @@ class KnowledgeService {
         lifecycleStatus: 'superseded',
         supersededById: newDoc.id,
         validUntil: new Date().toISOString(),
-      });
+      }, { operation: 'supersede', reason: decision.reason });
       const okNew = await neonDb.updateKnowledge(newDoc.id, {
         lifecycleStatus: 'active',
         lastVerifiedAt: new Date().toISOString(),
-      });
+      }, { operation: 'supersede', reason: decision.reason });
       return {
         success: okOld && okNew,
         action: decision.action,
@@ -353,8 +355,8 @@ class KnowledgeService {
       };
     }
 
-    const okOld = await neonDb.updateKnowledge(oldDoc.id, { lifecycleStatus: 'conflicted' });
-    const okNew = await neonDb.updateKnowledge(newDoc.id, { lifecycleStatus: 'conflicted' });
+    const okOld = await neonDb.updateKnowledge(oldDoc.id, { lifecycleStatus: 'conflicted' }, { operation: 'update', reason: decision.reason });
+    const okNew = await neonDb.updateKnowledge(newDoc.id, { lifecycleStatus: 'conflicted' }, { operation: 'update', reason: decision.reason });
     return {
       success: okOld && okNew,
       action: decision.action,
@@ -444,10 +446,53 @@ class KnowledgeService {
   }
 
   /**
-   * Delete document by ID
+   * Retrieve version history and diff log for a knowledge document
    */
-  public async deleteDocument(id: string | number): Promise<boolean> {
-    return await neonDb.deleteKnowledge(id);
+  public async getDocumentHistory(id: string | number, limit = 50): Promise<VaultRevisionRecord[]> {
+    const numId = Number(id);
+    if (!Number.isSafeInteger(numId) || numId < 1) {
+      throw new Error('INVALID_DOCUMENT_ID');
+    }
+    return await neonDb.getVaultRevisions('knowledge_doc', numId, limit);
+  }
+
+  /**
+   * Roll back a knowledge document to a historical version while preserving full commit history
+   */
+  public async rollbackDocument(
+    id: string | number,
+    targetVersion: number,
+    opts?: { reason?: string; channel?: string },
+  ): Promise<{ revision: VaultRevisionRecord; restoredSnapshot: Record<string, unknown> }> {
+    const numId = Number(id);
+    if (!Number.isSafeInteger(numId) || numId < 1) {
+      throw new Error('INVALID_DOCUMENT_ID');
+    }
+    if (!Number.isSafeInteger(targetVersion) || targetVersion < 1) {
+      throw new Error('INVALID_TARGET_VERSION');
+    }
+    const targetRev = await neonDb.getVaultRevisionByVersion('knowledge_doc', numId, targetVersion);
+    if (!targetRev) {
+      throw new Error(`REVISION_NOT_FOUND: Version v${targetVersion} was not found for document #${numId}.`);
+    }
+    const embedInput = `${targetRev.snapshot.title || ''}\n\n${targetRev.snapshot.content || ''}`.trim();
+    const embedding = embedInput ? await this.generateEmbedding(embedInput) : [];
+    const res = await neonDb.rollbackVaultEntity('knowledge_doc', numId, targetVersion, {
+      reason: opts?.reason,
+      channel: opts?.channel || 'web',
+      embedding: embedding.length > 0 ? embedding : undefined,
+    });
+    return {
+      revision: res.revision,
+      restoredSnapshot: res.restoredSnapshot as unknown as Record<string, unknown>,
+    };
+  }
+
+  /**
+   * Delete document by ID (records durable retire revision)
+   */
+  public async deleteDocument(id: string | number, audit?: VaultRevisionAuditMeta): Promise<boolean> {
+    return await neonDb.deleteKnowledge(id, audit);
   }
 
   /**
